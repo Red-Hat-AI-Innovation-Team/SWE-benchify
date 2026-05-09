@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "swebenchify"
+version = "0.1.0"
+description = "Transform GitHub repositories into SWE-bench-compatible benchmarks"
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml",
+    "requests",
+    "unidiff",
+    "ghapi",
+    "claude-code-sdk",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[project.scripts]
+swebenchify = "swebenchify.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
