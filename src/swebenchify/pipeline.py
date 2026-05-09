@@ -19,6 +19,7 @@ from swebenchify.emitter import emit_dataset
 from swebenchify.extractor import extract_all, load_candidates, save_candidates
 from swebenchify.filters import apply_filters
 from swebenchify.models import Repository, TaskInstance
+from swebenchify.sandbox import SandboxConfig, is_docker_available
 from swebenchify.validator import validate_instances
 from swebenchify.workspace import WorkspaceManager
 
@@ -27,6 +28,23 @@ logger = logging.getLogger(__name__)
 
 async def run_pipeline(config: Config, resume: bool = False) -> None:
     """Run the full SWE-benchify pipeline for all configured repos."""
+    # Initialise sandbox configuration from agent settings.
+    sandbox = SandboxConfig(
+        enabled=(config.agent.sandbox == "docker"),
+        docker_image=config.agent.docker_image,
+    )
+    if sandbox.enabled:
+        if is_docker_available():
+            logger.info(
+                "Docker sandboxing enabled (image: %s)", sandbox.docker_image
+            )
+        else:
+            logger.warning(
+                "Docker sandboxing requested but Docker is not available. "
+                "Falling back to local execution."
+            )
+            sandbox = SandboxConfig(enabled=False)
+
     workspace_mgr = WorkspaceManager(config.output.dir + "/workspaces")
     cost_tracker = CostTracker()
 

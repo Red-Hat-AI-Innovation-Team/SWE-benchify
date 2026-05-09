@@ -27,6 +27,8 @@ class AgentConfig:
     """Configuration for the agent dispatcher."""
 
     max_attempts: int = 3
+    sandbox: str = "local"  # "local" or "docker"
+    docker_image: str = "python:3.11-slim"  # base image for docker sandbox
     env_discovery: AgentStageConfig = field(
         default_factory=lambda: AgentStageConfig()
     )
@@ -116,6 +118,8 @@ def _build_agent_config(data: dict | None) -> AgentConfig:
         return AgentConfig()
     return AgentConfig(
         max_attempts=data.get("max_attempts", AgentConfig.max_attempts),
+        sandbox=data.get("sandbox", AgentConfig.sandbox),
+        docker_image=data.get("docker_image", AgentConfig.docker_image),
         env_discovery=_build_agent_stage_config(data.get("env_discovery")),
         validation=_build_agent_stage_config(
             data.get("validation")
