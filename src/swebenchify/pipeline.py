@@ -18,9 +18,10 @@ from swebenchify.dispatcher import CostTracker
 from swebenchify.emitter import emit_dataset
 from swebenchify.extractor import extract_all, load_candidates, save_candidates
 from swebenchify.filters import apply_filters
-from swebenchify.models import Repository, TaskInstance
+from swebenchify.models import EnvironmentSpec, Repository, TaskInstance
 from swebenchify.sandbox import SandboxConfig, is_docker_available
 from swebenchify.validator import validate_instances
+from swebenchify.versioning import detect_version
 from swebenchify.workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
@@ -126,35 +127,47 @@ async def run_repo_pipeline(
         logger.warning("No viable candidates for %s", repo.full_name)
         return
 
-    # Stage 3: Environment Discovery
+    # Stage 3: Environment Discovery (per-version)
     logger.info("Stage 3: Discovering environment for %s", repo.full_name)
 
-    # Use first viable candidate's base_commit for env discovery
-    sample_commit = viable[0].base_commit
-    env_spec, repo_version = await discover_environment(
-        repo=repo,
-        commit=sample_commit,
-        version="default",
-        workspace_mgr=workspace_mgr,
-        cost_tracker=cost_tracker,
-        max_attempts=config.agent.max_attempts,
-        max_turns=config.agent.env_discovery.max_turns,
-        budget_usd=config.agent.env_discovery.budget_usd,
-    )
+    # Ensure bare clone exists before version detection
+    workspace_mgr.ensure_bare_clone(repo)
+    bare_clone = workspace_mgr.bare_clone_path(repo)
+    instance_versions: dict[str, str] = {}
+    version_commits: dict[str, str] = {}  # version -> representative commit
+    for c in viable:
+        v = detect_version(str(bare_clone), c.base_commit) or "unknown"
+        instance_versions[c.instance_id] = v
+        if v not in version_commits:
+            version_commits[v] = c.base_commit
 
-    if env_spec is None:
-        logger.error(
-            "Environment discovery failed for %s", repo.full_name
+    logger.info(f"  Detected {len(version_commits)} unique version(s): {list(version_commits.keys())}")
+
+    # Discover environment for each unique version
+    env_specs: dict[str, EnvironmentSpec] = {}
+    for version, commit in version_commits.items():
+        env_spec, repo_version = await discover_environment(
+            repo=repo,
+            commit=commit,
+            version=version,
+            workspace_mgr=workspace_mgr,
+            cost_tracker=cost_tracker,
+            max_attempts=config.agent.max_attempts,
+            max_turns=config.agent.env_discovery.max_turns,
+            budget_usd=config.agent.env_discovery.budget_usd,
         )
+        if env_spec:
+            env_specs[version] = env_spec
+            logger.info(f"  v{version}: {env_spec.language} {env_spec.language_version}, test: {env_spec.test_cmd}")
+        else:
+            logger.warning(f"  v{version}: env discovery failed, skipping instances at this version")
+
+    if not env_specs:
+        logger.error(f"No environments discovered for {repo.full_name}")
         return
 
-    version = repo_version.version if repo_version else "unknown"
-    logger.info(
-        "  Environment discovered: %s %s, test: %s",
-        env_spec.language,
-        env_spec.language_version,
-        env_spec.test_cmd,
-    )
+    # Filter viable to only versions with env specs
+    viable = [c for c in viable if instance_versions.get(c.instance_id) in env_specs]
 
     # Stage 4: Instance Validation
     logger.info(
@@ -162,8 +175,6 @@ async def run_repo_pipeline(
         len(viable),
         repo.full_name,
     )
-    env_specs = {version: env_spec}
-    instance_versions = {c.instance_id: version for c in viable}
 
     validation_results = await validate_instances(
         candidates=viable,
@@ -183,6 +194,7 @@ async def run_repo_pipeline(
     for candidate in viable:
         vr = validation_results.get(candidate.instance_id)
         if vr and vr.status == "valid":
+            version = instance_versions.get(candidate.instance_id, "unknown")
             task_instances.append(
                 TaskInstance(
                     repo=candidate.repo,

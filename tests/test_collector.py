@@ -79,6 +79,15 @@ class TestExtractResolvedIssues:
         result = extract_resolved_issues("fixes #1 and closes 2")
         assert result == [1, 2]
 
+    def test_commit_message_multiline(self) -> None:
+        """Issue references in multi-line commit messages should be found."""
+        msg = "Refactor auth module\n\nFixes #301\nAlso resolves #302"
+        assert extract_resolved_issues(msg) == [301, 302]
+
+    def test_commit_message_single_line(self) -> None:
+        """A single-line commit message with a keyword should match."""
+        assert extract_resolved_issues("closes #88 -- quick patch") == [88]
+
 
 class TestPRJsonlRoundTrip:
     """Test JSONL serialization and deserialization of CandidatePR."""
@@ -150,3 +159,24 @@ class TestPRJsonlRoundTrip:
         save_prs([], path)
         loaded = load_prs(path)
         assert loaded == []
+
+    def test_round_trip_merge_base_commit(self, tmp_path: Path) -> None:
+        """base_commit derived from merge commit parent survives round-trip."""
+        pr = CandidatePR(
+            repo="owner/repo",
+            pr_number=42,
+            title="Fix bug",
+            body="Fixes #10",
+            base_commit="parent_sha_of_merge",
+            merge_commit="merge_sha_abc",
+            diff_url="https://github.com/owner/repo/pull/42.diff",
+            resolved_issues=[10],
+            created_at="2025-03-01T00:00:00Z",
+            merged_at="2025-03-02T00:00:00Z",
+        )
+        path = str(tmp_path / "merge_base.jsonl")
+        save_prs([pr], path)
+        loaded = load_prs(path)
+        assert len(loaded) == 1
+        assert loaded[0].base_commit == "parent_sha_of_merge"
+        assert loaded[0].merge_commit == "merge_sha_abc"

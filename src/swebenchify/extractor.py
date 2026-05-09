@@ -50,12 +50,17 @@ def is_test_file(path: str) -> bool:
     Returns:
         True if the file is a test file.
     """
-    parts = path.replace("\\", "/").split("/")
+    normalized = path.replace("\\", "/")
+    parts = normalized.split("/")
 
     # Check directory components
     for part in parts:
         if part.lower() in _TEST_DIR_NAMES:
             return True
+
+    # Also catch Java convention: src/test/...
+    if normalized.startswith("src/test/") or "/src/test/" in normalized:
+        return True
 
     # Check basename against patterns
     basename = parts[-1] if parts else ""

@@ -67,6 +67,12 @@ class TestIsTestFile:
         # 'testing_utils' as a component won't match 'testing'
         assert is_test_file("testing_utils/helper.py") is False
 
+    def test_java_src_test_directory(self) -> None:
+        assert is_test_file("src/test/java/com/example/FooTest.java") is True
+
+    def test_java_src_main_directory(self) -> None:
+        assert is_test_file("src/main/java/com/example/Foo.java") is False
+
 
 class TestSplitPatch:
     """Test splitting a unified diff into gold and test patches."""

@@ -1,0 +1,11 @@
+repos:
+  - pallets/flask
+
+github:
+  token: $GITHUB_TOKEN
+
+pipeline:
+  max_prs_per_repo: 50
+
+output:
+  dir: ./output

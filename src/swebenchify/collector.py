@@ -180,18 +180,28 @@ def collect_prs(
             resolved = set(extract_resolved_issues(title))
             resolved.update(extract_resolved_issues(body))
 
-            # Also check commit messages
-            commits = _fetch_pr_commits(owner, name, pr_number, headers)
-            for commit in commits:
-                msg = commit.get("commit", {}).get("message", "")
-                resolved.update(extract_resolved_issues(msg))
+            # Only fetch commit messages if no issues found in title/body
+            if not resolved:
+                commits = _fetch_pr_commits(owner, name, pr_number, headers)
+                for commit in commits:
+                    msg = commit.get("commit", {}).get("message", "")
+                    resolved.update(extract_resolved_issues(msg))
 
             if not resolved:
                 continue
 
-            # Build the CandidatePR
-            base_sha = pr.get("base", {}).get("sha", "")
+            # Get the actual base commit (first parent of merge commit)
             merge_commit_sha = pr.get("merge_commit_sha") or ""
+            base_sha = merge_commit_sha  # fallback
+            if merge_commit_sha:
+                commit_resp = _github_get(
+                    f"{_GITHUB_API_BASE}/repos/{owner}/{name}/git/commits/{merge_commit_sha}",
+                    headers,
+                )
+                if commit_resp and commit_resp.status_code == 200:
+                    parents = commit_resp.json().get("parents", [])
+                    if parents:
+                        base_sha = parents[0]["sha"]
             diff_url = pr.get("diff_url") or f"https://github.com/{owner}/{name}/pull/{pr_number}.diff"
 
             candidate = CandidatePR(
