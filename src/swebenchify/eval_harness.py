@@ -80,6 +80,18 @@ async def eval_instance(
     inst_dir.mkdir(parents=True, exist_ok=True)
     workspace_mgr.create_worktree(repo, instance.base_commit, worktree)
 
+    # Set up the environment so tests can run
+    for pre_cmd in env_spec.pre_install:
+        subprocess.run(pre_cmd, shell=True, cwd=str(worktree),
+                       capture_output=True, text=True, timeout=120)
+    install_result = subprocess.run(
+        env_spec.install_cmd, shell=True, cwd=str(worktree),
+        capture_output=True, text=True, timeout=300,
+    )
+    if install_result.returncode != 0:
+        logger.warning("Install failed for %s (may still work): %s",
+                       instance.instance_id, install_result.stderr[-200:])
+
     # Apply test_patch so the failing tests exist
     test_patch_file = inst_dir / "test.patch"
     test_patch_file.write_text(instance.test_patch)
@@ -155,30 +167,37 @@ async def eval_instance(
             "eval", repo.full_name, solve_result, instance_id=instance.instance_id
         )
 
-    # Step 2: Verify — run tests directly via subprocess (more reliable than
-    # dispatching a second agent) and check FAIL_TO_PASS
+    # Step 2: Verify — run each FAIL_TO_PASS test individually and check result
     tests_passed: list[str] = []
     tests_failed: list[str] = []
 
-    try:
-        test_proc = subprocess.run(
-            env_spec.test_cmd, shell=True,
-            cwd=str(worktree), capture_output=True, text=True, timeout=300,
-        )
-        test_output = test_proc.stdout + "\n" + test_proc.stderr
+    # Re-install in case the agent changed dependencies
+    subprocess.run(env_spec.install_cmd, shell=True, cwd=str(worktree),
+                   capture_output=True, text=True, timeout=300)
 
-        for test_id in f2p_tests:
-            if test_id in test_output and "PASSED" in test_output.split(test_id)[-1][:200]:
-                tests_passed.append(test_id)
-            elif test_proc.returncode == 0:
+    for test_id in f2p_tests:
+        try:
+            # Run the specific test by appending the test ID to the base command
+            # pytest accepts test IDs directly; other frameworks may need adaptation
+            base_cmd = env_spec.test_cmd.split()[0]  # e.g., "python" or "PYTHONPATH=."
+            test_cmd = f"{env_spec.test_cmd} {test_id}" if "::" in test_id else env_spec.test_cmd
+            # For pytest-style test IDs, run them directly
+            if "::" in test_id:
+                test_cmd = f"python -m pytest {test_id} -x -q"
+            test_proc = subprocess.run(
+                test_cmd, shell=True, cwd=str(worktree),
+                capture_output=True, text=True, timeout=120,
+            )
+            if test_proc.returncode == 0:
                 tests_passed.append(test_id)
             else:
                 tests_failed.append(test_id)
-    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        logger.warning("Test execution failed for %s: %s", instance.instance_id, e)
-        tests_failed = list(f2p_tests)
+                logger.debug("Test %s failed: %s", test_id, test_proc.stdout[-200:])
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            logger.warning("Test execution failed for %s: %s", test_id, e)
+            tests_failed.append(test_id)
 
-    resolved = set(tests_passed) >= set(f2p_tests) and len(tests_failed) == 0
+    resolved = len(tests_passed) == len(f2p_tests) and len(tests_failed) == 0
 
     return EvalResult(
         instance_id=instance.instance_id,
