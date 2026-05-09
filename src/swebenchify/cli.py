@@ -24,12 +24,12 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
 
 def _cmd_run(args: argparse.Namespace) -> None:
     """Run the full pipeline."""
+    import asyncio
+
+    from swebenchify.pipeline import run_pipeline
+
     config = load_config(args.config)
-    # TODO: implement full pipeline execution
-    raise NotImplementedError(
-        f"Full pipeline execution not yet implemented. "
-        f"Config loaded with {len(config.repos)} repo(s)."
-    )
+    asyncio.run(run_pipeline(config, resume=args.resume))
 
 
 def _cmd_collect(args: argparse.Namespace) -> None:
@@ -74,6 +74,12 @@ def build_parser() -> argparse.ArgumentParser:
     # run
     run_parser = subparsers.add_parser("run", help="Run the full pipeline")
     _add_common_args(run_parser)
+    run_parser.add_argument(
+        "--resume",
+        action="store_true",
+        default=False,
+        help="Resume from existing stage outputs instead of re-running",
+    )
 
     # collect
     collect_parser = subparsers.add_parser(

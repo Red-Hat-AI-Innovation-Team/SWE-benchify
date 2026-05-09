@@ -6,8 +6,55 @@ See SPEC.md Section 5.7.
 
 from __future__ import annotations
 
-# TODO: Implement JSONL emission
-# - Write one JSON object per line conforming to SWEbenchInstance schema
-# - Per-repository output: {output_dir}/{repo_slug}-task-instances.jsonl
-# - Combined output: {output_dir}/all-task-instances.jsonl
-# - Optional: Upload to HuggingFace Datasets Hub
+import json
+import logging
+from dataclasses import asdict
+from pathlib import Path
+
+from swebenchify.models import TaskInstance
+
+logger = logging.getLogger(__name__)
+
+
+def emit_dataset(
+    instances: list[TaskInstance],
+    output_dir: str,
+    repo_slug: str | None = None,
+) -> None:
+    """Write instances to SWE-bench-compatible JSONL files.
+
+    Writes:
+    - {output_dir}/{repo_slug}-task-instances.jsonl (if repo_slug given)
+    - {output_dir}/all-task-instances.jsonl (always, appended)
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    if repo_slug:
+        repo_file = output_path / f"{repo_slug}-task-instances.jsonl"
+        _write_jsonl(instances, repo_file)
+        logger.info("Wrote %d instances to %s", len(instances), repo_file)
+
+    all_file = output_path / "all-task-instances.jsonl"
+    _write_jsonl(instances, all_file, append=True)
+    logger.info("Appended %d instances to %s", len(instances), all_file)
+
+
+def _write_jsonl(
+    instances: list[TaskInstance], path: Path, append: bool = False
+) -> None:
+    mode = "a" if append else "w"
+    with open(path, mode) as f:
+        for inst in instances:
+            f.write(json.dumps(asdict(inst)) + "\n")
+
+
+def load_dataset(path: str) -> list[dict]:
+    """Load a JSONL dataset file. Returns list of dicts."""
+    instances: list[dict] = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                instances.append(json.loads(line))
+    return instances

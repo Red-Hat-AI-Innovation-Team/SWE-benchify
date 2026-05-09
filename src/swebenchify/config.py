@@ -52,8 +52,11 @@ class FilterConfig:
 
     min_problem_statement_words: int = 40
     max_patch_lines: int = 500
+    min_patch_lines: int = 1
+    min_fail_to_pass: int = 1
     no_urls_in_problem: bool = True
     no_shas_in_problem: bool = True
+    no_image_only_problem: bool = True
 
 
 @dataclass
@@ -150,11 +153,20 @@ def _build_filter_config(data: dict | None) -> FilterConfig:
         max_patch_lines=data.get(
             "max_patch_lines", FilterConfig.max_patch_lines
         ),
+        min_patch_lines=data.get(
+            "min_patch_lines", FilterConfig.min_patch_lines
+        ),
+        min_fail_to_pass=data.get(
+            "min_fail_to_pass", FilterConfig.min_fail_to_pass
+        ),
         no_urls_in_problem=data.get(
             "no_urls_in_problem", FilterConfig.no_urls_in_problem
         ),
         no_shas_in_problem=data.get(
             "no_shas_in_problem", FilterConfig.no_shas_in_problem
+        ),
+        no_image_only_problem=data.get(
+            "no_image_only_problem", FilterConfig.no_image_only_problem
         ),
     )
 
@@ -209,7 +221,7 @@ def load_config(path: str) -> Config:
         if resolved is not None:
             github_tokens[repo_name] = str(resolved)
 
-    return Config(
+    cfg = Config(
         repos=repos,
         github_token=str(github_token) if github_token is not None else None,
         github_tokens=github_tokens,
@@ -218,3 +230,16 @@ def load_config(path: str) -> Config:
         filters=_build_filter_config(raw.get("filters")),
         output=_build_output_config(raw.get("output")),
     )
+
+    if not cfg.github_token and not cfg.github_tokens:
+        raise ValueError(
+            "No GitHub token configured. Set github.token or github.tokens "
+            "in config, or $GITHUB_TOKEN env var."
+        )
+
+    output_path = Path(cfg.output.dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    if not os.access(str(output_path), os.W_OK):
+        raise ValueError(f"Output directory is not writable: {cfg.output.dir}")
+
+    return cfg

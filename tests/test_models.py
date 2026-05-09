@@ -139,7 +139,7 @@ class TestTaskInstance:
             FAIL_TO_PASS='["test_foo"]',
             PASS_TO_PASS='["test_bar"]',
         )
-        assert ti.environment_setup_commit == ""
+        assert ti.environment_setup_commit is None
 
 
 class TestSWEbenchFlaskFixture:

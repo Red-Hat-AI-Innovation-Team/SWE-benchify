@@ -110,4 +110,4 @@ class TaskInstance:
     version: str
     FAIL_TO_PASS: str  # JSON-encoded list (SWE-bench convention)
     PASS_TO_PASS: str  # JSON-encoded list (SWE-bench convention)
-    environment_setup_commit: str = ""
+    environment_setup_commit: str | None = None

@@ -114,8 +114,11 @@ def test_env_var_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_unset_env_var_resolves_to_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """$VAR that is not set in the environment should resolve to None."""
+    """$VAR that is not set in the environment should resolve to None for
+    the individual token, but a fallback token must be present to avoid
+    the validation error."""
     monkeypatch.delenv("NONEXISTENT_TOKEN_VAR", raising=False)
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_fallback")
 
     config_file = tmp_path / "cfg.yaml"
     config_file.write_text(
@@ -124,22 +127,34 @@ def test_unset_env_var_resolves_to_none(tmp_path: Path, monkeypatch: pytest.Monk
               - pallets/flask
             github:
               token: $NONEXISTENT_TOKEN_VAR
+              tokens:
+                pallets/flask: $GITHUB_TOKEN
         """)
     )
 
     config = load_config(str(config_file))
     assert config.github_token is None
+    assert config.github_tokens["pallets/flask"] == "ghp_fallback"
 
 
-def test_defaults_applied_for_minimal_config(tmp_path: Path) -> None:
+def test_defaults_applied_for_minimal_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A config with only 'repos' should get defaults for everything else."""
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_testdefault")
+
     config_file = tmp_path / "cfg.yaml"
-    config_file.write_text("repos:\n  - owner/repo\n")
+    config_file.write_text(
+        textwrap.dedent("""\
+            repos:
+              - owner/repo
+            github:
+              token: $GITHUB_TOKEN
+        """)
+    )
 
     config = load_config(str(config_file))
 
     assert config.repos == ["owner/repo"]
-    assert config.github_token is None
+    assert config.github_token == "ghp_testdefault"
     assert config.github_tokens == {}
     assert config.pipeline.max_concurrent_repos == 4
     assert config.pipeline.max_concurrent_validations == 8
@@ -176,3 +191,42 @@ def test_file_not_found_raises(tmp_path: Path) -> None:
     """load_config with a non-existent path should raise FileNotFoundError."""
     with pytest.raises(FileNotFoundError):
         load_config(str(tmp_path / "does_not_exist.yaml"))
+
+
+def test_no_github_token_raises_value_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Config without any GitHub token should raise ValueError."""
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    config_file = tmp_path / "cfg.yaml"
+    config_file.write_text("repos:\n  - owner/repo\n")
+
+    with pytest.raises(ValueError, match="No GitHub token configured"):
+        load_config(str(config_file))
+
+
+def test_output_dir_not_writable_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Config with a non-writable output dir should raise ValueError."""
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+
+    # Create a read-only directory
+    ro_dir = tmp_path / "readonly_output"
+    ro_dir.mkdir()
+    ro_dir.chmod(0o444)
+
+    config_file = tmp_path / "cfg.yaml"
+    config_file.write_text(
+        textwrap.dedent(f"""\
+            repos:
+              - owner/repo
+            github:
+              token: $GITHUB_TOKEN
+            output:
+              dir: {ro_dir}
+        """)
+    )
+
+    try:
+        with pytest.raises(ValueError, match="not writable"):
+            load_config(str(config_file))
+    finally:
+        ro_dir.chmod(0o755)

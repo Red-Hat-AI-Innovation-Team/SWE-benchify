@@ -6,9 +6,208 @@ tests before and after applying the gold patch. See SPEC.md Section 5.5.
 
 from __future__ import annotations
 
-# TODO: Implement instance validation
-# - Prepare workspace with repo at base_commit, test patch, gold patch
-# - Launch Claude Code session for validation
-# - Read and validate validation_result.json
-# - Compute FAIL_TO_PASS and PASS_TO_PASS
-# - Support parallel validation up to concurrency limit
+import asyncio
+import json
+import logging
+from pathlib import Path
+
+from swebenchify.dispatcher import AgentResult, CostTracker, run_agent_with_retry
+from swebenchify.models import (
+    CandidateInstance,
+    EnvironmentSpec,
+    Repository,
+    ValidationResult,
+)
+from swebenchify.workspace import WorkspaceManager
+
+logger = logging.getLogger(__name__)
+
+# The prompt uses .format() with {repo}, {commit}, {env_spec},
+# {test_patch_path}, and {gold_patch_path}.  Literal braces in JSON
+# schema examples are doubled ({{ / }}).
+VALIDATION_PROMPT = """\
+You are validating a benchmark instance for {repo} at commit {commit}.
+
+## Environment Setup
+The following environment spec was previously discovered for this repository:
+```json
+{env_spec}
+```
+
+## Steps
+1. Set up the environment using the spec above (install dependencies, etc.).
+2. Apply the test patch: `git apply {test_patch_path}`
+   - This adds new or modified tests that should FAIL before the fix.
+3. Run the test command from the env spec. Record which tests FAIL.
+   - Parse the test output carefully to identify individual test names/IDs.
+4. Apply the gold patch: `git apply {gold_patch_path}`
+   - This is the actual fix that should make the failing tests pass.
+5. Run the test command again. Record which tests PASS now.
+6. Compute:
+   - FAIL_TO_PASS: tests that FAILED in step 3 and PASS in step 5
+   - PASS_TO_PASS: tests that PASSED in step 3 and still PASS in step 5
+
+## Output
+Write `validation_result.json` to the current directory with this exact schema:
+```json
+{{
+  "status": "valid",
+  "FAIL_TO_PASS": ["test.module::TestClass::test_method", ...],
+  "PASS_TO_PASS": ["test.module::TestClass::test_other", ...],
+  "error_message": null
+}}
+```
+
+Status values:
+- "valid": FAIL_TO_PASS has at least one test and all PASS_TO_PASS tests still pass
+- "invalid": FAIL_TO_PASS is empty (the test patch doesn't catch the bug)
+- "error": something went wrong (describe in error_message)
+
+## Rules
+- If tests fail for environment reasons (missing deps, build errors), debug and fix before concluding.
+- Use full test identifiers (e.g., "tests/test_app.py::TestApp::test_login" for pytest).
+- If you cannot get tests to run after reasonable effort, set status to "error".
+- Do NOT include any text outside the JSON in validation_result.json.
+"""
+
+VALIDATION_TOOLS = ["Bash", "Read", "Write"]
+
+
+async def validate_instance(
+    candidate: CandidateInstance,
+    env_spec: EnvironmentSpec,
+    repo: Repository,
+    workspace_mgr: WorkspaceManager,
+    cost_tracker: CostTracker | None = None,
+    max_attempts: int = 3,
+    max_turns: int = 60,
+    budget_usd: float = 3.0,
+) -> ValidationResult:
+    """Validate a single candidate instance by running tests before and after the gold patch.
+
+    Returns a ValidationResult with FAIL_TO_PASS and PASS_TO_PASS test lists.
+    """
+    # Prepare workspace
+    inst_dir = workspace_mgr.prepare_validation_workspace(
+        repo=repo,
+        instance_id=candidate.instance_id,
+        base_commit=candidate.base_commit,
+        test_patch=candidate.test_patch or "",
+        gold_patch=candidate.patch or "",
+    )
+    worktree = inst_dir / "repo"
+
+    # Build prompt
+    prompt = VALIDATION_PROMPT.format(
+        repo=repo.full_name,
+        commit=candidate.base_commit,
+        env_spec=json.dumps(
+            {
+                "language": env_spec.language,
+                "language_version": env_spec.language_version,
+                "package_manager": env_spec.package_manager,
+                "install_cmd": env_spec.install_cmd,
+                "test_cmd": env_spec.test_cmd,
+                "pre_install": env_spec.pre_install,
+                "system_dependencies": env_spec.system_dependencies,
+            },
+            indent=2,
+        ),
+        test_patch_path=str(inst_dir / "test.patch"),
+        gold_patch_path=str(inst_dir / "gold.patch"),
+    )
+
+    # Run agent
+    result = await run_agent_with_retry(
+        prompt=prompt,
+        cwd=str(worktree),
+        output_files=["validation_result.json"],
+        tools=VALIDATION_TOOLS,
+        max_turns=max_turns,
+        budget_usd=budget_usd,
+        max_attempts=max_attempts,
+    )
+
+    if cost_tracker:
+        cost_tracker.record(
+            "validation", repo.full_name, result, instance_id=candidate.instance_id
+        )
+
+    # Read output
+    result_path = worktree / "validation_result.json"
+    if not result.is_error and result_path.exists():
+        try:
+            data = json.loads(result_path.read_text())
+            return ValidationResult(
+                status=data.get("status", "error"),
+                FAIL_TO_PASS=data.get("FAIL_TO_PASS", []),
+                PASS_TO_PASS=data.get("PASS_TO_PASS", []),
+                error_message=data.get("error_message"),
+            )
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.error("Failed to parse validation result: %s", e)
+            return ValidationResult(status="error", error_message=str(e))
+
+    return ValidationResult(
+        status="error",
+        error_message=f"Agent failed: {result.status} - {result.output or 'no output'}",
+    )
+
+
+async def validate_instances(
+    candidates: list[CandidateInstance],
+    env_specs: dict[str, EnvironmentSpec],  # keyed by version
+    repo: Repository,
+    workspace_mgr: WorkspaceManager,
+    cost_tracker: CostTracker | None = None,
+    max_concurrent: int = 8,
+    max_attempts: int = 3,
+    max_turns: int = 60,
+    budget_usd: float = 3.0,
+    instance_versions: dict[str, str] | None = None,  # instance_id -> version
+) -> dict[str, ValidationResult]:
+    """Validate multiple instances in parallel with bounded concurrency.
+
+    Returns a dict mapping instance_id to ValidationResult.
+    """
+    semaphore = asyncio.Semaphore(max_concurrent)
+    results: dict[str, ValidationResult] = {}
+
+    async def validate_one(
+        candidate: CandidateInstance,
+    ) -> tuple[str, ValidationResult]:
+        async with semaphore:
+            # Find the env spec for this instance's version
+            version = (instance_versions or {}).get(candidate.instance_id, "unknown")
+            env_spec = env_specs.get(version)
+            if env_spec is None:
+                # Try first available env spec as fallback
+                if env_specs:
+                    env_spec = next(iter(env_specs.values()))
+                else:
+                    return candidate.instance_id, ValidationResult(
+                        status="error", error_message="No environment spec available"
+                    )
+
+            vr = await validate_instance(
+                candidate=candidate,
+                env_spec=env_spec,
+                repo=repo,
+                workspace_mgr=workspace_mgr,
+                cost_tracker=cost_tracker,
+                max_attempts=max_attempts,
+                max_turns=max_turns,
+                budget_usd=budget_usd,
+            )
+            return candidate.instance_id, vr
+
+    tasks = [validate_one(c) for c in candidates]
+    raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+    for r in raw_results:
+        if isinstance(r, Exception):
+            logger.error("Validation task failed: %s", r)
+            continue
+        instance_id, vr = r
+        results[instance_id] = vr
+
+    return results
