@@ -33,14 +33,19 @@ def github_get(
     token: str | None = None,
     params: dict[str, str] | None = None,
     max_retries: int = 5,
+    initial_backoff: int = 10,
 ) -> requests.Response:
     """GET with rate limit handling and exponential backoff.
 
+    Handles both GitHub API 403 (rate limit) and generic 429 (too many
+    requests) responses, respecting the ``Retry-After`` header when present.
+
     Args:
-        url: The GitHub API URL to request.
+        url: The URL to request.
         token: GitHub personal access token (optional).
         params: Query parameters for the request.
-        max_retries: Maximum number of retry attempts on 403.
+        max_retries: Maximum number of retry attempts on 403/429.
+        initial_backoff: Starting backoff in seconds (doubles each retry).
 
     Returns:
         The successful ``requests.Response``.
@@ -49,7 +54,7 @@ def github_get(
         RuntimeError: If all retries are exhausted.
     """
     headers = make_headers(token)
-    backoff = 60
+    backoff = initial_backoff
     for attempt in range(max_retries):
         resp = requests.get(url, headers=headers, params=params, timeout=30)
         if resp.status_code == 200:
@@ -60,13 +65,20 @@ def github_get(
                 logger.warning("Rate limit reached, sleeping %ds", sleep_time)
                 time.sleep(sleep_time)
             return resp
-        elif resp.status_code == 403:
+        elif resp.status_code in (403, 429):
+            retry_after = resp.headers.get("Retry-After")
+            if retry_after:
+                wait = int(retry_after)
+            else:
+                wait = backoff
             logger.warning(
-                "GitHub 403, backing off %ds (attempt %d)",
-                backoff,
+                "HTTP %d, backing off %ds (attempt %d/%d)",
+                resp.status_code,
+                wait,
                 attempt + 1,
+                max_retries,
             )
-            time.sleep(backoff)
+            time.sleep(wait)
             backoff = min(backoff * 2, 300)
         elif resp.status_code == 404:
             return resp  # Let caller handle 404

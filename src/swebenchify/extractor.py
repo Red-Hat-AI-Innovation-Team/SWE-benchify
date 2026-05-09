@@ -254,7 +254,7 @@ def extract_patches(
     diff_text = ""
     diff_url = candidate.diff_url
     try:
-        diff_resp = _shared_github_get(diff_url, token=github_token, max_retries=1)
+        diff_resp = _shared_github_get(diff_url, token=github_token, max_retries=5)
         if diff_resp.status_code == 200:
             diff_text = diff_resp.text
         else:

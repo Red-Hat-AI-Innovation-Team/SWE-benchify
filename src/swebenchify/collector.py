@@ -167,9 +167,10 @@ def collect_prs(
 
             created_at = pr["created_at"]
 
-            # Date filtering
+            # Date filtering — PRs are sorted by created desc, so once
+            # we pass the after cutoff all remaining PRs are older.
             if pr_after and created_at < pr_after:
-                continue
+                return candidates
             if pr_before and created_at > pr_before:
                 continue
 
