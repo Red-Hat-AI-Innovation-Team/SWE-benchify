@@ -151,6 +151,85 @@ def _cmd_emit(args: argparse.Namespace) -> None:
     print(f"{len(filtered)}/{len(instances)} instances emitted to {config.output.dir}")
 
 
+def _cmd_eval(args: argparse.Namespace) -> None:
+    """Run evaluation: dispatch a coding agent to solve instances."""
+    import asyncio
+    import json
+
+    config = load_config(args.config)
+
+    from swebenchify.discovery import discover_environment
+    from swebenchify.dispatcher import CostTracker
+    from swebenchify.eval_harness import eval_instances, save_eval_results
+    from swebenchify.models import Repository, TaskInstance
+    from swebenchify.workspace import WorkspaceManager
+
+    # Load instances
+    instances: list[TaskInstance] = []
+    with open(args.input) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                instances.append(TaskInstance(**json.loads(line)))
+
+    if args.max_instances:
+        instances = instances[: args.max_instances]
+
+    if not instances:
+        print("No instances to evaluate")
+        return
+
+    repo_name = instances[0].repo
+    token = config.github_tokens.get(repo_name, config.github_token)
+    repo = Repository(full_name=repo_name, access_token=token)
+    workspace_mgr = WorkspaceManager(config.output.dir + "/workspaces")
+    cost_tracker = CostTracker()
+
+    async def run() -> None:
+        # Discover environment
+        env_spec, _ = await discover_environment(
+            repo=repo,
+            commit=instances[0].base_commit,
+            version=instances[0].version,
+            workspace_mgr=workspace_mgr,
+            cost_tracker=cost_tracker,
+        )
+        if not env_spec:
+            print("Environment discovery failed")
+            return
+
+        print(f"Evaluating {len(instances)} instances with model={args.model}")
+        results = await eval_instances(
+            instances,
+            env_spec=env_spec,
+            repo=repo,
+            workspace_mgr=workspace_mgr,
+            cost_tracker=cost_tracker,
+            model=args.model,
+        )
+
+        resolved = sum(1 for r in results if r.resolved)
+        print(f"\nResults: {resolved}/{len(results)} resolved")
+        for r in results:
+            status = "PASS" if r.resolved else "FAIL"
+            cost = f"${r.cost_usd:.2f}" if r.cost_usd else "N/A"
+            print(f"  [{status}] {r.instance_id} (cost: {cost})")
+            if r.error_message:
+                print(f"         Error: {r.error_message}")
+
+        print(f"\n{cost_tracker.summary()}")
+
+        # Save results
+        output_path = (
+            args.output
+            or f"{config.output.dir}/eval-{repo.slug}-{args.model}.jsonl"
+        )
+        save_eval_results(results, output_path)
+        print(f"Results saved to {output_path}")
+
+    asyncio.run(run())
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser with all subcommands."""
     parser = argparse.ArgumentParser(
@@ -190,6 +269,27 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_args(emit_parser)
     emit_parser.add_argument("--input", "-i", help="Input validated instances JSONL file")
 
+    # eval
+    eval_parser = subparsers.add_parser(
+        "eval", help="Evaluate: run a coding agent on benchmark instances"
+    )
+    _add_common_args(eval_parser)
+    eval_parser.add_argument(
+        "--input", "-i", required=True, help="Input task instances JSONL file"
+    )
+    eval_parser.add_argument(
+        "--model", default="haiku", help="Model to use (default: haiku)"
+    )
+    eval_parser.add_argument(
+        "--max-instances",
+        type=int,
+        default=None,
+        help="Max instances to evaluate",
+    )
+    eval_parser.add_argument(
+        "--output", "-o", default=None, help="Output eval results JSONL file"
+    )
+
     return parser
 
 
@@ -207,6 +307,7 @@ def main(argv: list[str] | None = None) -> int:
         "collect": _cmd_collect,
         "validate": _cmd_validate,
         "emit": _cmd_emit,
+        "eval": _cmd_eval,
     }
 
     try:

@@ -35,6 +35,9 @@ class AgentConfig:
     validation: AgentStageConfig = field(
         default_factory=lambda: AgentStageConfig(max_turns=60, budget_usd=3.0)
     )
+    quality_eval: AgentStageConfig = field(
+        default_factory=lambda: AgentStageConfig(max_turns=20, budget_usd=0.50)
+    )
 
 
 @dataclass
@@ -125,6 +128,11 @@ def _build_agent_config(data: dict | None) -> AgentConfig:
             data.get("validation")
             if data.get("validation") is not None
             else {"max_turns": 60, "budget_usd": 3.0}
+        ),
+        quality_eval=_build_agent_stage_config(
+            data.get("quality_eval")
+            if data.get("quality_eval") is not None
+            else {"max_turns": 20, "budget_usd": 0.50}
         ),
     )
 

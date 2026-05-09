@@ -111,3 +111,28 @@ class TaskInstance:
     FAIL_TO_PASS: str  # JSON-encoded list (SWE-bench convention)
     PASS_TO_PASS: str  # JSON-encoded list (SWE-bench convention)
     environment_setup_commit: str | None = None
+
+
+@dataclass
+class QualityScore:
+    """LLM judge quality assessment for a benchmark instance."""
+
+    coherence: int  # 1-5: problem statement describes what the patch fixes
+    specificity: int  # 1-5: problem statement is specific enough to act on
+    leakage_risk: str  # "none", "low", "high"
+    difficulty: str  # "easy", "medium", "hard"
+    recommendation: str  # "include", "review", "exclude"
+    reasoning: str
+
+
+@dataclass
+class EvalResult:
+    """Result of running a coding agent on a benchmark instance."""
+
+    instance_id: str
+    resolved: bool
+    agent_patch: str | None = None
+    tests_passed: list[str] = field(default_factory=list)
+    tests_failed: list[str] = field(default_factory=list)
+    cost_usd: float | None = None
+    error_message: str | None = None
