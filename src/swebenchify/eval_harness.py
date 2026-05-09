@@ -72,15 +72,16 @@ async def eval_instance(
     f2p_tests = json.loads(instance.FAIL_TO_PASS)
 
     # Prepare workspace: repo at base_commit with test_patch applied
-    inst_dir = workspace_mgr.instance_dir(f"eval_{instance.instance_id}")
+    # Use a separate eval_instances directory to avoid colliding with validation workspaces
+    inst_dir = (workspace_mgr.repo_dir(repo) / "eval_instances" / instance.instance_id).resolve()
     worktree = inst_dir / "repo"
 
     workspace_mgr.ensure_bare_clone(repo)
+    inst_dir.mkdir(parents=True, exist_ok=True)
     workspace_mgr.create_worktree(repo, instance.base_commit, worktree)
 
     # Apply test_patch so the failing tests exist
     test_patch_file = inst_dir / "test.patch"
-    inst_dir.mkdir(parents=True, exist_ok=True)
     test_patch_file.write_text(instance.test_patch)
 
     try:
@@ -149,57 +150,35 @@ async def eval_instance(
     except subprocess.TimeoutExpired:
         agent_patch = None
 
-    # Step 2: Verify -- run tests and check FAIL_TO_PASS
-    verify_prompt = VERIFY_PROMPT.format(
-        test_cmd=env_spec.test_cmd,
-        target_tests=json.dumps(f2p_tests),
-    )
-
-    verify_result = await run_agent_task(
-        prompt=verify_prompt,
-        cwd=str(worktree),
-        tools=VERIFY_TOOLS,
-        max_turns=30,
-        budget_usd=1.0,
-        model=model,
-    )
-
-    total_cost += verify_result.cost_usd or 0.0
-
     if cost_tracker:
-        # Record combined cost
-        combined = AgentResult(
-            status="success" if not verify_result.is_error else "error",
-            output=verify_result.output,
-            session_id=verify_result.session_id,
-            cost_usd=total_cost,
-            duration_ms=(solve_result.duration_ms or 0)
-            + (verify_result.duration_ms or 0),
-            num_turns=(solve_result.num_turns or 0)
-            + (verify_result.num_turns or 0),
-            is_error=verify_result.is_error,
-        )
         cost_tracker.record(
-            "eval",
-            repo.full_name,
-            combined,
-            instance_id=instance.instance_id,
+            "eval", repo.full_name, solve_result, instance_id=instance.instance_id
         )
 
-    # Parse verification result
-    eval_result_path = worktree / "eval_result.json"
+    # Step 2: Verify — run tests directly via subprocess (more reliable than
+    # dispatching a second agent) and check FAIL_TO_PASS
     tests_passed: list[str] = []
-    tests_failed: list[str] = list(f2p_tests)  # default: all failed
+    tests_failed: list[str] = []
 
-    if eval_result_path.exists():
-        try:
-            data = json.loads(eval_result_path.read_text())
-            tests_passed = data.get("tests_passed", [])
-            tests_failed = data.get("tests_failed", [])
-        except (json.JSONDecodeError, TypeError):
-            pass
+    try:
+        test_proc = subprocess.run(
+            env_spec.test_cmd, shell=True,
+            cwd=str(worktree), capture_output=True, text=True, timeout=300,
+        )
+        test_output = test_proc.stdout + "\n" + test_proc.stderr
 
-    resolved = len(tests_passed) == len(f2p_tests) and len(tests_failed) == 0
+        for test_id in f2p_tests:
+            if test_id in test_output and "PASSED" in test_output.split(test_id)[-1][:200]:
+                tests_passed.append(test_id)
+            elif test_proc.returncode == 0:
+                tests_passed.append(test_id)
+            else:
+                tests_failed.append(test_id)
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        logger.warning("Test execution failed for %s: %s", instance.instance_id, e)
+        tests_failed = list(f2p_tests)
+
+    resolved = set(tests_passed) >= set(f2p_tests) and len(tests_failed) == 0
 
     return EvalResult(
         instance_id=instance.instance_id,
