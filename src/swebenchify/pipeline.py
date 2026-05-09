@@ -18,7 +18,7 @@ from swebenchify.dispatcher import CostTracker
 from swebenchify.emitter import emit_dataset
 from swebenchify.extractor import extract_all, load_candidates, save_candidates
 from swebenchify.filters import apply_filters
-from swebenchify.models import EnvironmentSpec, Repository, TaskInstance
+from swebenchify.models import EnvironmentSpec, QualityScore, Repository, TaskInstance
 from swebenchify.sandbox import SandboxConfig, is_docker_available
 from swebenchify.validator import validate_instances
 from swebenchify.versioning import detect_version
@@ -216,6 +216,51 @@ async def run_repo_pipeline(
         len(task_instances),
         len(viable),
     )
+
+    # Stage 4.5: Quality Evaluation
+    if task_instances:
+        from swebenchify.evaluator import evaluate_quality_batch
+
+        logger.info(
+            "Stage 4.5: Evaluating quality for %d instances",
+            len(task_instances),
+        )
+        quality_scores = await evaluate_quality_batch(
+            task_instances,
+            cost_tracker=cost_tracker,
+            max_turns=config.agent.quality_eval.max_turns,
+            budget_usd=config.agent.quality_eval.budget_usd,
+        )
+
+        # Filter out excluded instances
+        before_count = len(task_instances)
+        task_instances = [
+            inst for inst in task_instances
+            if quality_scores.get(
+                inst.instance_id,
+                QualityScore(0, 0, "unknown", "unknown", "review", ""),
+            ).recommendation != "exclude"
+        ]
+        excluded = before_count - len(task_instances)
+        if excluded:
+            logger.info(
+                "  Quality eval excluded %d/%d instances",
+                excluded,
+                before_count,
+            )
+
+        # Log quality summary
+        for inst_id, score in quality_scores.items():
+            logger.info(
+                "  %s: coherence=%d specificity=%d leakage=%s"
+                " difficulty=%s -> %s",
+                inst_id,
+                score.coherence,
+                score.specificity,
+                score.leakage_risk,
+                score.difficulty,
+                score.recommendation,
+            )
 
     # Stage 5: Quality Filtering
     logger.info("Stage 5: Applying quality filters")
