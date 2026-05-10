@@ -1,11 +1,27 @@
 repos:
   - pallets/flask
+  - psf/requests
 
 github:
   token: $GITHUB_TOKEN
 
 pipeline:
-  max_prs_per_repo: 50
+  max_concurrent_repos: 2
+  max_concurrent_validations: 4
+  pr_after: "2012-01-01T00:00:00Z"
+  pr_before: "2023-06-01T00:00:00Z"
+
+agent:
+  max_attempts: 2
+  env_discovery:
+    max_turns: 80
+    budget_usd: 5.0
+  validation:
+    max_turns: 60
+    budget_usd: 3.0
+  quality_eval:
+    max_turns: 20
+    budget_usd: 0.50
 
 output:
   dir: ./output
