@@ -146,21 +146,24 @@ async def run_repo_pipeline(
     # Discover environment for each unique version
     env_specs: dict[str, EnvironmentSpec] = {}
     for version, commit in version_commits.items():
-        env_spec, repo_version = await discover_environment(
-            repo=repo,
-            commit=commit,
-            version=version,
-            workspace_mgr=workspace_mgr,
-            cost_tracker=cost_tracker,
-            max_attempts=config.agent.max_attempts,
-            max_turns=config.agent.env_discovery.max_turns,
-            budget_usd=config.agent.env_discovery.budget_usd,
-        )
-        if env_spec:
-            env_specs[version] = env_spec
-            logger.info(f"  v{version}: {env_spec.language} {env_spec.language_version}, test: {env_spec.test_cmd}")
-        else:
-            logger.warning(f"  v{version}: env discovery failed, skipping instances at this version")
+        try:
+            env_spec, repo_version = await discover_environment(
+                repo=repo,
+                commit=commit,
+                version=version,
+                workspace_mgr=workspace_mgr,
+                cost_tracker=cost_tracker,
+                max_attempts=config.agent.max_attempts,
+                max_turns=config.agent.env_discovery.max_turns,
+                budget_usd=config.agent.env_discovery.budget_usd,
+            )
+            if env_spec:
+                env_specs[version] = env_spec
+                logger.info(f"  v{version}: {env_spec.language} {env_spec.language_version}, test: {env_spec.test_cmd}")
+            else:
+                logger.warning(f"  v{version}: env discovery failed, skipping instances at this version")
+        except Exception as e:
+            logger.warning(f"  v{version}: env discovery error ({e}), skipping")
 
     if not env_specs:
         logger.error(f"No environments discovered for {repo.full_name}")
