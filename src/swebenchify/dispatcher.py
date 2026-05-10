@@ -100,15 +100,20 @@ async def run_agent_task(
             if isinstance(message, ResultMessage):
                 result_message = message
     except Exception:
-        logger.exception("Exception during agent query")
-        return AgentResult(
-            status="error",
-            output=None,
-            session_id=None,
-            cost_usd=None,
-            duration_ms=None,
-            num_turns=None,
-            is_error=True,
+        if result_message is None:
+            logger.exception("Exception during agent query")
+            return AgentResult(
+                status="error",
+                output=None,
+                session_id=None,
+                cost_usd=None,
+                duration_ms=None,
+                num_turns=None,
+                is_error=True,
+            )
+        logger.warning(
+            "SDK raised after ResultMessage (status=%s), continuing with result",
+            result_message.subtype,
         )
 
     if result_message is None:
