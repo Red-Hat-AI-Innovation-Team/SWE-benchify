@@ -92,31 +92,11 @@ async def eval_instance(
         logger.warning("Install failed for %s (may still work): %s",
                        instance.instance_id, install_result.stderr[-200:])
 
-    # Apply test_patch so the failing tests exist
+    # Save test_patch for later (applied AFTER the agent finishes, matching SWE-bench flow)
     test_patch_file = inst_dir / "test.patch"
     test_patch_file.write_text(instance.test_patch)
 
-    try:
-        subprocess.run(
-            ["git", "apply", str(test_patch_file)],
-            cwd=str(worktree),
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError as e:
-        logger.warning(
-            "Failed to apply test patch for %s: %s",
-            instance.instance_id,
-            e.stderr,
-        )
-        return EvalResult(
-            instance_id=instance.instance_id,
-            resolved=False,
-            error_message=f"Failed to apply test patch: {e.stderr}",
-        )
-
-    # Step 1: Dispatch agent to solve the problem
+    # Step 1: Dispatch agent to solve the problem (no test patch applied yet)
     solve_prompt = SOLVE_PROMPT.format(
         repo=repo.full_name,
         problem_statement=instance.problem_statement,
@@ -167,7 +147,27 @@ async def eval_instance(
             "eval", repo.full_name, solve_result, instance_id=instance.instance_id
         )
 
-    # Step 2: Verify — run each FAIL_TO_PASS test individually and check result
+    # Step 2: Apply test_patch AFTER agent finishes, then verify
+    # This matches SWE-bench's flow: agent patch → test patch → run tests
+    try:
+        subprocess.run(
+            ["git", "apply", str(test_patch_file)],
+            cwd=str(worktree), check=True, capture_output=True, text=True,
+        )
+    except subprocess.CalledProcessError:
+        try:
+            subprocess.run(
+                ["git", "apply", "--3way", str(test_patch_file)],
+                cwd=str(worktree), check=True, capture_output=True, text=True,
+            )
+        except subprocess.CalledProcessError as e:
+            logger.warning("Test patch failed for %s: %s", instance.instance_id, e.stderr[:100])
+            return EvalResult(
+                instance_id=instance.instance_id, resolved=False,
+                agent_patch=agent_patch, cost_usd=total_cost,
+                error_message=f"Test patch failed after agent: {e.stderr[:100]}",
+            )
+
     tests_passed: list[str] = []
     tests_failed: list[str] = []
 
