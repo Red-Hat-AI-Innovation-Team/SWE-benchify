@@ -193,11 +193,23 @@ async def run_repo_pipeline(
     )
 
     # Build TaskInstances from validated candidates
+    from swebenchify.compat import snap_version, get_environment_setup_commit
+
+    # Get environment_setup_commit from the bare clone
+    bare_clone = workspace_mgr.bare_clone_path(repo)
+
     task_instances: list[TaskInstance] = []
+    skipped_version = 0
     for candidate in viable:
         vr = validation_results.get(candidate.instance_id)
         if vr and vr.status == "valid":
-            version = instance_versions.get(candidate.instance_id, "unknown")
+            raw_version = instance_versions.get(candidate.instance_id, "unknown")
+            version = snap_version(repo.full_name, raw_version) or raw_version
+            if version != raw_version:
+                logger.debug("  Snapped version %s -> %s for %s", raw_version, version, candidate.instance_id)
+
+            env_commit = get_environment_setup_commit(repo.full_name, version, repo_path=str(bare_clone))
+
             task_instances.append(
                 TaskInstance(
                     repo=candidate.repo,
@@ -211,6 +223,7 @@ async def run_repo_pipeline(
                     version=version,
                     FAIL_TO_PASS=json.dumps(vr.FAIL_TO_PASS),
                     PASS_TO_PASS=json.dumps(vr.PASS_TO_PASS),
+                    environment_setup_commit=env_commit,
                 )
             )
 
