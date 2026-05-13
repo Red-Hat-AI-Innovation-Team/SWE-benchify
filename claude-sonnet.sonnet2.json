@@ -1,0 +1,34 @@
+{
+    "total_instances": 5,
+    "submitted_instances": 5,
+    "completed_instances": 2,
+    "resolved_instances": 1,
+    "unresolved_instances": 1,
+    "empty_patch_instances": 0,
+    "error_instances": 3,
+    "completed_ids": [
+        "pallets__flask-4045",
+        "pallets__flask-4160"
+    ],
+    "incomplete_ids": [],
+    "empty_patch_ids": [],
+    "submitted_ids": [
+        "pallets__flask-4045",
+        "pallets__flask-4074",
+        "pallets__flask-4160",
+        "psf__requests-1635",
+        "psf__requests-1657"
+    ],
+    "resolved_ids": [
+        "pallets__flask-4160"
+    ],
+    "unresolved_ids": [
+        "pallets__flask-4045"
+    ],
+    "error_ids": [
+        "pallets__flask-4074",
+        "psf__requests-1635",
+        "psf__requests-1657"
+    ],
+    "schema_version": 2
+}
