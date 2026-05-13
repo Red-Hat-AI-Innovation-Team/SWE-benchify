@@ -26,3 +26,7 @@ swebenchify = "swebenchify.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["output", "logs", ".factory", ".git"]

@@ -1,10 +1,17 @@
 # SWE-benchify Development Plan
 
+See SPEC.md (v2) for the full system specification.
+
 ## Goals
 
 1. **Phase 1: Reproduce SWE-bench.** If SWE-benchify processes the same
    12 repositories SWE-bench uses, it should produce a statistically
    similar dataset — same instance_ids, same FAIL_TO_PASS, same patches.
+   Conformance targets (SPEC.md Section 9):
+   - Mechanical stages: >=90% instance_id overlap
+   - Validation: >=85% FAIL_TO_PASS agreement
+   - Docker specs: >=80% functional equivalence
+   - Agent ranking: correct relative ordering (opus > sonnet > haiku)
 
 2. **Phase 2: Verified-like quality layer.** An LLM judge calibrated on
    SWE-bench Verified human annotations that can automatically filter
