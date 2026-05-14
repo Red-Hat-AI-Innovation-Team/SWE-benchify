@@ -1,7 +1,7 @@
 """Stage 5: Quality filters.
 
 Applies configurable deterministic filters to validated instances.
-See SPEC.md Section 5.6.
+See SPEC.md Sections 4.4 and 5.6.
 """
 
 from __future__ import annotations
@@ -14,6 +14,8 @@ from swebenchify.config import FilterConfig
 from swebenchify.models import TaskInstance
 
 logger = logging.getLogger(__name__)
+
+_NEW_DEF_RE = re.compile(r"^\+\s*(?:def|class)\s+(\w+)")
 
 
 def apply_filters(
@@ -77,4 +79,86 @@ def get_filter_reasons(inst: TaskInstance, config: FilterConfig) -> list[str]:
     except (json.JSONDecodeError, TypeError):
         reasons.append("invalid FAIL_TO_PASS JSON")
 
+    # Newly-created function/class exclusion (SWE-bench paper filter)
+    if config.no_new_symbol_tests:
+        new_reason = check_new_symbol_in_tests(inst.patch, inst.FAIL_TO_PASS)
+        if new_reason:
+            reasons.append(new_reason)
+
     return reasons
+
+
+def check_import_attribute_error(test_log: str) -> str | None:
+    """Check if pre-solution test log contains ImportError or AttributeError.
+
+    These indicate dependency issues rather than real bugs, so instances
+    with these errors should be discarded (SWE-bench paper filter).
+
+    Args:
+        test_log: Raw test output from running tests before applying the fix.
+
+    Returns:
+        A filter reason string, or None if no issue found.
+    """
+    if not test_log:
+        return None
+    for error_type in ("ImportError", "AttributeError"):
+        if error_type in test_log:
+            return f"pre-solution test log contains {error_type}"
+    return None
+
+
+def extract_new_symbols(patch: str) -> set[str]:
+    """Extract function/class names newly introduced in a gold patch.
+
+    Parses unified diff lines starting with '+' (added lines) for
+    'def name' or 'class name' patterns. Only considers lines that are
+    additions (not context or removals).
+
+    Returns:
+        Set of symbol names defined in added lines.
+    """
+    if not patch:
+        return set()
+    symbols: set[str] = set()
+    for line in patch.splitlines():
+        match = _NEW_DEF_RE.match(line)
+        if match:
+            symbols.add(match.group(1))
+    return symbols
+
+
+def check_new_symbol_in_tests(
+    patch: str, fail_to_pass_json: str
+) -> str | None:
+    """Check if FAIL_TO_PASS tests reference functions/classes first introduced
+    in the gold patch.
+
+    If a test name contains a symbol that is newly defined in the patch,
+    the test is unsolvable without knowing the arbitrary name chosen by
+    the author. Such instances should be excluded.
+
+    Args:
+        patch: The gold patch (unified diff).
+        fail_to_pass_json: JSON-encoded list of FAIL_TO_PASS test names.
+
+    Returns:
+        A filter reason string, or None if no issue found.
+    """
+    new_symbols = extract_new_symbols(patch)
+    if not new_symbols:
+        return None
+
+    try:
+        f2p = json.loads(fail_to_pass_json)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    for test_name in f2p:
+        for symbol in new_symbols:
+            if symbol in test_name:
+                return (
+                    f"FAIL_TO_PASS test '{test_name}' references "
+                    f"newly-created symbol '{symbol}'"
+                )
+    return None

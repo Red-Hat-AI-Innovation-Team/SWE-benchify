@@ -62,6 +62,7 @@ class FilterConfig:
     no_urls_in_problem: bool = True
     no_shas_in_problem: bool = True
     no_image_only_problem: bool = True
+    no_new_symbol_tests: bool = True
 
 
 @dataclass
@@ -179,6 +180,9 @@ def _build_filter_config(data: dict | None) -> FilterConfig:
         ),
         no_image_only_problem=data.get(
             "no_image_only_problem", FilterConfig.no_image_only_problem
+        ),
+        no_new_symbol_tests=data.get(
+            "no_new_symbol_tests", FilterConfig.no_new_symbol_tests
         ),
     )
 
