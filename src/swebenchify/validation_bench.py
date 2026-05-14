@@ -85,13 +85,15 @@ def jaccard_similarity(a: list[str], b: list[str]) -> float:
 
 
 def compare_fail_to_pass(
-    ours: list[str], theirs: list[str]
+    ours: list[str],
+    theirs: list[str],
+    instance_id: str = "",
 ) -> InstanceComparison:
     """Compare two FAIL_TO_PASS lists and return detailed metrics."""
     set_ours = set(ours)
     set_theirs = set(theirs)
     return InstanceComparison(
-        instance_id="",
+        instance_id=instance_id,
         ours=ours,
         theirs=theirs,
         exact_match=set_ours == set_theirs,
@@ -186,8 +188,8 @@ def run_comparison(
         comparison = compare_fail_to_pass(
             our_instances[instance_id],
             swebench_instances[instance_id],
+            instance_id=instance_id,
         )
-        comparison.instance_id = instance_id
         report.comparisons.append(comparison)
 
     return report
@@ -231,6 +233,22 @@ def format_report(report: BenchmarkReport) -> str:
                     lines.append(f"    +ours:   {sorted(only_ours)}")
                 if only_theirs:
                     lines.append(f"    +theirs: {sorted(only_theirs)}")
+        lines.append("")
+
+    if report.our_only:
+        lines.append(f"--- Our-only instances ({len(report.our_only)}) ---")
+        for iid in report.our_only:
+            lines.append(f"  {iid}")
+        lines.append("")
+
+    if report.swebench_only:
+        lines.append(
+            f"--- SWE-bench-only instances ({len(report.swebench_only)}) ---"
+        )
+        for iid in report.swebench_only[:20]:
+            lines.append(f"  {iid}")
+        if len(report.swebench_only) > 20:
+            lines.append(f"  ... and {len(report.swebench_only) - 20} more")
         lines.append("")
 
     return "\n".join(lines)

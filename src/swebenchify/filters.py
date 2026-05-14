@@ -15,7 +15,8 @@ from swebenchify.models import TaskInstance
 
 logger = logging.getLogger(__name__)
 
-_NEW_DEF_RE = re.compile(r"^\+\s*(?:def|class)\s+(\w+)")
+_ADDED_DEF_RE = re.compile(r"^\+\s*(?:async\s+)?(?:def|class)\s+(\w+)")
+_REMOVED_DEF_RE = re.compile(r"^-\s*(?:async\s+)?(?:def|class)\s+(\w+)")
 
 
 def apply_filters(
@@ -88,7 +89,7 @@ def get_filter_reasons(inst: TaskInstance, config: FilterConfig) -> list[str]:
     return reasons
 
 
-def check_import_attribute_error(test_log: str) -> str | None:
+def check_import_attribute_error(test_log: str | None) -> str | None:
     """Check if pre-solution test log contains ImportError or AttributeError.
 
     These indicate dependency issues rather than real bugs, so instances
@@ -108,24 +109,48 @@ def check_import_attribute_error(test_log: str) -> str | None:
     return None
 
 
-def extract_new_symbols(patch: str) -> set[str]:
-    """Extract function/class names newly introduced in a gold patch.
+def extract_new_symbols(patch: str | None) -> set[str]:
+    """Extract function/class names first introduced in a gold patch.
 
-    Parses unified diff lines starting with '+' (added lines) for
-    'def name' or 'class name' patterns. Only considers lines that are
-    additions (not context or removals).
+    Parses unified diff for added (+) and removed (-) def/class lines.
+    A symbol is "new" only if it appears in an added line but NOT in a
+    removed line — this distinguishes truly new symbols from modified
+    signatures of existing functions.
 
     Returns:
-        Set of symbol names defined in added lines.
+        Set of symbol names that are newly introduced (not modified).
     """
     if not patch:
         return set()
-    symbols: set[str] = set()
+    added: set[str] = set()
+    removed: set[str] = set()
     for line in patch.splitlines():
-        match = _NEW_DEF_RE.match(line)
-        if match:
-            symbols.add(match.group(1))
-    return symbols
+        add_match = _ADDED_DEF_RE.match(line)
+        if add_match:
+            added.add(add_match.group(1))
+            continue
+        rm_match = _REMOVED_DEF_RE.match(line)
+        if rm_match:
+            removed.add(rm_match.group(1))
+    return added - removed
+
+
+def _symbol_in_test_name(symbol: str, test_name: str) -> bool:
+    """Check if a pytest test identifier references a symbol by name.
+
+    Extracts the test function/class components from a pytest ID
+    (e.g., 'tests/foo.py::TestBar::test_baz') and checks if any
+    component ends with the symbol name. This handles conventions like
+    'test_<symbol>' and 'Test<Symbol>' without false-positiving on
+    short names that happen to appear as substrings.
+    """
+    parts = test_name.split("::")
+    for part in parts:
+        if part.endswith(symbol):
+            return True
+        if part == symbol:
+            return True
+    return False
 
 
 def check_new_symbol_in_tests(
@@ -156,7 +181,7 @@ def check_new_symbol_in_tests(
 
     for test_name in f2p:
         for symbol in new_symbols:
-            if symbol in test_name:
+            if _symbol_in_test_name(symbol, test_name):
                 return (
                     f"FAIL_TO_PASS test '{test_name}' references "
                     f"newly-created symbol '{symbol}'"

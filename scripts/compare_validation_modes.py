@@ -30,8 +30,6 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-
 from swebenchify.validation_bench import (
     BenchmarkReport,
     compare_fail_to_pass,
@@ -230,12 +228,11 @@ def main() -> None:
         help="Path to Docker-validated JSONL output (if available)",
     )
     parser.add_argument(
-        "--use-swebench-as-docker",
+        "--no-swebench-proxy",
         action="store_true",
-        default=True,
         help=(
-            "Use SWE-bench's published FAIL_TO_PASS as a proxy for "
-            "Docker validation ground truth (default: true)"
+            "Disable using SWE-bench's published FAIL_TO_PASS as a "
+            "proxy for Docker validation ground truth"
         ),
     )
     parser.add_argument(
@@ -280,13 +277,16 @@ def main() -> None:
             docker_instances = load_swebench_ground_truth(
                 args.dataset, args.split
             )
-    elif args.use_swebench_as_docker:
+    elif not args.no_swebench_proxy:
         logger.info(
             "Using SWE-bench published FAIL_TO_PASS as Docker validation proxy"
         )
         docker_instances = load_swebench_ground_truth(args.dataset, args.split)
     else:
-        logger.error("No Docker results source specified.")
+        logger.error(
+            "No Docker results source. Provide --docker-results, "
+            "--run-docker, or remove --no-swebench-proxy."
+        )
         sys.exit(1)
 
     comparisons = compare_agent_vs_docker(agent_instances, docker_instances)

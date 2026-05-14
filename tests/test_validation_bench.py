@@ -105,6 +105,14 @@ class TestLoadOurInstances:
         result = load_our_instances(jsonl)
         assert len(result) == 2
 
+    def test_missing_fail_to_pass_key(self, tmp_path: Path) -> None:
+        jsonl = tmp_path / "test.jsonl"
+        jsonl.write_text(
+            json.dumps({"instance_id": "owner__repo-3"}) + "\n"
+        )
+        result = load_our_instances(jsonl)
+        assert result == {"owner__repo-3": []}
+
     def test_missing_file_raises(self) -> None:
         with pytest.raises(FileNotFoundError):
             load_our_instances("/nonexistent/path.jsonl")
@@ -189,6 +197,8 @@ class TestFormatReport:
         assert "Exact match rate" in text
         assert "owner__repo-1" in text
         assert "EXACT" in text
+        assert "owner__repo-2" in text
+        assert "Our-only instances" in text
 
     def test_format_shows_diff_for_mismatches(self) -> None:
         report = BenchmarkReport(

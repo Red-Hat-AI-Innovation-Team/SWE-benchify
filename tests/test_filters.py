@@ -328,10 +328,31 @@ class TestExtractNewSymbols:
         )
         assert extract_new_symbols(patch) == set()
 
+    def test_modified_signature_not_new(self) -> None:
+        """A function whose signature changed appears in both - and + lines."""
+        patch = (
+            "-    def process(self, data):\n"
+            "-        return old_logic(data)\n"
+            "+    def process(self, data, strict=False):\n"
+            "+        return new_logic(data, strict)\n"
+        )
+        assert extract_new_symbols(patch) == set()
+
     def test_removed_function_not_new(self) -> None:
         patch = (
             "-def removed_func():\n"
             "-    pass\n"
+        )
+        assert extract_new_symbols(patch) == set()
+
+    def test_async_def(self) -> None:
+        patch = "+    async def new_handler(self):\n+        pass\n"
+        assert extract_new_symbols(patch) == {"new_handler"}
+
+    def test_modified_async_def_not_new(self) -> None:
+        patch = (
+            "-    async def handler(self):\n"
+            "+    async def handler(self, timeout=None):\n"
         )
         assert extract_new_symbols(patch) == set()
 
@@ -369,6 +390,13 @@ class TestCheckNewSymbolInTests:
     def test_test_does_not_reference_new_symbol(self) -> None:
         patch = "+def helper_internal():\n+    pass\n"
         f2p = json.dumps(["tests/test_basic.py::test_session_vary_cookie"])
+        result = check_new_symbol_in_tests(patch, f2p)
+        assert result is None
+
+    def test_short_symbol_no_false_positive(self) -> None:
+        """A short symbol like 'get' should not match 'test_get_request'."""
+        patch = "+def get():\n+    pass\n"
+        f2p = json.dumps(["tests/test_api.py::test_get_request"])
         result = check_new_symbol_in_tests(patch, f2p)
         assert result is None
 
