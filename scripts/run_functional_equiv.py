@@ -124,65 +124,96 @@ def agent_spec_to_swebench_format(agent_spec: dict) -> dict:
     }
 
 
+def _build_test_script(spec: dict, repo: str, commit: str) -> str:
+    """Build a bash script that clones, installs, and runs tests."""
+    install = spec.get("install", spec.get("install_cmd", "pip install ."))
+    test_cmd = spec.get("test_cmd", "pytest -rA")
+    pip_packages = spec.get("pip_packages", [])
+    pre_install = spec.get("pre_install", [])
+
+    lines = [
+        "#!/bin/bash",
+        "set -euo pipefail",
+        f"git clone https://github.com/{repo} /testbed",
+        "cd /testbed",
+        f"git checkout {commit}",
+    ]
+    for cmd in pre_install:
+        lines.append(cmd)
+    lines.append(install)
+    if pip_packages:
+        lines.append(f"pip install {' '.join(pip_packages)}")
+    test_runner = test_cmd.split()[0]
+    if test_runner in ("pytest", "tox"):
+        lines.append(f"pip install {test_runner} 2>/dev/null || true")
+    lines.append(f"{test_cmd} 2>&1 || true")
+    return "\n".join(lines)
+
+
+def _parse_pytest_output(output: str) -> tuple[list[str], list[str]]:
+    """Parse pytest output to extract passed and failed test names."""
+    passed, failed = [], []
+    for line in output.splitlines():
+        line = line.strip()
+        if line.startswith("PASSED") or " PASSED" in line:
+            parts = line.split()
+            for p in parts:
+                if "::" in p:
+                    passed.append(p)
+                    break
+        elif line.startswith("FAILED") or " FAILED" in line:
+            parts = line.split()
+            for p in parts:
+                if "::" in p:
+                    failed.append(p.rstrip(" -"))
+                    break
+    return passed, failed
+
+
 def run_tests_with_spec(
     instance: dict,
     spec: dict,
     spec_source: str,
     timeout: int = 600,
 ) -> FunctionalResult:
-    """Build a Docker image with the given spec and run tests.
-
-    Uses swebench.harness machinery to build and run.
-    """
-    from swebench.harness.constants import MAP_REPO_VERSION_TO_SPECS
-    from swebench.harness.test_spec.test_spec import make_test_spec
+    """Run tests in a podman container with the given spec."""
+    import subprocess
 
     repo = instance["repo"]
     version = instance["version"]
     commit = instance["base_commit"]
+    python_version = spec.get("python", spec.get("language_version", "3.11"))
 
-    original_specs = MAP_REPO_VERSION_TO_SPECS.get(repo, {}).get(version)
+    base_image = f"python:{python_version}-slim"
+    script = _build_test_script(spec, repo, commit)
+
+    logger.info("Running tests for %s v%s (%s spec, python %s)...",
+                repo, version, spec_source, python_version)
 
     try:
-        MAP_REPO_VERSION_TO_SPECS.setdefault(repo, {})[version] = spec
-        test_spec = make_test_spec(instance)
-
-        import docker
-        import os
-
-        docker_host = os.environ.get("DOCKER_HOST", "unix:///tmp/podman.sock")
-        client = docker.DockerClient(base_url=docker_host)
-
-        from swebench.harness.docker_build import (
-            build_base_images,
-            build_env_images,
-            build_instance_images,
+        result = subprocess.run(
+            [
+                "podman", "run", "--rm", "--network=host",
+                base_image, "bash", "-c",
+                f"apt-get update -qq && apt-get install -y -qq git > /dev/null 2>&1 && {script}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
-        from swebench.harness.run_evaluation import run_instance
 
-        logger.info("Building images for %s v%s (%s spec)...", repo, version, spec_source)
-
-        build_base_images(client, [test_spec], force_rebuild=False)
-        build_env_images(client, [test_spec], force_rebuild=False)
-
-        instance_images = build_instance_images(client, [test_spec], force_rebuild=True)
-
-        if not instance_images:
-            return FunctionalResult(
-                repo=repo, version=version, spec_source=spec_source,
-                commit=commit, error_message="Failed to build instance image",
-            )
-
-        result = run_instance(test_spec, {"model_patch": ""}, client=client, timeout=timeout)
-
-        passed = result.get("resolved_tests", {}).get("PASSED", [])
-        failed = result.get("resolved_tests", {}).get("FAILED", [])
+        output = result.stdout + result.stderr
+        passed, failed = _parse_pytest_output(output)
 
         return FunctionalResult(
             repo=repo, version=version, spec_source=spec_source,
             commit=commit, passed=passed, failed=failed, success=True,
         )
-
+    except subprocess.TimeoutExpired:
+        return FunctionalResult(
+            repo=repo, version=version, spec_source=spec_source,
+            commit=commit, error_message=f"Timeout after {timeout}s",
+        )
     except Exception as e:
         logger.error("Error running tests with %s spec for %s v%s: %s",
                       spec_source, repo, version, e)
@@ -190,9 +221,6 @@ def run_tests_with_spec(
             repo=repo, version=version, spec_source=spec_source,
             commit=commit, error_message=str(e),
         )
-    finally:
-        if original_specs is not None:
-            MAP_REPO_VERSION_TO_SPECS[repo][version] = original_specs
 
 
 def compare_results(
