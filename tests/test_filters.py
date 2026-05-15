@@ -7,7 +7,13 @@ import json
 import pytest
 
 from swebenchify.config import FilterConfig
-from swebenchify.filters import apply_filters, get_filter_reasons
+from swebenchify.filters import (
+    apply_filters,
+    check_import_attribute_error,
+    check_new_symbol_in_tests,
+    extract_new_symbols,
+    get_filter_reasons,
+)
 from swebenchify.models import TaskInstance
 
 
@@ -121,7 +127,7 @@ class TestGetFilterReasons:
         inst = _make_instance(patch="")
         config = FilterConfig()
         reasons = get_filter_reasons(inst, config)
-        assert any("empty" in r for r in reasons)
+        assert any("patch too small" in r for r in reasons)
 
     def test_no_fail_to_pass(self) -> None:
         inst = _make_instance(FAIL_TO_PASS=json.dumps([]))
@@ -150,13 +156,13 @@ class TestGetFilterReasons:
         inst = _make_instance(patch="line1\nline2\nline3")
         config = FilterConfig(min_patch_lines=5)
         reasons = get_filter_reasons(inst, config)
-        assert any("empty" in r for r in reasons)
+        assert any("patch too small" in r for r in reasons)
 
     def test_min_patch_lines_passes_at_threshold(self) -> None:
         inst = _make_instance(patch="line1\nline2\nline3")
         config = FilterConfig(min_patch_lines=3)
         reasons = get_filter_reasons(inst, config)
-        assert not any("empty" in r for r in reasons)
+        assert not any("patch too small" in r for r in reasons)
 
     def test_min_fail_to_pass_configurable(self) -> None:
         """With min_fail_to_pass=2 and only 1 test, should be filtered."""
@@ -259,3 +265,181 @@ class TestApplyFilters:
         config = FilterConfig(min_problem_statement_words=40)
         filtered = apply_filters([inst], config)
         assert len(filtered) == 0
+
+
+class TestCheckImportAttributeError:
+    """Tests for the ImportError/AttributeError pre-solution log filter."""
+
+    def test_clean_log(self) -> None:
+        log = "PASSED test_foo\nFAILED test_bar - AssertionError"
+        assert check_import_attribute_error(log) is None
+
+    def test_import_error(self) -> None:
+        log = "FAILED test_foo - ImportError: No module named 'missing'"
+        result = check_import_attribute_error(log)
+        assert result is not None
+        assert "ImportError" in result
+
+    def test_attribute_error(self) -> None:
+        log = "FAILED test_bar - AttributeError: 'Foo' has no attribute 'bar'"
+        result = check_import_attribute_error(log)
+        assert result is not None
+        assert "AttributeError" in result
+
+    def test_empty_log(self) -> None:
+        assert check_import_attribute_error("") is None
+
+    def test_none_log(self) -> None:
+        assert check_import_attribute_error(None) is None
+
+    def test_both_errors(self) -> None:
+        log = "ImportError: x\nAttributeError: y"
+        result = check_import_attribute_error(log)
+        assert result is not None
+
+
+class TestExtractNewSymbols:
+    """Tests for extracting newly-defined symbols from gold patches."""
+
+    def test_new_function(self) -> None:
+        patch = (
+            "diff --git a/foo.py b/foo.py\n"
+            "--- a/foo.py\n"
+            "+++ b/foo.py\n"
+            "@@ -1 +1,3 @@\n"
+            " existing_line\n"
+            "+def new_helper():\n"
+            "+    pass\n"
+        )
+        assert extract_new_symbols(patch) == {"new_helper"}
+
+    def test_new_class(self) -> None:
+        patch = (
+            "+class NewWidget:\n"
+            "+    pass\n"
+        )
+        assert extract_new_symbols(patch) == {"NewWidget"}
+
+    def test_modified_function_not_new(self) -> None:
+        patch = (
+            " def existing_func():\n"
+            "-    return old\n"
+            "+    return new\n"
+        )
+        assert extract_new_symbols(patch) == set()
+
+    def test_modified_signature_not_new(self) -> None:
+        """A function whose signature changed appears in both - and + lines."""
+        patch = (
+            "-    def process(self, data):\n"
+            "-        return old_logic(data)\n"
+            "+    def process(self, data, strict=False):\n"
+            "+        return new_logic(data, strict)\n"
+        )
+        assert extract_new_symbols(patch) == set()
+
+    def test_removed_function_not_new(self) -> None:
+        patch = (
+            "-def removed_func():\n"
+            "-    pass\n"
+        )
+        assert extract_new_symbols(patch) == set()
+
+    def test_async_def(self) -> None:
+        patch = "+    async def new_handler(self):\n+        pass\n"
+        assert extract_new_symbols(patch) == {"new_handler"}
+
+    def test_modified_async_def_not_new(self) -> None:
+        patch = (
+            "-    async def handler(self):\n"
+            "+    async def handler(self, timeout=None):\n"
+        )
+        assert extract_new_symbols(patch) == set()
+
+    def test_multiple_new_symbols(self) -> None:
+        patch = (
+            "+def func_a():\n"
+            "+    pass\n"
+            "+class ClassB:\n"
+            "+    pass\n"
+        )
+        symbols = extract_new_symbols(patch)
+        assert symbols == {"func_a", "ClassB"}
+
+    def test_empty_patch(self) -> None:
+        assert extract_new_symbols("") == set()
+
+    def test_none_patch(self) -> None:
+        assert extract_new_symbols(None) == set()
+
+    def test_indented_new_def(self) -> None:
+        patch = "+    def inner_method(self):\n"
+        assert extract_new_symbols(patch) == {"inner_method"}
+
+
+class TestCheckNewSymbolInTests:
+    """Tests for the newly-created function/class exclusion filter."""
+
+    def test_test_references_new_symbol(self) -> None:
+        patch = "+def patch_vary_header():\n+    pass\n"
+        f2p = json.dumps(["tests/test_basic.py::test_patch_vary_header"])
+        result = check_new_symbol_in_tests(patch, f2p)
+        assert result is not None
+        assert "patch_vary_header" in result
+
+    def test_test_does_not_reference_new_symbol(self) -> None:
+        patch = "+def helper_internal():\n+    pass\n"
+        f2p = json.dumps(["tests/test_basic.py::test_session_vary_cookie"])
+        result = check_new_symbol_in_tests(patch, f2p)
+        assert result is None
+
+    def test_short_symbol_no_false_positive(self) -> None:
+        """A short symbol like 'get' should not match 'test_get_request'."""
+        patch = "+def get():\n+    pass\n"
+        f2p = json.dumps(["tests/test_api.py::test_get_request"])
+        result = check_new_symbol_in_tests(patch, f2p)
+        assert result is None
+
+    def test_parametrized_test_still_matches(self) -> None:
+        """Parametrized tests like test_foo[param] should match symbol foo."""
+        patch = "+def new_handler():\n+    pass\n"
+        f2p = json.dumps(["tests/test.py::test_new_handler[gzip]"])
+        result = check_new_symbol_in_tests(patch, f2p)
+        assert result is not None
+        assert "new_handler" in result
+
+    def test_no_new_symbols(self) -> None:
+        patch = " def existing():\n-    old\n+    new\n"
+        f2p = json.dumps(["tests/test.py::test_existing"])
+        result = check_new_symbol_in_tests(patch, f2p)
+        assert result is None
+
+    def test_invalid_f2p_json(self) -> None:
+        patch = "+def new_func():\n"
+        result = check_new_symbol_in_tests(patch, "not json")
+        assert result is None
+
+    def test_empty_f2p(self) -> None:
+        patch = "+def new_func():\n"
+        result = check_new_symbol_in_tests(patch, "[]")
+        assert result is None
+
+    def test_filter_integration_enabled(self) -> None:
+        """Instance with test referencing new symbol should be filtered."""
+        inst = _make_instance(
+            patch="+def brand_new_thing():\n+    pass\n",
+            FAIL_TO_PASS=json.dumps(["tests/test.py::test_brand_new_thing"]),
+        )
+        config = FilterConfig(no_new_symbol_tests=True)
+        reasons = get_filter_reasons(inst, config)
+        assert any("newly-created symbol" in r for r in reasons)
+
+    def test_filter_integration_disabled(self) -> None:
+        """With filter disabled, new symbol references are allowed."""
+        inst = _make_instance(
+            patch="+def brand_new_thing():\n+    pass\n",
+            FAIL_TO_PASS=json.dumps(["tests/test.py::test_brand_new_thing"]),
+        )
+        config = FilterConfig(no_new_symbol_tests=False)
+        reasons = get_filter_reasons(inst, config)
+        assert not any("newly-created symbol" in r for r in reasons)
