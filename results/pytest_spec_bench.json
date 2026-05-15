@@ -1,0 +1,66 @@
+{
+  "pytest-dev/pytest": {
+    "overall_score": 1.0,
+    "field_match_rates": {
+      "python": 1.0,
+      "install": 1.0,
+      "test_cmd": 1.0,
+      "pip_packages": 1.0,
+      "pre_install": 1.0
+    },
+    "versions": [
+      {
+        "version": "5.4",
+        "overall": 1.0,
+        "fields": {
+          "python": {
+            "match": true,
+            "detail": "3.9"
+          },
+          "install": {
+            "match": true,
+            "detail": "functional match (both pip install)"
+          },
+          "test_cmd": {
+            "match": true,
+            "detail": "exact match"
+          },
+          "pip_packages": {
+            "match": true,
+            "detail": "5/5 expected packages covered (100%); extra: ['argcomplete', 'hypothesis', 'importlib_metadata', 'mock', 'nose', 'pygments', 'sortedcontainers', 'wcwidth', 'xmlschema']"
+          },
+          "pre_install": {
+            "match": true,
+            "detail": "both empty"
+          }
+        }
+      },
+      {
+        "version": "7.2",
+        "overall": 1.0,
+        "fields": {
+          "python": {
+            "match": true,
+            "detail": "3.9"
+          },
+          "install": {
+            "match": true,
+            "detail": "functional match (both pip install)"
+          },
+          "test_cmd": {
+            "match": true,
+            "detail": "same runner (pytest)"
+          },
+          "pip_packages": {
+            "match": true,
+            "detail": "6/6 expected packages covered (100%); extra: ['argcomplete', 'exceptiongroup', 'hypothesis', 'mock', 'nose', 'pygments', 'requests', 'typing_extensions', 'xmlschema']"
+          },
+          "pre_install": {
+            "match": true,
+            "detail": "both empty"
+          }
+        }
+      }
+    ]
+  }
+}

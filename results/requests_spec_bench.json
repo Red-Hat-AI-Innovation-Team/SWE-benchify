@@ -1,0 +1,170 @@
+{
+  "psf/requests": {
+    "overall_score": 0.6333333333333333,
+    "field_match_rates": {
+      "python": 1.0,
+      "install": 0.0,
+      "test_cmd": 0.8333333333333334,
+      "pip_packages": 1.0,
+      "pre_install": 0.3333333333333333
+    },
+    "versions": [
+      {
+        "version": "0.14",
+        "overall": 0.4,
+        "fields": {
+          "python": {
+            "match": true,
+            "detail": "3.9"
+          },
+          "install": {
+            "match": false,
+            "detail": "gen=python -m pip install -e . exp=python -m pip install ."
+          },
+          "test_cmd": {
+            "match": false,
+            "detail": "different runners: gen=python exp=pytest"
+          },
+          "pip_packages": {
+            "match": true,
+            "detail": "both empty"
+          },
+          "pre_install": {
+            "match": false,
+            "detail": "gen=['pip install nose'] exp=[]"
+          }
+        }
+      },
+      {
+        "version": "1.2",
+        "overall": 0.8,
+        "fields": {
+          "python": {
+            "match": true,
+            "detail": "3.9"
+          },
+          "install": {
+            "match": false,
+            "detail": "gen=python -m pip install -e . exp=python -m pip install ."
+          },
+          "test_cmd": {
+            "match": true,
+            "detail": "same runner (pytest)"
+          },
+          "pip_packages": {
+            "match": true,
+            "detail": "both empty"
+          },
+          "pre_install": {
+            "match": true,
+            "detail": "both empty"
+          }
+        }
+      },
+      {
+        "version": "2.19",
+        "overall": 0.8,
+        "fields": {
+          "python": {
+            "match": true,
+            "detail": "3.9"
+          },
+          "install": {
+            "match": false,
+            "detail": "gen=python -m pip install -e '.[socks]' && python -m pip install pytest-httpbin==0.0.7 pytest-cov pytest-mock pytest-xdist 'PySocks>=1.5.6,!=1.5.7' 'pytest>=2.8.0' exp=python -m pip install ."
+          },
+          "test_cmd": {
+            "match": true,
+            "detail": "same runner (pytest)"
+          },
+          "pip_packages": {
+            "match": true,
+            "detail": "both empty"
+          },
+          "pre_install": {
+            "match": true,
+            "detail": "both empty"
+          }
+        }
+      },
+      {
+        "version": "2.27",
+        "overall": 0.6,
+        "fields": {
+          "python": {
+            "match": true,
+            "detail": "3.9"
+          },
+          "install": {
+            "match": false,
+            "detail": "gen=python -m pip install -e .[socks] exp=python -m pip install ."
+          },
+          "test_cmd": {
+            "match": true,
+            "detail": "same runner (pytest)"
+          },
+          "pip_packages": {
+            "match": true,
+            "detail": "both empty"
+          },
+          "pre_install": {
+            "match": false,
+            "detail": "gen=['pip install -r requirements-dev.txt', 'pip install \"pytest-xdist<3\"', 'pip install \"markupsafe==2.0.1\"'] exp=[]"
+          }
+        }
+      },
+      {
+        "version": "2.5",
+        "overall": 0.6,
+        "fields": {
+          "python": {
+            "match": true,
+            "detail": "3.9"
+          },
+          "install": {
+            "match": false,
+            "detail": "gen=python -m pip install -e . exp=python -m pip install ."
+          },
+          "test_cmd": {
+            "match": true,
+            "detail": "same runner (pytest)"
+          },
+          "pip_packages": {
+            "match": true,
+            "detail": "both empty"
+          },
+          "pre_install": {
+            "match": false,
+            "detail": "gen=[\"pip install 'pytest>=7,<8' 'py>=1.11' 'pytest-cov>=4'\"] exp=[]"
+          }
+        }
+      },
+      {
+        "version": "3.0",
+        "overall": 0.6,
+        "fields": {
+          "python": {
+            "match": true,
+            "detail": "3.9"
+          },
+          "install": {
+            "match": false,
+            "detail": "gen=python -m pip install -e . exp=python -m pip install ."
+          },
+          "test_cmd": {
+            "match": true,
+            "detail": "same runner (pytest)"
+          },
+          "pip_packages": {
+            "match": true,
+            "detail": "both empty"
+          },
+          "pre_install": {
+            "match": false,
+            "detail": "gen=[\"pip install 'pytest>=6' 'pytest-httpbin>=0.0.7' 'pytest-cov>=2.5' 'httpbin>=0.4.0'\", 'pip uninstall -y pytest-xdist pytest-forked || true'] exp=[]"
+          }
+        }
+      }
+    ]
+  }
+}

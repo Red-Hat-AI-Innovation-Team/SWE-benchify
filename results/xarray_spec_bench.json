@@ -1,0 +1,66 @@
+{
+  "pydata/xarray": {
+    "overall_score": 0.7,
+    "field_match_rates": {
+      "python": 0.5,
+      "install": 1.0,
+      "test_cmd": 1.0,
+      "pip_packages": 0.0,
+      "pre_install": 1.0
+    },
+    "versions": [
+      {
+        "version": "0.19",
+        "overall": 0.6,
+        "fields": {
+          "python": {
+            "match": false,
+            "detail": "gen=3.9 exp=3.10"
+          },
+          "install": {
+            "match": true,
+            "detail": "functional match (both pip install)"
+          },
+          "test_cmd": {
+            "match": true,
+            "detail": "exact match"
+          },
+          "pip_packages": {
+            "match": false,
+            "detail": "6/10 expected packages covered (60%); missing: ['dask', 'scipy', 'setuptools', 'six']; extra: ['exceptiongroup', 'iniconfig', 'pluggy', 'pytest_timeout', 'tomli', 'typing_extensions']"
+          },
+          "pre_install": {
+            "match": true,
+            "detail": "both empty"
+          }
+        }
+      },
+      {
+        "version": "2022.06",
+        "overall": 0.8,
+        "fields": {
+          "python": {
+            "match": true,
+            "detail": "3.10"
+          },
+          "install": {
+            "match": true,
+            "detail": "functional match (both pip install)"
+          },
+          "test_cmd": {
+            "match": true,
+            "detail": "exact match"
+          },
+          "pip_packages": {
+            "match": false,
+            "detail": "4/10 expected packages covered (40%); missing: ['dask', 'python_dateutil', 'pytz', 'scipy', 'setuptools', 'six']"
+          },
+          "pre_install": {
+            "match": true,
+            "detail": "both empty"
+          }
+        }
+      }
+    ]
+  }
+}

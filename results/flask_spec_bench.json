@@ -1,0 +1,118 @@
+{
+  "pallets/flask": {
+    "overall_score": 0.55,
+    "field_match_rates": {
+      "python": 0.25,
+      "install": 1.0,
+      "test_cmd": 1.0,
+      "pip_packages": 0.0,
+      "pre_install": 0.5
+    },
+    "versions": [
+      {
+        "version": "2.0",
+        "overall": 0.6,
+        "fields": {
+          "python": {
+            "match": false,
+            "detail": "gen=3.11 exp=3.9"
+          },
+          "install": {
+            "match": true,
+            "detail": "functional match (both pip editable)"
+          },
+          "test_cmd": {
+            "match": true,
+            "detail": "same runner (pytest)"
+          },
+          "pip_packages": {
+            "match": false,
+            "detail": "missing all 6 expected packages"
+          },
+          "pre_install": {
+            "match": true,
+            "detail": "both empty"
+          }
+        }
+      },
+      {
+        "version": "2.1",
+        "overall": 0.4,
+        "fields": {
+          "python": {
+            "match": false,
+            "detail": "gen=3.11 exp=3.10"
+          },
+          "install": {
+            "match": true,
+            "detail": "functional match (both pip editable)"
+          },
+          "test_cmd": {
+            "match": true,
+            "detail": "same runner (pytest)"
+          },
+          "pip_packages": {
+            "match": false,
+            "detail": "missing all 6 expected packages"
+          },
+          "pre_install": {
+            "match": false,
+            "detail": "gen=['python3.11 -m venv .venv', '. .venv/bin/activate'] exp=[]"
+          }
+        }
+      },
+      {
+        "version": "2.2",
+        "overall": 0.6,
+        "fields": {
+          "python": {
+            "match": false,
+            "detail": "gen=3.13 exp=3.11"
+          },
+          "install": {
+            "match": true,
+            "detail": "functional match (both pip editable)"
+          },
+          "test_cmd": {
+            "match": true,
+            "detail": "same runner (pytest)"
+          },
+          "pip_packages": {
+            "match": false,
+            "detail": "missing all 6 expected packages"
+          },
+          "pre_install": {
+            "match": true,
+            "detail": "both empty"
+          }
+        }
+      },
+      {
+        "version": "2.3",
+        "overall": 0.6,
+        "fields": {
+          "python": {
+            "match": true,
+            "detail": "3.11"
+          },
+          "install": {
+            "match": true,
+            "detail": "functional match (both pip editable)"
+          },
+          "test_cmd": {
+            "match": true,
+            "detail": "same runner (pytest)"
+          },
+          "pip_packages": {
+            "match": false,
+            "detail": "missing all 6 expected packages"
+          },
+          "pre_install": {
+            "match": false,
+            "detail": "gen=['python3.11 -m venv .venv', 'source .venv/bin/activate'] exp=[]"
+          }
+        }
+      }
+    ]
+  }
+}
