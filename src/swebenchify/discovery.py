@@ -34,8 +34,11 @@ Read configuration files to find which Python version the project targets:
 - .python-version
 - CI configs (.github/workflows/*.yml): look for Python version matrix
 
-Report the MINIMUM supported version (e.g. if requires-python >= 3.8, \
-report "3.8"). If not specified, use "3.9".
+Report the HIGHEST version from the CI test matrix or tox envlist. \
+For example, if tox tests py38, py39, py310, py311 — report "3.11". \
+If CI tests 3.9 and 3.10, report "3.10". Only fall back to \
+requires-python if no CI/tox config exists. If nothing is specified, \
+use "3.9".
 
 ## Step 2: Read build configuration
 
