@@ -22,42 +22,79 @@ logger = logging.getLogger(__name__)
 ENV_DISCOVERY_PROMPT = """\
 You are setting up the build and test environment for {repo} at commit {commit}.
 
-Explore the repository. Find and read build configuration files (setup.py, \
-pyproject.toml, package.json, Cargo.toml, go.mod, Makefile, tox.ini, \
-setup.cfg, etc.).
+This environment will run inside a Docker container. Do NOT create virtual \
+environments (venv/virtualenv) — install directly into the system Python.
 
-Your tasks:
-1. Identify the language, version, and package manager.
-2. Install the project and its dependencies (prefer dev/editable installs).
-3. Find the test command and run a quick smoke test to confirm it works.
-4. Extract the project version from metadata files.
+## Step 1: Detect the target Python version
 
-When done, write two JSON files to the current directory:
+Read configuration files to find which Python version the project targets:
+- pyproject.toml: `[project] requires-python`
+- setup.cfg: `[options] python_requires`
+- tox.ini: `[tox] envlist` (e.g. py39 means 3.9)
+- .python-version
+- CI configs (.github/workflows/*.yml): look for Python version matrix
 
-1. `env_spec.json` with this exact schema:
+Report the MINIMUM supported version (e.g. if requires-python >= 3.8, \
+report "3.8"). If not specified, use "3.9".
+
+## Step 2: Read build configuration
+
+Find and read: setup.py, pyproject.toml, setup.cfg, package.json, \
+Cargo.toml, go.mod, Makefile, tox.ini, requirements*.txt.
+
+## Step 3: Install the project
+
+Install the project and its dependencies. Use `python -m pip install .` \
+for the base install. For Python projects, prefer non-editable installs \
+unless the test suite requires editable mode.
+
+## Step 4: Determine pinned dependency versions
+
+After installing, run `pip freeze` and extract the pinned versions of \
+the project's direct dependencies. List them in `pip_packages` as \
+`["package==version", ...]`. Focus on the project's own deps, not \
+transitive sub-dependencies.
+
+## Step 5: Find and verify the test command
+
+Find the test command (pytest, tox, unittest, etc.). Run a quick smoke \
+test to confirm it works. Use the simplest form: prefer `pytest -rA` \
+over `python -m pytest tests/ -x --tb=short -q`.
+
+## Step 6: Extract project version
+
+Get the version from metadata files (major.minor format, e.g. "2.3").
+
+## Output
+
+Write two JSON files to the current directory:
+
+1. `env_spec.json`:
    {{
      "language": "<e.g. python>",
-     "language_version": "<e.g. 3.11>",
+     "language_version": "<target python version, e.g. 3.9>",
      "package_manager": "<e.g. pip>",
-     "install_cmd": "<e.g. pip install -e .[dev]>",
-     "test_cmd": "<e.g. python -m pytest -x>",
-     "pre_install": ["<optional setup commands>"],
+     "install_cmd": "<e.g. python -m pip install .>",
+     "test_cmd": "<e.g. pytest -rA>",
+     "pip_packages": ["<package==version>", "..."],
+     "pre_install": [],
      "system_dependencies": ["<optional apt packages>"]
    }}
 
-2. `version.json` with this exact schema:
+2. `version.json`:
    {{
      "repo": "{repo}",
      "commit": "{commit}",
-     "version": "<e.g. 2.3.1>"
+     "version": "<e.g. 2.3>"
    }}
 
-Constraints:
-- You may install system packages with apt-get.
-- Prefer editable/development installs.
-- The test command should run fast (target: under 5 minutes for the full suite).
-- If the full test suite takes too long, find a subset command.
-- If something fails, read error messages carefully and try alternatives.
+## Rules
+- Do NOT create virtual environments — this runs in Docker.
+- `pre_install` should only contain system setup (apt-get). Do NOT put \
+  pip install commands or venv creation here.
+- `install_cmd` should be a single command that installs the project. \
+  Put test framework deps in `pip_packages` instead.
+- The test command should run fast (under 5 minutes for the full suite).
 - Do NOT include any text outside the JSON in the output files.
 """
 

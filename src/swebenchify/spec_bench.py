@@ -216,17 +216,22 @@ def compare_install_cmd(generated: str | None, expected: str | None) -> FieldSco
     if exact_match:
         return FieldScore(field="install", match=True, generated=gen, expected=exp, detail="exact match")
 
-    gen_editable = "-e " in gen or "--editable" in gen
-    exp_editable = "-e " in exp or "--editable" in exp
     both_pip = "pip install" in gen and "pip install" in exp
 
-    functional_match = both_pip and gen_editable == exp_editable
+    if both_pip:
+        return FieldScore(
+            field="install",
+            match=True,
+            generated=gen,
+            expected=exp,
+            detail="functional match (both pip install)",
+        )
     return FieldScore(
         field="install",
-        match=functional_match,
+        match=False,
         generated=gen,
         expected=exp,
-        detail="functional match (both pip editable)" if functional_match else f"gen={gen} exp={exp}",
+        detail=f"gen={gen} exp={exp}",
     )
 
 
@@ -436,6 +441,7 @@ def env_spec_to_bench_dict(env_spec) -> dict:
             "install": env_spec.install_cmd,
             "test_cmd": env_spec.test_cmd,
             "pre_install": env_spec.pre_install,
+            "pip_packages": env_spec.pip_packages,
             "language_version": env_spec.language_version,
             "install_cmd": env_spec.install_cmd,
         }

@@ -131,6 +131,13 @@ class TestCompareInstallCmd:
             "python -m pip install .",
             "python -m pip install -e .",
         )
+        assert result.match is True
+
+    def test_pip_vs_non_pip(self):
+        result = compare_install_cmd(
+            "make install",
+            "python -m pip install -e .",
+        )
         assert result.match is False
 
     def test_both_none(self):

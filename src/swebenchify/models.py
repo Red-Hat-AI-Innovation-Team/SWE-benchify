@@ -73,6 +73,7 @@ class EnvironmentSpec:
     install_cmd: str
     test_cmd: str
     pre_install: list[str] = field(default_factory=list)
+    pip_packages: list[str] = field(default_factory=list)
     system_dependencies: list[str] = field(default_factory=list)
 
 
