@@ -24,14 +24,12 @@ See PLAN.md Section 1.2c.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from swebenchify.validation_bench import (
-    BenchmarkReport,
     compare_fail_to_pass,
     format_report,
     load_our_instances,

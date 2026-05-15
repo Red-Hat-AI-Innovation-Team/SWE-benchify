@@ -127,7 +127,7 @@ class TestGetFilterReasons:
         inst = _make_instance(patch="")
         config = FilterConfig()
         reasons = get_filter_reasons(inst, config)
-        assert any("empty" in r for r in reasons)
+        assert any("patch too small" in r for r in reasons)
 
     def test_no_fail_to_pass(self) -> None:
         inst = _make_instance(FAIL_TO_PASS=json.dumps([]))
@@ -156,13 +156,13 @@ class TestGetFilterReasons:
         inst = _make_instance(patch="line1\nline2\nline3")
         config = FilterConfig(min_patch_lines=5)
         reasons = get_filter_reasons(inst, config)
-        assert any("empty" in r for r in reasons)
+        assert any("patch too small" in r for r in reasons)
 
     def test_min_patch_lines_passes_at_threshold(self) -> None:
         inst = _make_instance(patch="line1\nline2\nline3")
         config = FilterConfig(min_patch_lines=3)
         reasons = get_filter_reasons(inst, config)
-        assert not any("empty" in r for r in reasons)
+        assert not any("patch too small" in r for r in reasons)
 
     def test_min_fail_to_pass_configurable(self) -> None:
         """With min_fail_to_pass=2 and only 1 test, should be filtered."""
@@ -399,6 +399,14 @@ class TestCheckNewSymbolInTests:
         f2p = json.dumps(["tests/test_api.py::test_get_request"])
         result = check_new_symbol_in_tests(patch, f2p)
         assert result is None
+
+    def test_parametrized_test_still_matches(self) -> None:
+        """Parametrized tests like test_foo[param] should match symbol foo."""
+        patch = "+def new_handler():\n+    pass\n"
+        f2p = json.dumps(["tests/test.py::test_new_handler[gzip]"])
+        result = check_new_symbol_in_tests(patch, f2p)
+        assert result is not None
+        assert "new_handler" in result
 
     def test_no_new_symbols(self) -> None:
         patch = " def existing():\n-    old\n+    new\n"

@@ -70,7 +70,7 @@ def get_filter_reasons(inst: TaskInstance, config: FilterConfig) -> list[str]:
     if patch_lines > config.max_patch_lines:
         reasons.append(f"patch too large ({patch_lines} lines)")
     if patch_lines < config.min_patch_lines:
-        reasons.append("patch is empty")
+        reasons.append(f"patch too small ({patch_lines} lines, min {config.min_patch_lines})")
 
     # FAIL_TO_PASS
     try:
@@ -94,6 +94,12 @@ def check_import_attribute_error(test_log: str | None) -> str | None:
 
     These indicate dependency issues rather than real bugs, so instances
     with these errors should be discarded (SWE-bench paper filter).
+
+    Not yet integrated into get_filter_reasons() because TaskInstance
+    does not store pre-solution test logs. To wire this in:
+    TODO: add a pre_solution_log field to TaskInstance, a FilterConfig
+    flag, and call this from get_filter_reasons(). Until then, call
+    this directly from the validation stage when logs are available.
 
     Args:
         test_log: Raw test output from running tests before applying the fix.
@@ -139,16 +145,16 @@ def _symbol_in_test_name(symbol: str, test_name: str) -> bool:
     """Check if a pytest test identifier references a symbol by name.
 
     Extracts the test function/class components from a pytest ID
-    (e.g., 'tests/foo.py::TestBar::test_baz') and checks if any
-    component ends with the symbol name. This handles conventions like
+    (e.g., 'tests/foo.py::TestBar::test_baz[param]') and checks if
+    any component ends with the symbol name. Strips parametrize
+    suffixes ([...]) before matching. This handles conventions like
     'test_<symbol>' and 'Test<Symbol>' without false-positiving on
     short names that happen to appear as substrings.
     """
     parts = test_name.split("::")
     for part in parts:
-        if part.endswith(symbol):
-            return True
-        if part == symbol:
+        bare = part.split("[")[0]
+        if bare.endswith(symbol) or bare == symbol:
             return True
     return False
 
