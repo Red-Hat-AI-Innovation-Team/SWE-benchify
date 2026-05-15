@@ -135,7 +135,7 @@ def run_tests_with_spec(
     Uses swebench.harness machinery to build and run.
     """
     from swebench.harness.constants import MAP_REPO_VERSION_TO_SPECS
-    from swebench.harness.test_spec import make_test_spec
+    from swebench.harness.test_spec.test_spec import make_test_spec
 
     repo = instance["repo"]
     version = instance["version"]
