@@ -1,0 +1,112 @@
+{
+  "astropy/astropy": {
+    "ours": 954,
+    "swebench": 95,
+    "overlap": 95,
+    "missing": 0,
+    "extra": 859,
+    "overlap_rate": 1.0
+  },
+  "django/django": {
+    "ours": 110,
+    "swebench": 850,
+    "overlap": 30,
+    "missing": 820,
+    "extra": 80,
+    "overlap_rate": 0.03529411764705882
+  },
+  "matplotlib/matplotlib": {
+    "ours": 1001,
+    "swebench": 184,
+    "overlap": 183,
+    "missing": 1,
+    "extra": 818,
+    "overlap_rate": 0.9945652173913043
+  },
+  "mwaskom/seaborn": {
+    "ours": 181,
+    "swebench": 22,
+    "overlap": 22,
+    "missing": 0,
+    "extra": 159,
+    "overlap_rate": 1.0
+  },
+  "pallets/flask": {
+    "ours": 310,
+    "swebench": 11,
+    "overlap": 11,
+    "missing": 0,
+    "extra": 299,
+    "overlap_rate": 1.0
+  },
+  "psf/requests": {
+    "ours": 230,
+    "swebench": 44,
+    "overlap": 43,
+    "missing": 1,
+    "extra": 187,
+    "overlap_rate": 0.9772727272727273
+  },
+  "pydata/xarray": {
+    "ours": 815,
+    "swebench": 110,
+    "overlap": 110,
+    "missing": 0,
+    "extra": 705,
+    "overlap_rate": 1.0
+  },
+  "pylint-dev/astroid": {
+    "ours": 121,
+    "swebench": 0,
+    "overlap": 0,
+    "missing": 0,
+    "extra": 121,
+    "overlap_rate": 0.0
+  },
+  "pylint-dev/pylint": {
+    "ours": 0,
+    "swebench": 57,
+    "overlap": 0,
+    "missing": 57,
+    "extra": 0,
+    "overlap_rate": 0.0
+  },
+  "pytest-dev/pytest": {
+    "ours": 0,
+    "swebench": 119,
+    "overlap": 0,
+    "missing": 119,
+    "extra": 0,
+    "overlap_rate": 0.0
+  },
+  "scikit-learn/scikit-learn": {
+    "ours": 0,
+    "swebench": 229,
+    "overlap": 0,
+    "missing": 229,
+    "extra": 0,
+    "overlap_rate": 0.0
+  },
+  "sphinx-doc/sphinx": {
+    "ours": 696,
+    "swebench": 187,
+    "overlap": 187,
+    "missing": 0,
+    "extra": 509,
+    "overlap_rate": 1.0
+  },
+  "sympy/sympy": {
+    "ours": 3192,
+    "swebench": 386,
+    "overlap": 386,
+    "missing": 0,
+    "extra": 2806,
+    "overlap_rate": 1.0
+  },
+  "_total": {
+    "ours": 7610,
+    "swebench": 2294,
+    "overlap": 1067,
+    "overlap_rate": 0.46512641673932
+  }
+}
