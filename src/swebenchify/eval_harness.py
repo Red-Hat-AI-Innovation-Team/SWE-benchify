@@ -72,11 +72,23 @@ async def eval_instance(
     f2p_tests = json.loads(instance.FAIL_TO_PASS)
 
     # Prepare workspace: repo at base_commit with test_patch applied
-    # Use a separate eval_instances directory to avoid colliding with validation workspaces
-    inst_dir = (workspace_mgr.repo_dir(repo) / "eval_instances" / instance.instance_id).resolve()
+    # Include model name in the path so different models get clean worktrees
+    inst_dir = (workspace_mgr.repo_dir(repo) / "eval_instances" / f"{model}_{instance.instance_id}").resolve()
     worktree = inst_dir / "repo"
 
     workspace_mgr.ensure_bare_clone(repo)
+
+    # Remove stale worktree to ensure clean state
+    if worktree.exists():
+        import shutil
+        bare_clone = workspace_mgr.bare_clone_path(repo)
+        subprocess.run(
+            ["git", "--git-dir", str(bare_clone), "worktree", "remove", "--force", str(worktree)],
+            capture_output=True, text=True,
+        )
+        if worktree.exists():
+            shutil.rmtree(worktree, ignore_errors=True)
+
     inst_dir.mkdir(parents=True, exist_ok=True)
     workspace_mgr.create_worktree(repo, instance.base_commit, worktree)
 
