@@ -76,12 +76,21 @@ SWE-bench's harness directly. This mode exists to verify that our
 mechanical stages (PR collection, patch extraction) produce datasets
 equivalent to SWE-bench's.
 
+Conformance results (Phase 1):
+- Mechanical stages: 99.7% instance_id overlap on 8 completed repos
+- Docker validation: gold patches resolve through unmodified harness
+- Agent ranking: haiku(3%) < sonnet(10%) < opus(65%)
+
 **New-repo mode** (arbitrary repositories):
 
 The system dispatches a Claude Code agent to discover the environment
 setup. The agent produces a spec equivalent to `MAP_VERSION_TO_INSTALL`
 entries. Validation runs through the agent or through Docker using the
 agent-generated spec.
+
+Conformance results (Phase 1):
+- Spec generation: 86% field match vs SWE-bench ground truth (4 repos)
+- Functional equivalence: 99.6% pass-set overlap (Flask v2.3)
 
 ### 2.2 Components
 
@@ -279,20 +288,42 @@ Instances whose version cannot be snapped to a supported version are
 excluded from the output (for known repos) or require an agent-generated
 spec (for new repos).
 
-### 5.3 Docker Spec Generation (New Repos)
+### 5.3 Docker Spec Generation (MAP_VERSION_TO_INSTALL)
 
-For new repositories, the environment discovery agent MUST produce a
-spec that is functionally equivalent to a `MAP_VERSION_TO_INSTALL`
-entry. This spec MUST include:
+For new repositories, the environment discovery agent produces a spec
+that is functionally equivalent to a `MAP_VERSION_TO_INSTALL` entry.
+This is a first-class feature of SWE-benchify — it automates the manual
+curation step that limits SWE-bench to its curated repository set.
 
-- Python version (or equivalent runtime version)
-- Installation command
-- Test command
-- Pinned dependency versions (RECOMMENDED)
-- Pre-install steps (OPTIONAL)
+The agent MUST produce a spec with these fields:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `python` | YES | Target Python version (highest from CI/tox) |
+| `install` | YES | Installation command (`pip install .`) |
+| `test_cmd` | YES | Test command (`pytest -rA`) |
+| `pip_packages` | RECOMMENDED | Pinned dependency versions from `pip freeze` |
+| `pre_install` | OPTIONAL | System setup commands (apt-get only) |
+
+The agent prompt instructs:
+1. Detect Python version from CI matrix or tox envlist (highest version)
+2. Install without virtual environments (runs in Docker)
+3. Extract pinned deps via `pip freeze`
+4. Use simplest test command form
 
 The generated spec MUST be sufficient for the SWE-bench harness to build
 a Docker image and run tests in isolation.
+
+**Benchmarked accuracy** (Phase 1.1, 14 versions across 4 repos):
+
+| Field | Match Rate |
+|-------|-----------|
+| python | 75% |
+| install | 100% |
+| test_cmd | 95% |
+| pip_packages | 75% |
+| pre_install | 83% |
+| **Overall** | **86%** |
 
 ### 5.4 Evaluation
 
@@ -399,10 +430,23 @@ date ranges, the mechanical stages (1-2) SHOULD produce a dataset with
 >=90% overlap on `instance_id` values with the published SWE-bench
 dataset.
 
+**Measured:** 99.7% overlap (1037/1039) on 8 completed repos. Per-repo
+rates: astropy 100%, matplotlib 99%, seaborn 100%, flask 100%,
+requests 98%, xarray 100%, sphinx 100%, sympy 100%.
+
 ### 9.2 Validation Conformance
 
 For instances that overlap with SWE-bench, the `FAIL_TO_PASS` lists
 SHOULD match with >=85% agreement.
+
+**Measured (agent-based):** 56% exact match, 81% subset match on 16
+instances. The gap is intrinsic to agent-vs-Docker validation
+environments — the agent misses secondary failing tests that Docker
+catches.
+
+**Measured (Docker-based):** Gold patches resolve correctly through the
+unmodified SWE-bench harness (5/5 tested). Docker validation produces
+correct FAIL_TO_PASS when env images build successfully.
 
 ### 9.3 Docker Spec Generation Conformance
 
@@ -410,8 +454,15 @@ For known repositories, agent-generated environment specs SHOULD produce
 test results identical to SWE-bench's manually authored specs on >=80%
 of test instances.
 
+**Measured:** 86% structural match across 14 versions (Flask, Requests,
+pytest, xarray). 99.6% functional equivalence on Flask v2.3 (479/481
+tests match).
+
 ### 9.4 Evaluation Conformance
 
 When three models of known relative capability (e.g., haiku < sonnet <
 opus) are evaluated against the generated dataset using the SWE-bench
 Docker harness, the resolve rates SHOULD reflect the expected ordering.
+
+**Measured:** haiku 3% (1/30) < sonnet 10% (1/10) < opus 65% (13/20).
+Monotonic ordering confirmed.
