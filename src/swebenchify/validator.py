@@ -13,11 +13,14 @@ from pathlib import Path
 
 from swebenchify.dispatcher import AgentResult, CostTracker, run_agent_with_retry
 from swebenchify.models import (
+    AnyEnvironmentSpec,
     CandidateInstance,
     EnvironmentSpec,
+    GoEnvironmentSpec,
     Repository,
     ValidationResult,
 )
+from swebenchify.parsers import GoJSONParser
 from swebenchify.workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
@@ -72,10 +75,93 @@ Status values:
 
 VALIDATION_TOOLS = ["Bash", "Read", "Write"]
 
+# ---------------------------------------------------------------------------
+# Go validation prompt
+# ---------------------------------------------------------------------------
+
+# For Go instances the agent writes raw go test -json output to files.
+# The Python side (validate_instance) parses those files deterministically
+# using GoJSONParser — the agent does NOT interpret results.
+GO_VALIDATION_PROMPT = """\
+You are validating a Go benchmark instance for {repo} at commit {commit}.
+
+## Environment
+```json
+{env_spec}
+```
+
+## Steps
+
+1. Set up the Go environment:
+   - If module_mode is "vendored", ensure GOFLAGS includes -mod=vendor.
+   - Apply any system dependencies if needed (they should already be present).
+
+2. Apply the test patch:
+   ```
+   git apply {test_patch_path}
+   ```
+
+3. Run the test command and capture raw JSON output:
+   ```
+   {test_cmd} -json 2>&1 | tee pre_fix_output.txt
+   ```
+   If the test command already includes -json, omit the flag.
+   If the command fails to compile (exit code non-zero with no test output),
+   that is a build error — continue to step 6.
+
+4. Apply the gold patch:
+   ```
+   git apply {gold_patch_path}
+   ```
+
+5. Run the test command again and capture JSON output:
+   ```
+   {test_cmd} -json 2>&1 | tee post_fix_output.txt
+   ```
+
+6. Write validation_meta.json:
+   ```json
+   {{
+     "status": "done",
+     "error_message": null
+   }}
+   ```
+   If something went catastrophically wrong (e.g., git apply failed),
+   set status to "error" and describe the problem in error_message.
+
+## Rules
+- Write ONLY raw go test -json output to pre_fix_output.txt and post_fix_output.txt.
+- Do NOT interpret or summarise test results — that happens on the Python side.
+- If a file already exists, overwrite it.
+- Do NOT modify any source files other than applying the patches.
+"""
+
+
+def _compute_f2p_p2p(
+    pre_parse: dict[str, str],
+    post_parse: dict[str, str],
+) -> tuple[list[str], list[str]]:
+    """Compute FAIL_TO_PASS and PASS_TO_PASS from deterministic parse results.
+
+    Args:
+        pre_parse:  test_id -> status before applying gold patch.
+        post_parse: test_id -> status after applying gold patch.
+
+    Returns:
+        ``(FAIL_TO_PASS, PASS_TO_PASS)`` lists.
+    """
+    pre_failed = {t for t, s in pre_parse.items() if s == "failed"}
+    pre_passed = {t for t, s in pre_parse.items() if s == "passed"}
+    post_passed = {t for t, s in post_parse.items() if s == "passed"}
+
+    fail_to_pass = sorted(pre_failed & post_passed)
+    pass_to_pass = sorted(pre_passed & post_passed)
+    return fail_to_pass, pass_to_pass
+
 
 async def validate_instance(
     candidate: CandidateInstance,
-    env_spec: EnvironmentSpec,
+    env_spec: AnyEnvironmentSpec,
     repo: Repository,
     workspace_mgr: WorkspaceManager,
     cost_tracker: CostTracker | None = None,
@@ -97,31 +183,53 @@ async def validate_instance(
     )
     worktree = inst_dir / "repo"
 
-    # Build prompt
-    prompt = VALIDATION_PROMPT.format(
-        repo=repo.full_name,
-        commit=candidate.base_commit,
-        env_spec=json.dumps(
-            {
-                "language": env_spec.language,
-                "language_version": env_spec.language_version,
-                "package_manager": env_spec.package_manager,
-                "install_cmd": env_spec.install_cmd,
-                "test_cmd": env_spec.test_cmd,
-                "pre_install": env_spec.pre_install,
-                "system_dependencies": env_spec.system_dependencies,
-            },
-            indent=2,
-        ),
-        test_patch_path=str(inst_dir / "test.patch"),
-        gold_patch_path=str(inst_dir / "gold.patch"),
-    )
+    is_go = isinstance(env_spec, GoEnvironmentSpec)
+
+    if is_go:
+        env_spec_dict = {
+            "language": env_spec.language,
+            "go_version": env_spec.go_version,
+            "build_cmd": env_spec.build_cmd,
+            "test_cmd": env_spec.test_cmd,
+            "module_mode": env_spec.module_mode,
+            "goflags": env_spec.goflags,
+            "system_dependencies": env_spec.system_dependencies,
+        }
+        prompt = GO_VALIDATION_PROMPT.format(
+            repo=repo.full_name,
+            commit=candidate.base_commit,
+            env_spec=json.dumps(env_spec_dict, indent=2),
+            test_cmd=env_spec.test_cmd,
+            test_patch_path=str(inst_dir / "test.patch"),
+            gold_patch_path=str(inst_dir / "gold.patch"),
+        )
+        output_files = ["pre_fix_output.txt", "post_fix_output.txt", "validation_meta.json"]
+    else:
+        prompt = VALIDATION_PROMPT.format(
+            repo=repo.full_name,
+            commit=candidate.base_commit,
+            env_spec=json.dumps(
+                {
+                    "language": env_spec.language,
+                    "language_version": env_spec.language_version,
+                    "package_manager": env_spec.package_manager,
+                    "install_cmd": env_spec.install_cmd,
+                    "test_cmd": env_spec.test_cmd,
+                    "pre_install": env_spec.pre_install,
+                    "system_dependencies": env_spec.system_dependencies,
+                },
+                indent=2,
+            ),
+            test_patch_path=str(inst_dir / "test.patch"),
+            gold_patch_path=str(inst_dir / "gold.patch"),
+        )
+        output_files = ["validation_result.json"]
 
     # Run agent
     result = await run_agent_with_retry(
         prompt=prompt,
         cwd=str(worktree),
-        output_files=["validation_result.json"],
+        output_files=output_files,
         tools=VALIDATION_TOOLS,
         max_turns=max_turns,
         budget_usd=budget_usd,
@@ -133,7 +241,78 @@ async def validate_instance(
             "validation", repo.full_name, result, instance_id=candidate.instance_id
         )
 
-    # Read output
+    # Parse output — Go path uses deterministic parser; Python path uses agent output
+    if is_go:
+        return _parse_go_validation_output(worktree, result)
+    else:
+        return _parse_python_validation_output(worktree, result)
+
+
+def _parse_go_validation_output(
+    worktree: Path,
+    result: "AgentResult",
+) -> ValidationResult:
+    """Parse Go validation agent output using GoJSONParser."""
+    meta_path = worktree / "validation_meta.json"
+    pre_path = worktree / "pre_fix_output.txt"
+    post_path = worktree / "post_fix_output.txt"
+
+    if result.is_error:
+        return ValidationResult(
+            status="error",
+            error_message=f"Agent failed: {result.status} - {result.output or 'no output'}",
+        )
+
+    # Check for explicit agent error
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text())
+            if meta.get("status") == "error":
+                return ValidationResult(
+                    status="error",
+                    error_message=meta.get("error_message", "Agent reported error"),
+                )
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # Read raw test output
+    pre_log = pre_path.read_text() if pre_path.exists() else ""
+    post_log = post_path.read_text() if post_path.exists() else ""
+
+    parser = GoJSONParser()
+    pre_result = parser.parse(pre_log)
+    post_result = parser.parse(post_log)
+
+    compiled = pre_result["compiled"]
+    fail_to_pass, pass_to_pass = _compute_f2p_p2p(
+        pre_result["tests"], post_result["tests"]
+    )
+
+    if not compiled:
+        return ValidationResult(
+            status="invalid",
+            compiled=False,
+            pre_fix_log=pre_log or None,
+            post_fix_log=post_log or None,
+            error_message="Pre-fix build failed (compiled=False)",
+        )
+
+    status = "valid" if fail_to_pass else "invalid"
+    return ValidationResult(
+        status=status,
+        FAIL_TO_PASS=fail_to_pass,
+        PASS_TO_PASS=pass_to_pass,
+        compiled=compiled,
+        pre_fix_log=pre_log or None,
+        post_fix_log=post_log or None,
+    )
+
+
+def _parse_python_validation_output(
+    worktree: Path,
+    result: "AgentResult",
+) -> ValidationResult:
+    """Parse Python validation agent output from validation_result.json."""
     result_path = worktree / "validation_result.json"
     if not result.is_error and result_path.exists():
         try:
@@ -156,7 +335,7 @@ async def validate_instance(
 
 async def validate_instances(
     candidates: list[CandidateInstance],
-    env_specs: dict[str, EnvironmentSpec],  # keyed by version
+    env_specs: dict[str, AnyEnvironmentSpec],  # keyed by version
     repo: Repository,
     workspace_mgr: WorkspaceManager,
     cost_tracker: CostTracker | None = None,

@@ -443,3 +443,137 @@ class TestCheckNewSymbolInTests:
         config = FilterConfig(no_new_symbol_tests=False)
         reasons = get_filter_reasons(inst, config)
         assert not any("newly-created symbol" in r for r in reasons)
+
+
+# ---------------------------------------------------------------------------
+# Go-specific filters
+# ---------------------------------------------------------------------------
+
+class TestExtractNewGoSymbols:
+    """Tests for extract_new_go_symbols."""
+
+    def test_new_exported_func(self) -> None:
+        from swebenchify.filters import extract_new_go_symbols
+
+        patch = "+func NewClient(addr string) *Client {\n"
+        assert "NewClient" in extract_new_go_symbols(patch)
+
+    def test_new_exported_type(self) -> None:
+        from swebenchify.filters import extract_new_go_symbols
+
+        patch = "+type Config struct {\n"
+        assert "Config" in extract_new_go_symbols(patch)
+
+    def test_unexported_func_not_included(self) -> None:
+        from swebenchify.filters import extract_new_go_symbols
+
+        patch = "+func newInternal() *X {\n"
+        assert extract_new_go_symbols(patch) == set()
+
+    def test_renamed_func_not_new(self) -> None:
+        from swebenchify.filters import extract_new_go_symbols
+
+        patch = "-func OldName() {}\n+func OldName() {}\n"
+        assert "OldName" not in extract_new_go_symbols(patch)
+
+    def test_method_receiver_func(self) -> None:
+        from swebenchify.filters import extract_new_go_symbols
+
+        patch = "+func (c *Client) NewMethod() {}\n"
+        assert "NewMethod" in extract_new_go_symbols(patch)
+
+    def test_empty_patch(self) -> None:
+        from swebenchify.filters import extract_new_go_symbols
+
+        assert extract_new_go_symbols("") == set()
+
+    def test_none_patch(self) -> None:
+        from swebenchify.filters import extract_new_go_symbols
+
+        assert extract_new_go_symbols(None) == set()
+
+
+class TestCheckGoIntroducedSymbol:
+    """Tests for check_go_introduced_symbol."""
+
+    def test_filters_when_test_references_new_symbol(self) -> None:
+        from swebenchify.filters import check_go_introduced_symbol
+
+        patch = "+func NewFoo(x int) *Foo {\n"
+        f2p = json.dumps(["github.com/foo/bar.TestNewFoo"])
+        result = check_go_introduced_symbol(patch, f2p)
+        assert result is not None
+        assert "NewFoo" in result
+
+    def test_passes_when_no_new_symbols(self) -> None:
+        from swebenchify.filters import check_go_introduced_symbol
+
+        patch = "+// just a comment\n"
+        f2p = json.dumps(["github.com/foo/bar.TestSomething"])
+        assert check_go_introduced_symbol(patch, f2p) is None
+
+    def test_passes_when_test_does_not_reference_symbol(self) -> None:
+        from swebenchify.filters import check_go_introduced_symbol
+
+        patch = "+func NewFoo() {}\n"
+        f2p = json.dumps(["github.com/foo/bar.TestExisting"])
+        assert check_go_introduced_symbol(patch, f2p) is None
+
+    def test_filters_new_type_referenced_in_test(self) -> None:
+        from swebenchify.filters import check_go_introduced_symbol
+
+        patch = "+type Config struct {\n"
+        f2p = json.dumps(["github.com/foo.TestConfig"])
+        result = check_go_introduced_symbol(patch, f2p)
+        assert result is not None
+
+    def test_none_patch(self) -> None:
+        from swebenchify.filters import check_go_introduced_symbol
+
+        assert check_go_introduced_symbol(None, json.dumps(["TestFoo"])) is None
+
+
+class TestApplyGoFilters:
+    """Tests for apply_go_filters and get_go_filter_reasons."""
+
+    def test_clean_instance_passes(self) -> None:
+        from swebenchify.filters import apply_go_filters
+        from swebenchify.models import ValidationResult
+
+        inst = _make_instance()
+        vr = ValidationResult(status="valid", compiled=True, FAIL_TO_PASS=["test_foo"])
+        result = apply_go_filters([inst], FilterConfig(), {"owner__repo-1": vr})
+        assert len(result) == 1
+
+    def test_compiled_false_is_filtered(self) -> None:
+        from swebenchify.filters import apply_go_filters, get_go_filter_reasons
+        from swebenchify.models import ValidationResult
+
+        inst = _make_instance()
+        vr = ValidationResult(status="invalid", compiled=False)
+        reasons = get_go_filter_reasons(inst, FilterConfig(), validation_result=vr)
+        assert any("compiled" in r for r in reasons)
+
+    def test_go_introduced_symbol_filtered(self) -> None:
+        from swebenchify.filters import get_go_filter_reasons
+
+        inst = _make_instance(
+            patch="+func NewHandler() http.Handler {\n",
+            FAIL_TO_PASS=json.dumps(["pkg.TestNewHandler"]),
+        )
+        reasons = get_go_filter_reasons(inst, FilterConfig())
+        assert any("NewHandler" in r for r in reasons)
+
+    def test_no_validation_result_skips_compiled_check(self) -> None:
+        from swebenchify.filters import get_go_filter_reasons
+
+        inst = _make_instance()
+        reasons = get_go_filter_reasons(inst, FilterConfig(), validation_result=None)
+        assert not any("compiled" in r for r in reasons)
+
+    def test_standard_filters_also_applied(self) -> None:
+        from swebenchify.filters import get_go_filter_reasons
+
+        inst = _make_instance(problem_statement="Too short")
+        reasons = get_go_filter_reasons(inst, FilterConfig(min_problem_statement_words=40))
+        assert any("too short" in r for r in reasons)
