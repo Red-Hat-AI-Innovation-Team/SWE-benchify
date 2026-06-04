@@ -20,9 +20,23 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Protocol, TypedDict
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Go test ID normalisation
+# ---------------------------------------------------------------------------
+
+# Matches the first occurrence of a Go test function name following a "."
+# or at the start of the string. Go test functions are named Test*, Benchmark*,
+# or Example* by convention.
+_TEST_FUNC_RE = re.compile(r"(?:^|\.)((?:Test|Benchmark|Example)\w*)")
+
+# Packages whose tests should be excluded from F2P (integration / e2e).
+# These are too slow, environment-dependent, or require a live cluster.
+_E2E_PKG_RE = re.compile(r"/(?:e2e|integration)[/.]")
 
 # ---------------------------------------------------------------------------
 # Public types
@@ -72,6 +86,68 @@ def register(language: str, parser: TestLogParser) -> None:
 def get_parser(language: str) -> TestLogParser | None:
     """Return the registered parser for *language*, or ``None``."""
     return _REGISTRY.get(language)
+
+
+# ---------------------------------------------------------------------------
+# Go test ID normalisation
+# ---------------------------------------------------------------------------
+
+def normalize_go_test_id(test_id: str) -> str:
+    """Normalise a Go test ID to the bare test function name.
+
+    Strips the Go module path / package prefix and collapses subtest
+    suffixes (``/case1``) to the parent test function name, producing
+    the same format that Multi-SWE-bench's ``go test -v`` regex parser
+    emits (e.g. ``"TestFoo"``).
+
+    Examples::
+
+        "go.etcd.io/etcd/server/v3/etcdhttp.TestFoo/case1" → "TestFoo"
+        "TestFoo/case1"                                     → "TestFoo"
+        "go.etcd.io/etcd/pkg.TestBar"                       → "TestBar"
+        "TestBaz"                                           → "TestBaz"
+    """
+    m = _TEST_FUNC_RE.search(test_id)
+    name = m.group(1) if m else test_id
+    return name.split("/")[0]
+
+
+def is_e2e_test_id(test_id: str) -> bool:
+    """Return ``True`` if *test_id* belongs to an e2e or integration package.
+
+    These tests require a live cluster or network environment and cannot
+    reliably run within the benchmark's Docker validation timeout.
+    """
+    return bool(_E2E_PKG_RE.search(test_id))
+
+
+def normalize_go_f2p(test_ids: list[str]) -> list[str]:
+    """Normalise, filter, and deduplicate a list of Go test IDs.
+
+    Applies :func:`normalize_go_test_id` to every entry, removes tests
+    from e2e / integration packages (via :func:`is_e2e_test_id`), and
+    returns a sorted, deduplicated list of bare test function names.
+
+    The result matches the format Multi-SWE-bench's grader expects when
+    it uses ``go test -v`` + regex parsing.
+
+    Args:
+        test_ids: Raw test IDs from ``GoJSONParser`` (package-qualified,
+            may include subtest suffixes).
+
+    Returns:
+        Sorted list of normalised test names, e2e tests excluded.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for tid in test_ids:
+        if is_e2e_test_id(tid):
+            continue
+        normalised = normalize_go_test_id(tid)
+        if normalised not in seen:
+            seen.add(normalised)
+            result.append(normalised)
+    return sorted(result)
 
 
 # ---------------------------------------------------------------------------

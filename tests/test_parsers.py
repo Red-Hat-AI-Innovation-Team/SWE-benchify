@@ -298,3 +298,120 @@ class TestPythonPassthroughParser:
     def test_compiled_true(self) -> None:
         result = PythonPassthroughParser().parse("")
         assert result["compiled"] is True
+
+
+# ---------------------------------------------------------------------------
+# normalize_go_test_id / is_e2e_test_id / normalize_go_f2p
+# ---------------------------------------------------------------------------
+
+class TestNormalizeGoTestId:
+    def test_strips_module_path_prefix(self) -> None:
+        from swebenchify.parsers import normalize_go_test_id
+        result = normalize_go_test_id(
+            "go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp.TestFoo"
+        )
+        assert result == "TestFoo"
+
+    def test_collapses_subtest_suffix(self) -> None:
+        from swebenchify.parsers import normalize_go_test_id
+        assert normalize_go_test_id("TestFoo/case1") == "TestFoo"
+
+    def test_strips_prefix_and_collapses_subtest(self) -> None:
+        from swebenchify.parsers import normalize_go_test_id
+        result = normalize_go_test_id(
+            "go.etcd.io/etcd/server/v3/etcdhttp.TestFoo/case1"
+        )
+        assert result == "TestFoo"
+
+    def test_bare_test_name_unchanged(self) -> None:
+        from swebenchify.parsers import normalize_go_test_id
+        assert normalize_go_test_id("TestFoo") == "TestFoo"
+
+    def test_benchmark_prefix(self) -> None:
+        from swebenchify.parsers import normalize_go_test_id
+        assert normalize_go_test_id("pkg.BenchmarkFoo/run1") == "BenchmarkFoo"
+
+    def test_example_prefix(self) -> None:
+        from swebenchify.parsers import normalize_go_test_id
+        assert normalize_go_test_id("pkg.ExampleBar") == "ExampleBar"
+
+    def test_nested_subtest(self) -> None:
+        from swebenchify.parsers import normalize_go_test_id
+        # Only the first "/" level is stripped — deepest parent name
+        result = normalize_go_test_id(
+            'go.etcd.io/etcd/tests/v3/e2e.TestAuthority/Size:_1,_Scenario:_"http://address"'
+        )
+        assert result == "TestAuthority"
+
+
+class TestIsE2eTestId:
+    def test_e2e_package(self) -> None:
+        from swebenchify.parsers import is_e2e_test_id
+        assert is_e2e_test_id("go.etcd.io/etcd/tests/v3/e2e.TestFoo") is True
+
+    def test_integration_package(self) -> None:
+        from swebenchify.parsers import is_e2e_test_id
+        assert is_e2e_test_id("github.com/foo/bar/integration/TestBaz") is True
+
+    def test_unit_test_not_e2e(self) -> None:
+        from swebenchify.parsers import is_e2e_test_id
+        assert is_e2e_test_id(
+            "go.etcd.io/etcd/server/v3/etcdhttp.TestFoo"
+        ) is False
+
+    def test_pkg_not_e2e(self) -> None:
+        from swebenchify.parsers import is_e2e_test_id
+        assert is_e2e_test_id("go.etcd.io/etcd/pkg/v3/featuregate.TestBar") is False
+
+    def test_bare_test_name_not_e2e(self) -> None:
+        from swebenchify.parsers import is_e2e_test_id
+        assert is_e2e_test_id("TestFoo") is False
+
+
+class TestNormalizeGoF2p:
+    def test_normalises_and_deduplicates(self) -> None:
+        from swebenchify.parsers import normalize_go_f2p
+        raw = [
+            "go.etcd.io/etcd/server/v3/etcdhttp.TestFoo/case1",
+            "go.etcd.io/etcd/server/v3/etcdhttp.TestFoo/case2",  # same parent → dedup
+            "go.etcd.io/etcd/server/v3/etcdhttp.TestBar",
+        ]
+        result = normalize_go_f2p(raw)
+        assert result == ["TestBar", "TestFoo"]
+
+    def test_excludes_e2e_tests(self) -> None:
+        from swebenchify.parsers import normalize_go_f2p
+        raw = [
+            "go.etcd.io/etcd/server/v3/etcdhttp.TestFoo",
+            "go.etcd.io/etcd/tests/v3/e2e.TestE2EFoo",   # should be excluded
+        ]
+        result = normalize_go_f2p(raw)
+        assert result == ["TestFoo"]
+        assert "TestE2EFoo" not in result
+
+    def test_empty_input(self) -> None:
+        from swebenchify.parsers import normalize_go_f2p
+        assert normalize_go_f2p([]) == []
+
+    def test_sorted_output(self) -> None:
+        from swebenchify.parsers import normalize_go_f2p
+        raw = [
+            "pkg.TestZebra",
+            "pkg.TestAlpha",
+        ]
+        assert normalize_go_f2p(raw) == ["TestAlpha", "TestZebra"]
+
+    def test_msb_harness_check_real_ids(self) -> None:
+        """Reproduce the IDs observed in the MSB harness check for #19086."""
+        from swebenchify.parsers import normalize_go_f2p
+        raw_our_f2p = [
+            "go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp.TestHTTPSubPath",
+            "go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp.TestHTTPSubPath//readyz/learner_ok",
+            "go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp.TestLearnerReadyCheck",
+        ]
+        result = normalize_go_f2p(raw_our_f2p)
+        # Should match what MSB's regex parser produces
+        assert "TestHTTPSubPath" in result
+        assert "TestLearnerReadyCheck" in result
+        # Subtest collapsed into parent — no duplicates
+        assert result.count("TestHTTPSubPath") == 1

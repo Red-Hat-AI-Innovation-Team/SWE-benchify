@@ -20,7 +20,7 @@ from swebenchify.models import (
     Repository,
     ValidationResult,
 )
-from swebenchify.parsers import GoJSONParser
+from swebenchify.parsers import GoJSONParser, normalize_go_f2p
 from swebenchify.workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
@@ -419,9 +419,16 @@ def _parse_go_validation_output(
     post_result = parser.parse(post_log)
 
     compiled = pre_result["compiled"]
-    fail_to_pass, pass_to_pass = _compute_f2p_p2p(
+    fail_to_pass_raw, pass_to_pass_raw = _compute_f2p_p2p(
         pre_result["tests"], post_result["tests"]
     )
+
+    # Normalise IDs to match Multi-SWE-bench's grader format:
+    #   - strip Go module path prefix (go.etcd.io/.../pkg.TestFoo → TestFoo)
+    #   - collapse subtest suffix (TestFoo/case1 → TestFoo)
+    #   - remove e2e / integration package tests (too slow / environment-dependent)
+    fail_to_pass = normalize_go_f2p(fail_to_pass_raw)
+    pass_to_pass = normalize_go_f2p(pass_to_pass_raw)
 
     if not compiled:
         return ValidationResult(
