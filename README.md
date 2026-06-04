@@ -4,6 +4,8 @@
 
 A harness that dispatches [Claude Code](https://claude.ai/claude-code) agents to transform GitHub repositories into [SWE-bench](https://github.com/princeton-nlp/SWE-bench)-compatible benchmarks.
 
+Supports **Python** and **Go** repositories out of the box.
+
 Given a list of GitHub repos, SWE-benchify:
 
 1. Collects merged pull requests that reference issues
@@ -21,7 +23,9 @@ pip install -e ".[dev]"
 
 ### Configuration
 
-Create a `swebenchify.yaml`:
+Create a `swebenchify.yaml`. Language is detected automatically from the repository.
+
+**Python repo:**
 
 ```yaml
 repos:
@@ -33,6 +37,23 @@ github:
 pipeline:
   pr_after: "2021-01-01T00:00:00Z"
   pr_before: "2023-06-01T00:00:00Z"
+
+output:
+  dir: ./output
+```
+
+**Go repo:**
+
+```yaml
+repos:
+  - kubernetes/kubernetes
+
+github:
+  token: $GITHUB_TOKEN
+
+pipeline:
+  pr_after: "2023-01-01T00:00:00Z"
+  pr_before: "2024-06-01T00:00:00Z"
 
 output:
   dir: ./output
@@ -60,7 +81,9 @@ swebenchify validate -c swebenchify.yaml --input output/pallets__flask-candidate
 swebenchify emit -c swebenchify.yaml --input output/validated.jsonl
 ```
 
-## Example: pallets/flask
+## Examples
+
+### pallets/flask (Python)
 
 Running SWE-benchify on `pallets/flask` with PRs from 2021-01 to 2023-06:
 
@@ -73,7 +96,7 @@ Extracted 37 viable candidates (have patch + test_patch + problem_statement)
 Compared against the published SWE-bench dataset (11 Flask instances): **100% overlap** — all 11 SWE-bench instances were found in our output.
 
 **Stage 3 (Environment Discovery):**
-The agent explored the Flask repo at commit `182ce3d` and discovered:
+The agent explored the Flask repo at commit `182ce3d` and produced:
 
 ```json
 {
@@ -98,6 +121,43 @@ PASS_TO_PASS: 475 tests
 ```
 
 **FAIL_TO_PASS matches SWE-bench exactly.** Cost: $0.86 | 21 turns | 87s
+
+### kubernetes/kubernetes (Go)
+
+For Go repositories, the environment discovery agent reads `go.mod` and CI
+configuration rather than installing packages.
+
+**Stage 3 (Environment Discovery):**
+The agent inspects `go.mod`, `Makefile`, and `.github/workflows/` to produce a
+`go_env_spec.json`:
+
+```json
+{
+  "language": "go",
+  "go_version": "1.22",
+  "build_cmd": "make build",
+  "test_cmd": "go test ./pkg/...",
+  "module_mode": "vendored",
+  "goflags": "-mod=vendor",
+  "system_dependencies": []
+}
+```
+
+The `go_version` is used to derive a stable `environment_setup_commit` by
+scanning `git log` for the earliest commit whose `go.mod` declares that Go
+directive — ensuring the emitted instance is reproducible.
+
+**Stage 4 (Instance Validation):**
+Go validation uses Docker with a per-spec image keyed on the `env_spec_hash`.
+Test output is parsed from `go test -json` so subtests, packages, and
+build failures are distinguished cleanly:
+
+```
+Status: valid
+FAIL_TO_PASS: TestReconciler/pod_created
+PASS_TO_PASS: 1402 tests
+compiled: true
+```
 
 ## Architecture
 
@@ -155,10 +215,9 @@ pipeline:
 agent:
   max_attempts: 3                  # retries per agent task
   sandbox: local                   # "local" or "docker"
-  docker_image: python:3.11-slim   # base image for docker sandbox
   env_discovery:
     max_turns: 80
-    budget_usd: 5.0
+    budget_usd: 5.0                # Python; Go discovery is read-only (budget_usd: 2.0)
   validation:
     max_turns: 60
     budget_usd: 3.0
@@ -180,7 +239,10 @@ output:
 
 ## Output Format
 
-Output conforms to the `SWEbenchInstance` schema from `swebench.harness.constants`:
+Output conforms to the `SWEbenchInstance` schema from `swebench.harness.constants`.
+Every emitted instance has a non-null `environment_setup_commit`.
+
+**Python instance:**
 
 ```json
 {
@@ -195,7 +257,26 @@ Output conforms to the `SWEbenchInstance` schema from `swebench.harness.constant
   "version": "2.3",
   "FAIL_TO_PASS": "[\"tests/test_cli.py::TestRoutes::test_subdomain\", ...]",
   "PASS_TO_PASS": "[\"tests/test_basic.py::test_request_dispatching\", ...]",
-  "environment_setup_commit": null
+  "environment_setup_commit": "9cc500efeec170a6d4bf0a53f1f03f0e16ea0f22"
+}
+```
+
+**Go instance** (version string encodes the Go toolchain era):
+
+```json
+{
+  "repo": "kubernetes/kubernetes",
+  "instance_id": "kubernetes__kubernetes-115234",
+  "base_commit": "a1b2c3d4...",
+  "patch": "diff --git a/...",
+  "test_patch": "diff --git a/...",
+  "problem_statement": "Issue title\nIssue body...",
+  "hints_text": "",
+  "created_at": "2023-09-12T11:04:22Z",
+  "version": "1.22-ab3f1200",
+  "FAIL_TO_PASS": "[\"TestReconciler/pod_created\"]",
+  "PASS_TO_PASS": "[\"TestReconciler/pod_updated\", ...]",
+  "environment_setup_commit": "e5f6a7b8..."
 }
 ```
 

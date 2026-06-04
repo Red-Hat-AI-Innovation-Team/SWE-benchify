@@ -1,6 +1,6 @@
 # SWE-benchify Service Specification
 
-Status: Draft v2
+Status: v1.0
 
 Purpose: Define a system that automatically transforms GitHub repositories
 into SWE-bench-compatible benchmarks, producing datasets that are
@@ -112,6 +112,8 @@ Conformance results (Phase 1):
 - GitHub API (REST v3) for PR and issue data.
 - Claude Code Agent SDK (Python) for dispatching agent sessions.
 - Git CLI for repository cloning and worktree management.
+- Go toolchain (for Go repositories): used during Docker-based validation;
+  the discovery agent is read-only and requires no local Go installation.
 - SWE-bench package for TestSpec validation, Docker evaluation, and
   known-repo environment specs.
 - Container runtime (Docker or podman) for sandboxed validation and
@@ -135,8 +137,11 @@ Fields: `instance_id` (`{owner}__{repo}-{pr_number}`), `patch` (gold),
 
 ### 3.3 EnvironmentSpec
 
-Build and test configuration for a repository version. This is the
-agent-generated equivalent of a `MAP_VERSION_TO_INSTALL` entry.
+Build and test configuration for a repository version. Two specialisations
+exist, selected by the repository's detected language.
+
+**Python — `EnvironmentSpec`:** agent-generated equivalent of a
+`MAP_VERSION_TO_INSTALL` entry.
 
 Fields: `language`, `language_version`, `package_manager`, `install_cmd`,
 `test_cmd`, `pre_install`, `system_dependencies`.
@@ -145,14 +150,33 @@ For SWE-bench compatibility, an EnvironmentSpec SHOULD be convertible to
 a `MAP_VERSION_TO_INSTALL` entry with fields: `python`, `packages`,
 `install`, `pip_packages`, `test_cmd`.
 
+**Go — `GoEnvironmentSpec`:** derived by inspecting `go.mod`, `Makefile`,
+and CI configuration. No installation is performed during discovery.
+
+Fields: `language` (`"go"`), `go_version` (from `go.mod` `go` directive,
+e.g. `"1.22"`), `build_cmd`, `test_cmd`, `module_mode` (`"modules"` |
+`"vendored"`), `goflags`, `system_dependencies`, `env_spec_hash` (stable
+SHA-256 of all other fields — used as the Docker image cache key).
+
+A `GoSpecRegistry` (persisted as `go-spec-registry.json` in the workspace)
+maps each `env_spec_hash` to a stable `version_string` of the form
+`"{go_version}-{hash[:8]}"` (e.g. `"1.22-ab3f1200"`) and to the
+`era_commit` — the earliest commit at which that spec was valid.
+
 ### 3.4 TaskInstance
 
 A validated benchmark instance conforming to the SWE-bench schema.
 
-Fields: `repo`, `instance_id`, `base_commit`, `patch`, `test_patch`,
-`problem_statement`, `hints_text`, `created_at`, `version`,
+Core SWE-bench fields: `repo`, `instance_id`, `base_commit`, `patch`,
+`test_patch`, `problem_statement`, `hints_text`, `created_at`, `version`,
 `FAIL_TO_PASS` (JSON-encoded list), `PASS_TO_PASS` (JSON-encoded list),
-`environment_setup_commit`.
+`environment_setup_commit` (non-null for all emitted instances).
+
+Additive columns (not required by SWE-bench, used for dataset shaping):
+`fix_merge_date`, `provenance`, `link_confidence`, `repo_language`,
+`product`, `n_fail_to_pass`, `patch_lines`, `files_touched`, `cross_file`,
+`env_spec_hash`, `n_runs`, `flake_count`, `quarantined_tests`,
+`decontamination_overlap`, `decontamination_overlap_source`.
 
 This schema MUST conform to the `SWEbenchInstance` TypedDict from
 `swebench.harness.constants`. Every emitted instance MUST produce a valid
@@ -197,12 +221,13 @@ Key requirements:
 ### 4.3 Stage 3: Environment Discovery
 
 For each unique `(repo, version)` pair, the harness discovers the
-build/test environment.
+build/test environment. The language is detected mechanically from the
+repository root (presence of `go.mod` → Go; otherwise → Python).
 
-**Known-repo mode:** Look up the spec from
+**Known-repo mode (Python):** Look up the spec from
 `MAP_REPO_VERSION_TO_SPECS`. No agent needed.
 
-**New-repo mode:** Dispatch a Claude Code agent to:
+**New-repo mode — Python:** Dispatch a Claude Code agent to:
 1. Identify language, build system, package manager.
 2. Install the project and dependencies.
 3. Find and verify the test command.
@@ -212,7 +237,16 @@ build/test environment.
 The agent's output SHOULD be validated by actually running the test
 command and confirming it produces parseable output.
 
-Caching: specs are cached by `(repo, version)`.
+**New-repo mode — Go:** Dispatch a lightweight read-only Claude Code agent
+to inspect `go.mod`, `Makefile`, and `.github/workflows/`. No installation
+is performed. The agent writes `go_env_spec.json` and `version.json`.
+The resulting `GoEnvironmentSpec` is registered in the `GoSpecRegistry`
+(keyed on its `env_spec_hash`) to produce a stable `version_string` and
+`era_commit` (used as `environment_setup_commit`). Budget is $2.00 /
+40 turns vs $5.00 / 80 turns for Python discovery.
+
+Caching: Python specs are cached by `(repo, version)`; Go specs are cached
+by `(repo, env_spec_hash)`.
 
 ### 4.4 Stage 4: Instance Validation
 
@@ -274,9 +308,14 @@ Every emitted instance MUST:
 
 1. Parse as a valid `SWEbenchInstance` TypedDict.
 2. Produce a valid `TestSpec` via `make_test_spec()`.
-3. Have a `version` that exists in `MAP_REPO_VERSION_TO_SPECS` (for known
-   repos) or in an agent-generated spec registry (for new repos).
-4. Have a non-null `environment_setup_commit`.
+3. Have a `version` that exists in `MAP_REPO_VERSION_TO_SPECS` (for Python
+   known repos), in an agent-generated spec registry (for new Python repos),
+   or in the `GoSpecRegistry` (for Go repos, as a `"{go_version}-{hash[:8]}"` string).
+4. Have a non-null `environment_setup_commit`. For Python known repos this
+   comes from SWE-bench's dataset; for new Python repos it is derived from
+   git tags or version-specific commits; for Go repos it is the `era_commit`
+   from the `GoSpecRegistry` (earliest commit whose `go.mod` `go` directive
+   matches the discovered `go_version`).
 
 ### 5.2 Version Snapping
 
@@ -288,9 +327,11 @@ Instances whose version cannot be snapped to a supported version are
 excluded from the output (for known repos) or require an agent-generated
 spec (for new repos).
 
-### 5.3 Docker Spec Generation (MAP_VERSION_TO_INSTALL)
+### 5.3 Docker Spec Generation
 
-For new repositories, the environment discovery agent produces a spec
+#### Python (MAP_VERSION_TO_INSTALL)
+
+For new Python repositories, the environment discovery agent produces a spec
 that is functionally equivalent to a `MAP_VERSION_TO_INSTALL` entry.
 This is a first-class feature of SWE-benchify — it automates the manual
 curation step that limits SWE-bench to its curated repository set.
@@ -311,9 +352,6 @@ The agent prompt instructs:
 3. Extract pinned deps via `pip freeze`
 4. Use simplest test command form
 
-The generated spec MUST be sufficient for the SWE-bench harness to build
-a Docker image and run tests in isolation.
-
 **Benchmarked accuracy** (Phase 1.1, 14 versions across 4 repos):
 
 | Field | Match Rate |
@@ -324,6 +362,31 @@ a Docker image and run tests in isolation.
 | pip_packages | 75% |
 | pre_install | 83% |
 | **Overall** | **86%** |
+
+#### Go (GoEnvironmentSpec)
+
+For Go repositories, the discovery agent is read-only — it only inspects
+`go.mod`, `Makefile`, and CI YAML. No installation or virtual environments
+are involved.
+
+The agent MUST produce a `go_env_spec.json` with these fields:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `go_version` | YES | Version from `go.mod` `go` directive (e.g. `"1.22"`) |
+| `test_cmd` | YES | Test entry point (`go test ./...`, `make test`, etc.) |
+| `module_mode` | YES | `"modules"` or `"vendored"` |
+| `build_cmd` | RECOMMENDED | Build entry point (`make build`, `go build ./...`) |
+| `goflags` | RECOMMENDED | Extra flags (e.g. `"-mod=vendor"` for vendored repos) |
+| `system_dependencies` | OPTIONAL | apt packages discovered in CI YAML |
+
+The `env_spec_hash` (SHA-256 of all other fields, sorted) serves as the
+Docker image cache key. A per-spec image is built once and reused for all
+instances that share the same Go toolchain configuration.
+
+`environment_setup_commit` is derived by scanning `git log` for the
+earliest commit whose `go.mod` `go` directive matches `go_version`, making
+instances reproducible at the exact toolchain era they were authored against.
 
 ### 5.4 Evaluation
 
