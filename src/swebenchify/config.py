@@ -88,6 +88,7 @@ class Config:
     output: OutputConfig = field(default_factory=OutputConfig)
     go_repos: list[str] = field(default_factory=list)
     rh_jira_projects: list[str] = field(default_factory=lambda: ["STOR", "MGMT"])
+    decontam_reference_paths: list[str] = field(default_factory=list)
 
 
 _ENV_VAR_PATTERN = re.compile(r"^\$([A-Za-z_][A-Za-z0-9_]*)$")
@@ -251,6 +252,7 @@ def load_config(path: str) -> Config:
         output=_build_output_config(raw.get("output")),
         go_repos=raw.get("go_repos", []) or [],
         rh_jira_projects=raw.get("rh_jira_projects", ["STOR", "MGMT"]) or ["STOR", "MGMT"],
+        decontam_reference_paths=raw.get("decontam_reference_paths", []) or [],
     )
 
     if not cfg.github_token and not cfg.github_tokens:
