@@ -18,7 +18,7 @@ Usage
   # M1 — requires GITHUB_TOKEN + ANTHROPIC_API_KEY + Docker/Podman
   python scripts/validate_go_epic1.py m1 \\
       --config swebenchify.yaml \\
-      --repo kubernetes/kubectl \\
+      --repo kubernetes/kubernetes \\
       --max-prs 10
 
   # M2 — same prerequisites as M1 (builds on M1 output)
@@ -38,7 +38,7 @@ Known-good JSONL format (one instance per line)
 Each line must contain at minimum:
   {
     "instance_id": "kubernetes__kubectl-1234",
-    "repo": "kubernetes/kubectl",
+    "repo": "kubernetes/kubernetes",
     "FAIL_TO_PASS": "[\"github.com/foo/bar.TestRun\", ...]",   // ground-truth F2P
     "pre_fix_output": "<raw go test -json output before patch>",
     "post_fix_output": "<raw go test -json output after patch>"
@@ -125,7 +125,7 @@ def run_m0(known_good_path: str) -> M0Result:
     # Filter to kubectl and etcd
     go_instances = [
         i for i in instances
-        if i.get("repo") in ("kubernetes/kubectl", "etcd-io/etcd")
+        if i.get("repo") in ("kubernetes/kubernetes", "etcd-io/etcd")
         and i.get("pre_fix_output")
         and i.get("post_fix_output")
     ]
@@ -197,7 +197,7 @@ def print_m0_results(result: M0Result) -> bool:
     print(f"  Outcome             : {'PASS ✓' if passed else 'FAIL ✗'}")
 
     # Per-repo breakdown
-    for repo in ("kubernetes/kubectl", "etcd-io/etcd"):
+    for repo in ("kubernetes/kubernetes", "etcd-io/etcd"):
         repo_details = [d for d in result.details if d["repo"] == repo]
         if not repo_details:
             continue
@@ -218,7 +218,7 @@ def print_m0_results(result: M0Result) -> bool:
 # M1: End-to-end kubectl run
 # ---------------------------------------------------------------------------
 
-def run_m1(config_path: str, repo: str = "kubernetes/kubectl", max_prs: int = 10) -> bool:
+def run_m1(config_path: str, repo: str = "kubernetes/kubernetes", max_prs: int = 10) -> bool:
     """Run the full pipeline on kubectl and verify valid SWEbenchInstance output.
 
     Prerequisites: ANTHROPIC_API_KEY, GITHUB_TOKEN, Docker/Podman.
@@ -451,7 +451,7 @@ def main() -> None:
             print(f"M1 skipped: missing prerequisites: {', '.join(missing) or '--config'}")
             results["m1"] = None
         else:
-            repo = args.repo or "kubernetes/kubectl"
+            repo = args.repo or "kubernetes/kubernetes"
             results["m1"] = run_m1(args.config, repo=repo, max_prs=args.max_prs)
 
     if args.milestone in ("m2", "all"):
