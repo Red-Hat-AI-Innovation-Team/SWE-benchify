@@ -20,7 +20,7 @@ from swebenchify.extractor import extract_all, load_candidates, save_candidates
 from swebenchify.filters import apply_filters
 from swebenchify.go_registry import GoSpecRegistry
 from swebenchify.models import AnyEnvironmentSpec, EnvironmentSpec, GoEnvironmentSpec, QualityScore, Repository, TaskInstance
-from swebenchify.sandbox import SandboxConfig, is_docker_available
+from swebenchify.sandbox import GoImageCache, SandboxConfig, is_docker_available
 from swebenchify.validator import validate_instances
 from swebenchify.versioning import detect_version
 from swebenchify.workspace import WorkspaceManager
@@ -158,6 +158,7 @@ async def run_repo_pipeline(
     # Discover environment for each unique version
     env_specs: dict[str, AnyEnvironmentSpec] = {}
     go_registry: GoSpecRegistry | None = None
+    go_image_name: str | None = None
 
     if is_go_repo:
         go_registry = GoSpecRegistry(workspace_mgr.workspace_root)
@@ -179,6 +180,18 @@ async def run_repo_pipeline(
                     "  Go env: go%s, test=%s, mode=%s",
                     go_spec.go_version, go_spec.test_cmd, go_spec.module_mode,
                 )
+                # Build / retrieve the per-(repo, era) Docker image
+                image_cache = GoImageCache(workspace_mgr.workspace_root)
+                go_image_name = image_cache.get_or_build(
+                    repo=repo.full_name,
+                    era_commit=commit,
+                    spec=go_spec,
+                    repo_path=str(bare_clone),
+                )
+                if go_image_name:
+                    logger.info("  Go image: %s", go_image_name)
+                else:
+                    logger.warning("  Go image build failed; continuing without cached image")
             else:
                 logger.error("Go environment discovery failed for %s", repo.full_name)
         except Exception as exc:
@@ -269,6 +282,7 @@ async def run_repo_pipeline(
                     FAIL_TO_PASS=json.dumps(vr.FAIL_TO_PASS),
                     PASS_TO_PASS=json.dumps(vr.PASS_TO_PASS),
                     environment_setup_commit=env_commit,
+                    image_name=go_image_name if is_go_repo else None,
                 )
             )
 
