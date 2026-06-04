@@ -87,6 +87,7 @@ class Config:
     filters: FilterConfig = field(default_factory=FilterConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     go_repos: list[str] = field(default_factory=list)
+    rh_jira_projects: list[str] = field(default_factory=lambda: ["STOR", "MGMT"])
 
 
 _ENV_VAR_PATTERN = re.compile(r"^\$([A-Za-z_][A-Za-z0-9_]*)$")
@@ -249,6 +250,7 @@ def load_config(path: str) -> Config:
         filters=_build_filter_config(raw.get("filters")),
         output=_build_output_config(raw.get("output")),
         go_repos=raw.get("go_repos", []) or [],
+        rh_jira_projects=raw.get("rh_jira_projects", ["STOR", "MGMT"]) or ["STOR", "MGMT"],
     )
 
     if not cfg.github_token and not cfg.github_tokens:

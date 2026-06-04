@@ -45,6 +45,7 @@ class CandidatePR:
     resolved_issues: list[int]
     created_at: str
     merged_at: str
+    link_confidence: float = 0.0  # confidence this PR resolves a tracked issue
 
 
 @dataclass

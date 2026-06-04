@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from swebenchify.collector import extract_resolved_issues, load_prs, save_prs
+from swebenchify.collector import compute_link_confidence, extract_resolved_issues, load_prs, save_prs
 from swebenchify.models import CandidatePR
 
 
@@ -87,6 +87,89 @@ class TestExtractResolvedIssues:
     def test_commit_message_single_line(self) -> None:
         """A single-line commit message with a keyword should match."""
         assert extract_resolved_issues("closes #88 -- quick patch") == [88]
+
+
+class TestComputeLinkConfidence:
+    """Test RH issue-linking pattern confidence scoring."""
+
+    def test_github_closes_gives_1_0(self) -> None:
+        assert compute_link_confidence("Closes #123", None) == 1.0
+
+    def test_github_fixes_gives_1_0(self) -> None:
+        assert compute_link_confidence("fix #42", "some body") == 1.0
+
+    def test_github_resolves_in_body_gives_1_0(self) -> None:
+        assert compute_link_confidence("Update stuff", "Resolves #99") == 1.0
+
+    def test_resolves_trailer_gives_1_0(self) -> None:
+        msg = "fix thing\n\nResolves: https://issues.redhat.com/browse/OCPBUGS-1"
+        assert compute_link_confidence(None, None, [msg]) == 1.0
+
+    def test_fixes_trailer_gives_1_0(self) -> None:
+        msg = "patch\n\nFixes: rhbz#2123456"
+        assert compute_link_confidence(None, None, [msg]) == 1.0
+
+    def test_bug_url_trailer_gives_0_95(self) -> None:
+        msg = "fix\n\nBug-Url: https://bugzilla.redhat.com/show_bug.cgi?id=2123456"
+        assert compute_link_confidence(None, None, [msg]) == 0.95
+
+    def test_rhbz_gives_0_9(self) -> None:
+        assert compute_link_confidence("rhbz#2000001 crash fix", None) == 0.9
+
+    def test_ocpbugs_gives_0_9(self) -> None:
+        assert compute_link_confidence("OCPBUGS-1234 fix", None) == 0.9
+
+    def test_configured_jira_project_gives_0_7(self) -> None:
+        # STOR is in the default project list
+        assert compute_link_confidence("STOR-567 improve storage", None) == 0.7
+
+    def test_unknown_jira_project_gives_0_0(self) -> None:
+        # ZZZZ is not in the project list
+        result = compute_link_confidence("ZZZZ-1234 something", None, rh_jira_projects=["STOR"])
+        assert result == 0.0
+
+    def test_change_id_only_gives_0_5(self) -> None:
+        msg = "update thing\n\nChange-Id: Iabc1234567890abcdef"
+        assert compute_link_confidence(None, None, [msg]) == 0.5
+
+    def test_no_patterns_gives_0_0(self) -> None:
+        assert compute_link_confidence("Update the README", "No refs here") == 0.0
+
+    def test_none_inputs_gives_0_0(self) -> None:
+        assert compute_link_confidence(None, None) == 0.0
+
+    def test_takes_max_across_matches(self) -> None:
+        # rhbz (0.9) and Change-Id (0.5) together → 0.9
+        msg = "fix\nrhbz#1234\nChange-Id: Iabc123"
+        assert compute_link_confidence(None, None, [msg]) == 0.9
+
+    def test_github_keyword_beats_all(self) -> None:
+        # GitHub keyword is 1.0 even with Change-Id present
+        text = "Closes #10\nChange-Id: Iabc123"
+        assert compute_link_confidence(text, None) == 1.0
+
+    def test_custom_jira_project_list(self) -> None:
+        result = compute_link_confidence("CUSTOM-99 fix", None, rh_jira_projects=["CUSTOM"])
+        assert result == 0.7
+
+    def test_link_confidence_default_on_candidate_pr(self) -> None:
+        pr = CandidatePR(
+            repo="o/r", pr_number=1, title="t", body=None,
+            base_commit="a", merge_commit="b", diff_url="u",
+            resolved_issues=[], created_at="2024-01-01T00:00:00Z",
+            merged_at="2024-01-01T01:00:00Z",
+        )
+        assert pr.link_confidence == 0.0
+
+    def test_link_confidence_set_on_candidate_pr(self) -> None:
+        pr = CandidatePR(
+            repo="o/r", pr_number=1, title="t", body=None,
+            base_commit="a", merge_commit="b", diff_url="u",
+            resolved_issues=[1], created_at="2024-01-01T00:00:00Z",
+            merged_at="2024-01-01T01:00:00Z",
+            link_confidence=0.9,
+        )
+        assert pr.link_confidence == 0.9
 
 
 class TestPRJsonlRoundTrip:
