@@ -221,3 +221,59 @@ class TestSWEbenchFlaskFixture:
             assert instance["test_patch"], (
                 f"test_patch is empty for {instance['instance_id']}"
             )
+
+
+class TestTaskInstanceFreshnessFields:
+    """fix_merge_date, provenance, and link_confidence on TaskInstance."""
+
+    def _make(self, **overrides) -> "TaskInstance":
+        from swebenchify.models import TaskInstance
+        defaults = dict(
+            repo="pallets/flask",
+            instance_id="pallets__flask-1",
+            base_commit="abc",
+            patch="diff\n",
+            test_patch="diff\n",
+            problem_statement="fix",
+            hints_text="",
+            created_at="2024-01-01T00:00:00Z",
+            version="2.3",
+            FAIL_TO_PASS="[]",
+            PASS_TO_PASS="[]",
+        )
+        defaults.update(overrides)
+        return TaskInstance(**defaults)
+
+    def test_fix_merge_date_defaults_none(self) -> None:
+        assert self._make().fix_merge_date is None
+
+    def test_fix_merge_date_can_be_set(self) -> None:
+        inst = self._make(fix_merge_date="2024-01-02T12:00:00Z")
+        assert inst.fix_merge_date == "2024-01-02T12:00:00Z"
+
+    def test_provenance_defaults_public_upstream(self) -> None:
+        assert self._make().provenance == "public_upstream"
+
+    def test_provenance_can_be_internal(self) -> None:
+        assert self._make(provenance="internal").provenance == "internal"
+
+    def test_link_confidence_defaults_zero(self) -> None:
+        assert self._make().link_confidence == 0.0
+
+    def test_link_confidence_can_be_set(self) -> None:
+        assert self._make(link_confidence=0.9).link_confidence == 0.9
+
+    def test_fields_in_asdict(self) -> None:
+        import json
+        from dataclasses import asdict
+        inst = self._make(
+            fix_merge_date="2024-01-02T12:00:00Z",
+            provenance="public_upstream",
+            link_confidence=1.0,
+        )
+        d = asdict(inst)
+        serialised = json.dumps(d)
+        assert "fix_merge_date" in d
+        assert "provenance" in d
+        assert "link_confidence" in d
+        assert isinstance(serialised, str)

@@ -315,6 +315,8 @@ def extract_patches(
         hints_text=hints_text,
         created_at=candidate.created_at,
         resolved_issues=candidate.resolved_issues,
+        merged_at=candidate.merged_at,
+        link_confidence=candidate.link_confidence,
     )
 
 
