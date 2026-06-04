@@ -125,6 +125,168 @@ def get_docker_run_prefix(
     return cmd
 
 
+class GoDockerfile:
+    """Generates minimal Dockerfiles for Go validation images."""
+
+    @staticmethod
+    def generate(spec: "GoEnvironmentSpec") -> str:
+        """Return a Dockerfile string for the given Go environment spec.
+
+        The image is based on the official ``golang:{go_version}`` image.
+        For vendored repos the vendor directory is expected to be present in
+        the build context (the repo root).
+
+        Args:
+            spec: The discovered ``GoEnvironmentSpec``.
+
+        Returns:
+            A multi-line Dockerfile string.
+        """
+        go_version = spec.go_version or "1.21"
+        lines = [
+            f"FROM golang:{go_version}",
+            "WORKDIR /repo",
+        ]
+
+        if spec.system_dependencies:
+            pkgs = " ".join(spec.system_dependencies)
+            lines += [
+                "RUN apt-get update -qq && \\",
+                f"    apt-get install -y --no-install-recommends {pkgs} && \\",
+                "    rm -rf /var/lib/apt/lists/*",
+            ]
+
+        if spec.module_mode == "vendored":
+            lines.append("# vendor directory is mounted at runtime; no COPY needed here")
+
+        if spec.goflags:
+            lines.append(f'ENV GOFLAGS="{spec.goflags}"')
+
+        lines.append('CMD ["go", "test", "./..."]')
+        return "\n".join(lines) + "\n"
+
+
+class GoImageCache:
+    """Per-``(repo, era, env_spec_hash)`` Docker image build and cache.
+
+    Images are named ``swebenchify-go-{slug}-{hash_prefix}`` where
+    ``slug`` is the repo's ``owner__repo`` form and ``hash_prefix`` is
+    the first 12 characters of ``env_spec_hash``.
+
+    The cache is checked via ``docker image inspect``.  A full rebuild
+    can be forced with ``force_rebuild=True``.
+    """
+
+    def __init__(self, workspace_root: str | Path) -> None:
+        self._cache_dir = Path(workspace_root) / "go-images"
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def image_name(self, repo: str, era_commit: str, env_spec_hash: str) -> str:
+        """Return a stable, unique image name for the given inputs."""
+        slug = repo.replace("/", "__").lower()
+        return f"swebenchify-go-{slug}-{env_spec_hash[:12]}"
+
+    def is_cached(self, image_name: str) -> bool:
+        """Return True if the image exists in the local Docker daemon."""
+        try:
+            result = subprocess.run(
+                ["docker", "image", "inspect", image_name],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            return result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+
+    def build(
+        self,
+        repo_path: str | Path,
+        spec: "GoEnvironmentSpec",
+        image_name: str,
+    ) -> bool:
+        """Build a Docker image for the given spec.
+
+        Writes a ``Dockerfile.swebenchify`` to a temporary directory and
+        runs ``docker build`` against it.
+
+        Args:
+            repo_path: Path to the repo checkout (used as build context for
+                vendored repos).
+            spec: The ``GoEnvironmentSpec`` to bake into the image.
+            image_name: The tag to apply to the built image.
+
+        Returns:
+            ``True`` on success, ``False`` on failure.
+        """
+        import tempfile
+        dockerfile_content = GoDockerfile.generate(spec)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dockerfile_path = Path(tmpdir) / "Dockerfile"
+            dockerfile_path.write_text(dockerfile_content)
+
+            cmd = [
+                "docker", "build",
+                "-f", str(dockerfile_path),
+                "-t", image_name,
+                str(repo_path),
+            ]
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+                if result.returncode == 0:
+                    logger.info("Built Go image: %s", image_name)
+                    return True
+                logger.error(
+                    "docker build failed for %s:\n%s", image_name, result.stderr
+                )
+                return False
+            except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+                logger.error("docker build error for %s: %s", image_name, exc)
+                return False
+
+    def get_or_build(
+        self,
+        repo: str,
+        era_commit: str,
+        spec: "GoEnvironmentSpec",
+        repo_path: str | Path,
+        force_rebuild: bool = False,
+    ) -> str | None:
+        """Return the image name, building it if not already cached.
+
+        Args:
+            repo: Repository full name (e.g. ``"kubernetes/kubectl"``).
+            era_commit: The era base commit (used only for name derivation).
+            spec: The ``GoEnvironmentSpec``.
+            repo_path: Path to the repo checkout.
+            force_rebuild: If ``True``, rebuild even if the image exists.
+
+        Returns:
+            The image name string on success, or ``None`` on build failure.
+        """
+        from swebenchify.models import compute_env_spec_hash
+        spec_hash = compute_env_spec_hash(spec) if not spec.env_spec_hash else spec.env_spec_hash
+        name = self.image_name(repo, era_commit, spec_hash)
+
+        if not force_rebuild and self.is_cached(name):
+            logger.debug("Go image cache hit: %s", name)
+            return name
+
+        if self.build(repo_path, spec, name):
+            return name
+        return None
+
+
 def is_docker_available() -> bool:
     """Check whether Docker is available on the system.
 
