@@ -159,7 +159,7 @@ def _compute_f2p_p2p(
     return fail_to_pass, pass_to_pass
 
 
-async def validate_instance(
+async def _run_once(
     candidate: CandidateInstance,
     env_spec: AnyEnvironmentSpec,
     repo: Repository,
@@ -169,10 +169,56 @@ async def validate_instance(
     max_turns: int = 60,
     budget_usd: float = 3.0,
 ) -> ValidationResult:
+    """Execute a single validation run and return its result."""
+    return await validate_instance(
+        candidate=candidate,
+        env_spec=env_spec,
+        repo=repo,
+        workspace_mgr=workspace_mgr,
+        cost_tracker=cost_tracker,
+        max_attempts=max_attempts,
+        max_turns=max_turns,
+        budget_usd=budget_usd,
+        n_runs=1,  # prevent recursion
+    )
+
+
+async def validate_instance(
+    candidate: CandidateInstance,
+    env_spec: AnyEnvironmentSpec,
+    repo: Repository,
+    workspace_mgr: WorkspaceManager,
+    cost_tracker: CostTracker | None = None,
+    max_attempts: int = 3,
+    max_turns: int = 60,
+    budget_usd: float = 3.0,
+    n_runs: int = 1,
+) -> ValidationResult:
     """Validate a single candidate instance by running tests before and after the gold patch.
+
+    When ``n_runs > 1``, runs validation N times and applies flake quarantine:
+    - A test is stable-fail if it fails on ALL N pre-fix runs.
+    - A test is stable-pass if it passes on ALL N post-fix runs.
+    - F2P = stable-fail ∩ stable-pass.
+    - Tests that are inconsistent across runs are quarantined and removed.
+    - If all F2P tests are quarantined, returns ``status="invalid"``.
 
     Returns a ValidationResult with FAIL_TO_PASS and PASS_TO_PASS test lists.
     """
+    # Multi-run quarantine path
+    if n_runs > 1:
+        return await _validate_with_quarantine(
+            candidate=candidate,
+            env_spec=env_spec,
+            repo=repo,
+            workspace_mgr=workspace_mgr,
+            cost_tracker=cost_tracker,
+            max_attempts=max_attempts,
+            max_turns=max_turns,
+            budget_usd=budget_usd,
+            n_runs=n_runs,
+        )
+
     # Prepare workspace
     inst_dir = workspace_mgr.prepare_validation_workspace(
         repo=repo,
@@ -246,6 +292,95 @@ async def validate_instance(
         return _parse_go_validation_output(worktree, result)
     else:
         return _parse_python_validation_output(worktree, result)
+
+
+async def _validate_with_quarantine(
+    candidate: CandidateInstance,
+    env_spec: AnyEnvironmentSpec,
+    repo: Repository,
+    workspace_mgr: WorkspaceManager,
+    cost_tracker: CostTracker | None = None,
+    max_attempts: int = 3,
+    max_turns: int = 60,
+    budget_usd: float = 3.0,
+    n_runs: int = 3,
+) -> ValidationResult:
+    """Run N validation passes and quarantine flaky tests.
+
+    A test is stable only if its outcome is consistent across all runs.
+    Flaky tests (inconsistent across runs) are quarantined and removed from F2P.
+
+    Returns a ValidationResult with quarantine metadata populated.
+    """
+    # Per-run sets derived from FAIL_TO_PASS and PASS_TO_PASS of each run.
+    # FAIL_TO_PASS already encodes "failed pre-fix AND passed post-fix".
+    # PASS_TO_PASS encodes "passed in both pre- and post-fix runs".
+    per_run_f2p: list[set[str]] = []
+    per_run_p2p: list[set[str]] = []
+    first_compiled = True
+
+    for _ in range(n_runs):
+        single = await _run_once(
+            candidate=candidate,
+            env_spec=env_spec,
+            repo=repo,
+            workspace_mgr=workspace_mgr,
+            cost_tracker=cost_tracker,
+            max_attempts=max_attempts,
+            max_turns=max_turns,
+            budget_usd=budget_usd,
+        )
+        if single.status == "error":
+            # Propagate hard errors immediately
+            return single
+
+        if not single.compiled:
+            first_compiled = False
+
+        per_run_f2p.append(set(single.FAIL_TO_PASS))
+        per_run_p2p.append(set(single.PASS_TO_PASS))
+
+    # Stable F2P: present in ALL runs (consistently flipped fail→pass)
+    f2p_union = per_run_f2p[0].copy()
+    stable_f2p = per_run_f2p[0].copy()
+    for run_set in per_run_f2p[1:]:
+        f2p_union |= run_set
+        stable_f2p &= run_set
+
+    f2p = sorted(stable_f2p)
+
+    # Flaky: appeared in SOME runs but not all
+    flaky = f2p_union - stable_f2p
+    quarantined = sorted(flaky)
+    flake_count = len(quarantined)
+
+    # Stable P2P: passed in ALL runs
+    stable_p2p = per_run_p2p[0].copy()
+    for run_set in per_run_p2p[1:]:
+        stable_p2p &= run_set
+    p2p = sorted(stable_p2p)
+
+    if not f2p:
+        return ValidationResult(
+            status="invalid",
+            FAIL_TO_PASS=[],
+            PASS_TO_PASS=p2p,
+            compiled=first_compiled,
+            n_runs=n_runs,
+            flake_count=flake_count,
+            quarantined_tests=quarantined,
+            error_message="All F2P tests quarantined as flaky" if quarantined else None,
+        )
+
+    return ValidationResult(
+        status="valid",
+        FAIL_TO_PASS=f2p,
+        PASS_TO_PASS=p2p,
+        compiled=first_compiled,
+        n_runs=n_runs,
+        flake_count=flake_count,
+        quarantined_tests=quarantined,
+    )
 
 
 def _parse_go_validation_output(

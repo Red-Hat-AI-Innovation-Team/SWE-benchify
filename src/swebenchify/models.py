@@ -143,6 +143,9 @@ class ValidationResult:
     compiled: bool = True          # False if the patch caused a build failure
     pre_fix_log: str | None = None   # raw test output before applying gold patch
     post_fix_log: str | None = None  # raw test output after applying gold patch
+    n_runs: int = 1                  # number of validation runs performed
+    flake_count: int = 0             # number of tests quarantined as flaky
+    quarantined_tests: list[str] = field(default_factory=list)
 
 
 @dataclass
