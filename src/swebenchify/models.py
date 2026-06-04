@@ -183,6 +183,9 @@ class TaskInstance:
     n_runs: int = 1
     flake_count: int = 0
     quarantined_tests: list[str] = field(default_factory=list)
+    # Decontamination overlap flag (computed at emit time, issue #43)
+    decontamination_overlap: bool = False
+    decontamination_overlap_source: str | None = None  # "swe-bench" | "rh-swe-bench"
 
 
 @dataclass

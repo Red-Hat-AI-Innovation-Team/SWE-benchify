@@ -374,6 +374,17 @@ async def run_repo_pipeline(
                 score.recommendation,
             )
 
+    # Decontamination overlap check (emit-time, additive flag)
+    if config.decontam_reference_paths:
+        from swebenchify.decontam import DecontaminationChecker
+        checker = DecontaminationChecker(config.decontam_reference_paths)
+        for inst in task_instances:
+            overlap, source = checker.check(inst.instance_id, inst.patch)
+            inst.decontamination_overlap = overlap
+            inst.decontamination_overlap_source = source
+        flagged = sum(1 for i in task_instances if i.decontamination_overlap)
+        logger.info("  Decontam: %d/%d instances flagged as overlapping", flagged, len(task_instances))
+
     # Stage 5: Quality Filtering
     logger.info("Stage 5: Applying quality filters")
     filtered = apply_filters(task_instances, config.filters)
