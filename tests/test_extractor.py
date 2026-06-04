@@ -289,3 +289,59 @@ class TestCandidateInstanceJsonlRoundTrip:
         save_candidates([], path)
         loaded = load_candidates(path)
         assert loaded == []
+
+
+class TestMergedAtPropagation:
+    """merged_at and link_confidence flow from CandidatePR → CandidateInstance."""
+
+    def _make_pr(self, **overrides) -> "CandidatePR":
+        from swebenchify.models import CandidatePR
+        defaults = dict(
+            repo="pallets/flask",
+            pr_number=1,
+            title="fix thing",
+            body=None,
+            base_commit="abc",
+            merge_commit="def",
+            diff_url="https://github.com/pallets/flask/pull/1.diff",
+            resolved_issues=[1],
+            created_at="2024-01-01T00:00:00Z",
+            merged_at="2024-01-02T12:00:00Z",
+            link_confidence=0.9,
+        )
+        defaults.update(overrides)
+        return CandidatePR(**defaults)
+
+    def test_merged_at_default_on_candidate_instance(self) -> None:
+        from swebenchify.models import CandidateInstance
+        inst = CandidateInstance(
+            repo="r", instance_id="i", pr_number=1,
+            base_commit="a", merge_commit="b",
+            patch=None, test_patch=None,
+            problem_statement=None, hints_text=None,
+            created_at="2024-01-01T00:00:00Z",
+        )
+        assert inst.merged_at == ""
+        assert inst.link_confidence == 0.0
+
+    def test_merged_at_survives_jsonl_round_trip(self, tmp_path: Path) -> None:
+        from swebenchify.models import CandidateInstance
+        inst = CandidateInstance(
+            repo="pallets/flask",
+            instance_id="pallets__flask-1",
+            pr_number=1,
+            base_commit="abc",
+            merge_commit="def",
+            patch=None,
+            test_patch=None,
+            problem_statement=None,
+            hints_text=None,
+            created_at="2024-01-01T00:00:00Z",
+            merged_at="2024-01-02T12:00:00Z",
+            link_confidence=0.95,
+        )
+        path = str(tmp_path / "test.jsonl")
+        save_candidates([inst], path)
+        loaded = load_candidates(path)
+        assert loaded[0].merged_at == "2024-01-02T12:00:00Z"
+        assert loaded[0].link_confidence == 0.95

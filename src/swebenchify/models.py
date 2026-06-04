@@ -63,6 +63,8 @@ class CandidateInstance:
     hints_text: str | None
     created_at: str
     resolved_issues: list[int] = field(default_factory=list)
+    merged_at: str = ""        # ISO 8601 merge timestamp from GitHub API
+    link_confidence: float = 0.0
 
 
 @dataclass
@@ -165,7 +167,10 @@ class TaskInstance:
     FAIL_TO_PASS: str  # JSON-encoded list (SWE-bench convention)
     PASS_TO_PASS: str  # JSON-encoded list (SWE-bench convention)
     environment_setup_commit: str | None = None
-    image_name: str | None = None  # Docker image used for Go validation
+    image_name: str | None = None      # Docker image used for Go validation
+    fix_merge_date: str | None = None  # UTC timestamp of PR merge (== merged_at)
+    provenance: str = "public_upstream"  # "public_upstream" | "internal"
+    link_confidence: float = 0.0       # from compute_link_confidence()
 
 
 @dataclass

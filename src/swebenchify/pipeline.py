@@ -283,6 +283,9 @@ async def run_repo_pipeline(
                     PASS_TO_PASS=json.dumps(vr.PASS_TO_PASS),
                     environment_setup_commit=env_commit,
                     image_name=go_image_name if is_go_repo else None,
+                    fix_merge_date=candidate.merged_at or None,
+                    provenance="public_upstream",
+                    link_confidence=candidate.link_confidence,
                 )
             )
 
