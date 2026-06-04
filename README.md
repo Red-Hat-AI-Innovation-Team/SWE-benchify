@@ -1,5 +1,7 @@
 # SWE-benchify
 
+[![CI](https://github.com/Red-Hat-AI-Innovation-Team/SWE-benchify/actions/workflows/ci.yml/badge.svg)](https://github.com/Red-Hat-AI-Innovation-Team/SWE-benchify/actions/workflows/ci.yml)
+
 A harness that dispatches [Claude Code](https://claude.ai/claude-code) agents to transform GitHub repositories into [SWE-bench](https://github.com/princeton-nlp/SWE-bench)-compatible benchmarks.
 
 Given a list of GitHub repos, SWE-benchify:
