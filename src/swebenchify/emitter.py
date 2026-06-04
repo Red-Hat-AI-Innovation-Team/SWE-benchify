@@ -15,6 +15,30 @@ from swebenchify.models import TaskInstance
 
 logger = logging.getLogger(__name__)
 
+_PRODUCT_MAP_PATH = Path(__file__).parent / "repo_products.json"
+
+
+def load_product_map(path: str | Path | None = None) -> dict[str, str]:
+    """Load the repo → product mapping from a JSON file.
+
+    Args:
+        path: Path to the JSON file. Defaults to the bundled
+            ``repo_products.json`` in the package directory.
+
+    Returns:
+        Dict mapping ``"owner/repo"`` → product name string.
+        Returns an empty dict if the file does not exist.
+    """
+    target = Path(path) if path is not None else _PRODUCT_MAP_PATH
+    if not target.exists():
+        logger.warning("Product map not found at %s; product column will be null", target)
+        return {}
+    try:
+        return json.loads(target.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Failed to load product map: %s", exc)
+        return {}
+
 
 def emit_dataset(
     instances: list[TaskInstance],

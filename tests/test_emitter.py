@@ -157,3 +157,84 @@ class TestLoadDataset:
             f.write("\n\n")
         loaded = load_dataset(str(repo_file))
         assert len(loaded) == 1
+
+
+class TestLoadProductMap:
+    """Tests for load_product_map()."""
+
+    def test_returns_dict(self) -> None:
+        from swebenchify.emitter import load_product_map
+        result = load_product_map()
+        assert isinstance(result, dict)
+
+    def test_contains_kubectl_entry(self) -> None:
+        from swebenchify.emitter import load_product_map
+        m = load_product_map()
+        assert "kubernetes/kubectl" in m
+        assert m["kubernetes/kubectl"] == "OpenShift"
+
+    def test_contains_etcd_entry(self) -> None:
+        from swebenchify.emitter import load_product_map
+        m = load_product_map()
+        assert "etcd-io/etcd" in m
+
+    def test_missing_file_returns_empty(self, tmp_path: Path) -> None:
+        from swebenchify.emitter import load_product_map
+        result = load_product_map(tmp_path / "nonexistent.json")
+        assert result == {}
+
+    def test_custom_path(self, tmp_path: Path) -> None:
+        import json as _json
+        from swebenchify.emitter import load_product_map
+        p = tmp_path / "custom.json"
+        p.write_text(_json.dumps({"my/repo": "MyProduct"}))
+        result = load_product_map(p)
+        assert result["my/repo"] == "MyProduct"
+
+
+class TestSegmentationColumns:
+    """Segmentation columns flow through emit_dataset via asdict()."""
+
+    def test_segmentation_fields_in_jsonl(self, tmp_path: Path) -> None:
+        inst = _make_instance(
+            repo_language="go",
+            product="OpenShift",
+            n_fail_to_pass=2,
+            patch_lines=50,
+            files_touched=3,
+            cross_file=True,
+            env_spec_hash="abc" * 21,
+            n_runs=3,
+            flake_count=1,
+            quarantined_tests=["pkg.TestFlaky"],
+        )
+        emit_dataset([inst], str(tmp_path), repo_slug="owner__repo")
+        data = load_dataset(str(tmp_path / "owner__repo-task-instances.jsonl"))
+        assert len(data) == 1
+        row = data[0]
+        assert row["repo_language"] == "go"
+        assert row["product"] == "OpenShift"
+        assert row["n_fail_to_pass"] == 2
+        assert row["patch_lines"] == 50
+        assert row["files_touched"] == 3
+        assert row["cross_file"] is True
+        assert row["n_runs"] == 3
+        assert row["flake_count"] == 1
+        assert row["quarantined_tests"] == ["pkg.TestFlaky"]
+
+    def test_cross_file_false_when_one_file(self, tmp_path: Path) -> None:
+        inst = _make_instance(files_touched=1, cross_file=False)
+        emit_dataset([inst], str(tmp_path), repo_slug="owner__repo")
+        data = load_dataset(str(tmp_path / "owner__repo-task-instances.jsonl"))
+        assert data[0]["cross_file"] is False
+
+    def test_defaults_are_sensible(self, tmp_path: Path) -> None:
+        inst = _make_instance()
+        emit_dataset([inst], str(tmp_path), repo_slug="owner__repo")
+        data = load_dataset(str(tmp_path / "owner__repo-task-instances.jsonl"))
+        row = data[0]
+        assert row["repo_language"] is None
+        assert row["product"] is None
+        assert row["n_fail_to_pass"] == 0
+        assert row["n_runs"] == 1
+        assert row["quarantined_tests"] == []
