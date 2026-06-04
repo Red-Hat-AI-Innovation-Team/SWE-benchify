@@ -1,4 +1,5 @@
 {
+  "kubernetes/kubernetes": "OpenShift",
   "kubernetes/kubectl": "OpenShift",
   "etcd-io/etcd": "OpenShift",
   "openshift/openshift-controller-manager": "OpenShift",
