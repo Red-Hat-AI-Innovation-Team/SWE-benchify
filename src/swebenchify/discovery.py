@@ -12,7 +12,14 @@ import shutil
 from pathlib import Path
 
 from swebenchify.dispatcher import AgentResult, CostTracker, run_agent_with_retry
-from swebenchify.models import EnvironmentSpec, RepoVersion, Repository
+from swebenchify.go_registry import GoSpecRegistry, get_go_environment_setup_commit
+from swebenchify.models import (
+    GoEnvironmentSpec,
+    EnvironmentSpec,
+    RepoVersion,
+    Repository,
+    compute_env_spec_hash,
+)
 from swebenchify.workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
@@ -102,6 +109,75 @@ Write two JSON files to the current directory:
 """
 
 ENV_TOOLS = ["Bash", "Read", "Write", "Glob", "Grep"]
+
+# ---------------------------------------------------------------------------
+# Go environment discovery
+# ---------------------------------------------------------------------------
+
+GO_ENV_DISCOVERY_PROMPT = """\
+You are setting up the build and test environment for the Go repository \
+{repo} at commit {commit}.
+
+## Step 1: Detect the Go toolchain version
+
+Read go.mod to find the `go` directive (e.g. `go 1.22`).  Also check the
+`GOTOOLCHAIN` environment variable or `.go-version` file if present.
+Report the version as a plain semver string (e.g. "1.22").
+
+## Step 2: Detect the test entry point
+
+Check in this priority order:
+1. `Makefile` — look for a `test:` target. Use it if it runs `go test`.
+2. `hack/` directory — look for a `test*.sh` or `run-tests.sh` script.
+3. Fall back to: `go test ./...`
+
+The chosen command must produce parseable `go test -json` output. If the
+command does not already include `-json`, note that callers will wrap it.
+
+## Step 3: Detect module mode
+
+Check whether a `vendor/` directory is present and committed:
+- If yes: module_mode = "vendored", suggest adding `-mod=vendor` to GOFLAGS.
+- If no: module_mode = "modules".
+
+## Step 4: Detect system dependencies
+
+Scan `.github/workflows/*.yml` and any `Dockerfile` for apt-get or yum
+install commands. List the package names.
+
+## Step 5: Detect the build command
+
+Look for `make build` target or `go build ./...`. Use the Makefile target
+if present.
+
+## Output
+
+Write two JSON files to the current directory:
+
+1. `go_env_spec.json`:
+   {{
+     "language": "go",
+     "go_version": "<e.g. 1.22>",
+     "build_cmd": "<e.g. make build>",
+     "test_cmd": "<e.g. go test ./pkg/... or make test>",
+     "module_mode": "<modules|vendored>",
+     "goflags": "<e.g. -mod=vendor or empty string>",
+     "system_dependencies": ["<optional apt packages>"]
+   }}
+
+2. `version.json`:
+   {{
+     "repo": "{repo}",
+     "commit": "{commit}",
+     "version": "<go_version from go.mod>"
+   }}
+
+## Rules
+- Do NOT install anything — only inspect configuration files.
+- Do NOT create virtual environments or modify the repository.
+- Do NOT include any text outside the JSON in the output files.
+- If you cannot determine a field, use an empty string rather than null.
+"""
 
 
 async def discover_environment(
@@ -200,4 +276,76 @@ async def discover_environment(
     logger.error(
         "Environment discovery failed for %s v%s", repo.full_name, version
     )
+    return None, None
+
+
+async def discover_go_environment(
+    repo: Repository,
+    commit: str,
+    workspace_mgr: WorkspaceManager,
+    registry: GoSpecRegistry,
+    cost_tracker: CostTracker | None = None,
+    max_attempts: int = 3,
+    max_turns: int = 40,
+    budget_usd: float = 2.0,
+) -> tuple[GoEnvironmentSpec | None, RepoVersion | None]:
+    """Discover the Go build/test environment for a repo at a given commit.
+
+    Dispatches a lightweight read-only agent to inspect go.mod and CI
+    configuration — no installation happens. Results are registered in the
+    ``GoSpecRegistry`` and cached per ``(repo, env_spec_hash)``.
+
+    Returns ``(GoEnvironmentSpec, RepoVersion)`` on success, or
+    ``(None, None)`` on failure.
+    """
+    worktree = workspace_mgr.prepare_env_workspace(repo, commit, version="go-discovery")
+
+    prompt = GO_ENV_DISCOVERY_PROMPT.format(repo=repo.full_name, commit=commit)
+    result: AgentResult = await run_agent_with_retry(
+        prompt=prompt,
+        cwd=str(worktree),
+        output_files=["go_env_spec.json", "version.json"],
+        tools=ENV_TOOLS,
+        max_turns=max_turns,
+        budget_usd=budget_usd,
+        max_attempts=max_attempts,
+    )
+
+    if cost_tracker:
+        cost_tracker.record("go-env-discovery", repo.full_name, result)
+
+    spec_path = worktree / "go_env_spec.json"
+    version_path = worktree / "version.json"
+
+    if not result.is_error and spec_path.exists() and version_path.exists():
+        try:
+            spec_data = json.loads(spec_path.read_text())
+            ver_data = json.loads(version_path.read_text())
+
+            spec = GoEnvironmentSpec(
+                **{
+                    k: v
+                    for k, v in spec_data.items()
+                    if k in GoEnvironmentSpec.__dataclass_fields__ and k != "env_spec_hash"
+                }
+            )
+            spec.env_spec_hash = compute_env_spec_hash(spec)
+
+            version_string = registry.register(repo.full_name, commit, spec)
+            repo_version = RepoVersion(
+                repo=repo.full_name,
+                commit=commit,
+                version=version_string,
+            )
+            logger.info(
+                "Go env discovered for %s: go%s, test=%s, mode=%s",
+                repo.full_name, spec.go_version, spec.test_cmd, spec.module_mode,
+            )
+            return spec, repo_version
+
+        except (json.JSONDecodeError, TypeError, KeyError) as exc:
+            logger.error("Failed to parse Go env agent output: %s", exc)
+            return None, None
+
+    logger.error("Go environment discovery failed for %s", repo.full_name)
     return None, None
