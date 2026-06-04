@@ -23,11 +23,16 @@ logger = logging.getLogger(__name__)
 # Patterns that identify test files.  A file is considered a test file if
 # any path component matches one of these directory names, or if the
 # basename matches common test-file naming conventions.
-_TEST_DIR_NAMES = {"test", "tests", "e2e", "testing"}
+#
+# "testdata" is Go's convention for embedding fixture files alongside
+# package code; those files are test-only and must not appear in the gold
+# patch.
+_TEST_DIR_NAMES = {"test", "tests", "e2e", "testing", "testdata"}
 
 _TEST_FILE_PATTERNS = [
     re.compile(r"^test_"),        # test_foo.py
-    re.compile(r"_test\."),       # foo_test.py
+    re.compile(r"_test\.go$"),    # foo_test.go  (Go in-package test files)
+    re.compile(r"_test\."),       # foo_test.py / foo_test.ts (other languages)
     re.compile(r"\.test\."),      # foo.test.ts
     re.compile(r"_spec\."),       # foo_spec.ts
     re.compile(r"\.spec\."),      # foo.spec.ts
@@ -40,9 +45,13 @@ def is_test_file(path: str) -> bool:
     """Determine whether a file path refers to a test file.
 
     A file is a test file if any of its path components is ``test``,
-    ``tests``, ``e2e``, or ``testing``, or if its basename matches common
-    test naming conventions (``test_*``, ``*_test.*``, ``*.test.*``,
-    ``*_spec.*``, ``*.spec.*``).
+    ``tests``, ``e2e``, ``testing``, or ``testdata``, or if its basename
+    matches common test naming conventions (``test_*``, ``*_test.go``,
+    ``*_test.*``, ``*.test.*``, ``*_spec.*``, ``*.spec.*``).
+
+    Go-specific rules:
+    - Files ending in ``_test.go`` are Go's in-package test files.
+    - Files under a ``testdata/`` directory are test fixtures.
 
     Args:
         path: File path (forward-slash separated, as in a unified diff).

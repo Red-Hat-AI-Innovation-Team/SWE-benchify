@@ -74,6 +74,70 @@ class TestIsTestFile:
         assert is_test_file("src/main/java/com/example/Foo.java") is False
 
 
+class TestIsTestFileGo:
+    """Go-specific test-file detection rules."""
+
+    def test_go_test_file_suffix(self) -> None:
+        assert is_test_file("pkg/foo_test.go") is True
+
+    def test_go_inpackage_test(self) -> None:
+        assert is_test_file("pkg/util/bar_test.go") is True
+
+    def test_go_test_file_in_root(self) -> None:
+        assert is_test_file("main_test.go") is True
+
+    def test_go_regular_source(self) -> None:
+        assert is_test_file("pkg/util/bar.go") is False
+
+    def test_go_testdata_directory(self) -> None:
+        assert is_test_file("pkg/testdata/fixture.json") is True
+
+    def test_go_testdata_nested(self) -> None:
+        assert is_test_file("cmd/kubectl/testdata/golden/out.txt") is True
+
+    def test_go_testdata_in_middle(self) -> None:
+        assert is_test_file("internal/testdata/schema.yaml") is True
+
+    def test_go_false_positive_latest(self) -> None:
+        # "latest" is not a test directory name (no substring matching)
+        assert is_test_file("staging/latest.go") is False
+
+    def test_go_false_positive_contest(self) -> None:
+        assert is_test_file("internal/contest.go") is False
+
+    def test_go_false_positive_attestation(self) -> None:
+        assert is_test_file("attestation/verify.go") is False
+
+    def test_go_false_positive_interested(self) -> None:
+        assert is_test_file("interested/helper.go") is False
+
+    def test_go_split_correctly_classifies_test_file(self) -> None:
+        """_test.go files go into test patch, not gold patch."""
+        import textwrap
+        diff = textwrap.dedent("""\
+            diff --git a/pkg/server/handler.go b/pkg/server/handler.go
+            --- a/pkg/server/handler.go
+            +++ b/pkg/server/handler.go
+            @@ -1,2 +1,3 @@
+             package server
+            +// fixed
+             func Handle() {}
+            diff --git a/pkg/server/handler_test.go b/pkg/server/handler_test.go
+            --- a/pkg/server/handler_test.go
+            +++ b/pkg/server/handler_test.go
+            @@ -1,2 +1,3 @@
+             package server
+            +// new test
+             func TestHandle(t *testing.T) {}
+        """)
+        gold, test = split_patch(diff)
+        assert gold is not None
+        assert "handler.go" in gold
+        assert "handler_test.go" not in gold
+        assert test is not None
+        assert "handler_test.go" in test
+
+
 class TestSplitPatch:
     """Test splitting a unified diff into gold and test patches."""
 
