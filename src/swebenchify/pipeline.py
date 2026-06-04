@@ -161,7 +161,7 @@ async def run_repo_pipeline(
     go_image_name: str | None = None
 
     if is_go_repo:
-        go_registry = GoSpecRegistry(workspace_mgr.workspace_root)
+        go_registry = GoSpecRegistry(workspace_mgr.root)
         commit = version_commits["go"]
         try:
             go_spec, repo_version = await discover_go_environment(
@@ -181,7 +181,7 @@ async def run_repo_pipeline(
                     go_spec.go_version, go_spec.test_cmd, go_spec.module_mode,
                 )
                 # Build / retrieve the per-(repo, era) Docker image
-                image_cache = GoImageCache(workspace_mgr.workspace_root)
+                image_cache = GoImageCache(workspace_mgr.root)
                 go_image_name = image_cache.get_or_build(
                     repo=repo.full_name,
                     era_commit=commit,
