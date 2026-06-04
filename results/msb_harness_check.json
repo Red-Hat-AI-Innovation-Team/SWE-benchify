@@ -1,0 +1,24 @@
+[
+  {
+    "pr_number": 19086,
+    "base_commit": "8c1547bc59398b39a0af12b2699ac1984e98910f",
+    "build_ok": true,
+    "resolved": true,
+    "msb_f2p": [
+      "TestHTTPSubPath",
+      "TestHTTPSubPath//readyz",
+      "TestLearnerReadyCheck"
+    ],
+    "our_f2p": [
+      "go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp.TestHTTPSubPath",
+      "go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp.TestHTTPSubPath//readyz/learner_ok",
+      "go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp.TestLearnerReadyCheck",
+      "go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp.TestLearnerReadyCheck/not_ready_because_member_is_learner"
+    ],
+    "gaps": [
+      "SUBTEST_COLLAPSE: our parser has 32 subtest entries that MSB collapses (e.g. ['go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp.TestDataCorruptionCheck/Live_if_CORRUPT_alarm_is_on', 'go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp.TestDataCorruptionCheck/Not_ready_if_CORRUPT_alarm_is_on'])",
+      "ID_PREFIX: our IDs have package prefix (e.g. ['go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp.TestDataCorruptionCheck', 'go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp.TestDataCorruptionCheck/Live_if_CORRUPT_alarm_is_on']); MSB uses bare test names"
+    ],
+    "error": null
+  }
+]
