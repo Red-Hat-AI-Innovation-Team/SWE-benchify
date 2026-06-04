@@ -33,6 +33,89 @@ _KEYWORDS = frozenset({
 
 _GITHUB_API_BASE = "https://api.github.com"
 
+# ---------------------------------------------------------------------------
+# RH issue-linking patterns
+# ---------------------------------------------------------------------------
+
+# Commit trailers with an explicit score of 1.0 or 0.95
+_TRAILER_PATTERNS: list[tuple[re.Pattern, float]] = [
+    (re.compile(r"^Resolves:\s+\S+", re.MULTILINE | re.IGNORECASE), 1.0),
+    (re.compile(r"^Fixes:\s+\S+", re.MULTILINE | re.IGNORECASE), 1.0),
+    (re.compile(r"^Bug-Url:\s+\S+", re.MULTILINE | re.IGNORECASE), 0.95),
+]
+
+_RHBZ_PATTERN = re.compile(r"rhbz#\d+", re.IGNORECASE)
+_CHANGE_ID_PATTERN = re.compile(r"^Change-Id:\s+I[0-9a-f]+", re.MULTILINE)
+
+# OCPBUGS is always recognised; other keys come from config.
+_OCPBUGS_PATTERN = re.compile(r"\bOCPBUGS-\d+\b")
+
+
+def compute_link_confidence(
+    title: str | None,
+    body: str | None,
+    commit_messages: list[str] | None = None,
+    rh_jira_projects: list[str] | None = None,
+) -> float:
+    """Return a confidence score [0, 1] that the PR resolves a tracked issue.
+
+    Scans title, body, and (optionally) commit messages for known issue-linking
+    patterns and returns the highest score found. Pattern precedence:
+
+    - GitHub close/fix/resolve keyword → 1.0
+    - ``Resolves:`` / ``Fixes:`` commit trailers → 1.0
+    - ``Bug-Url:`` trailer → 0.95
+    - ``rhbz#NNNNNN`` → 0.9
+    - ``OCPBUGS-NNNN`` → 0.9
+    - Configured Jira project key (e.g. ``STOR-567``) → 0.7
+    - ``Change-Id:`` only → 0.5
+    - No match → 0.0
+
+    Args:
+        title: PR title text.
+        body: PR body text.
+        commit_messages: List of commit message strings to scan.
+        rh_jira_projects: Additional Jira project keys to recognise at 0.7.
+            Defaults to ``["STOR", "MGMT"]`` (OCPBUGS is always included at 0.9).
+
+    Returns:
+        Float confidence score in [0, 1].
+    """
+    all_text = "\n".join(filter(None, [title, body, *( commit_messages or [])]))
+    if not all_text.strip():
+        return 0.0
+
+    best = 0.0
+
+    # GitHub keyword → 1.0
+    if extract_resolved_issues(all_text):
+        return 1.0
+
+    # Commit trailers
+    for pattern, score in _TRAILER_PATTERNS:
+        if pattern.search(all_text):
+            best = max(best, score)
+
+    # rhbz#
+    if _RHBZ_PATTERN.search(all_text):
+        best = max(best, 0.9)
+
+    # OCPBUGS
+    if _OCPBUGS_PATTERN.search(all_text):
+        best = max(best, 0.9)
+
+    # Configured Jira project keys
+    extra_projects = rh_jira_projects or ["STOR", "MGMT"]
+    for project in extra_projects:
+        if re.search(rf"\b{re.escape(project)}-\d+\b", all_text):
+            best = max(best, 0.7)
+
+    # Change-Id (weakest signal)
+    if _CHANGE_ID_PATTERN.search(all_text):
+        best = max(best, 0.5)
+
+    return best
+
 
 def extract_resolved_issues(text: str) -> list[int]:
     """Extract issue numbers that are resolved by keyword references.
@@ -180,15 +263,21 @@ def collect_prs(
             resolved = set(extract_resolved_issues(title))
             resolved.update(extract_resolved_issues(body))
 
-            # Only fetch commit messages if no issues found in title/body
+            # Fetch commit messages — needed for both issue resolution and
+            # link_confidence computation (trailers live in commit messages)
+            commit_messages: list[str] = []
             if not resolved:
                 commits = _fetch_pr_commits(owner, name, pr_number, headers)
                 for commit in commits:
                     msg = commit.get("commit", {}).get("message", "")
+                    commit_messages.append(msg)
                     resolved.update(extract_resolved_issues(msg))
 
             if not resolved:
                 continue
+
+            # Compute link confidence across all available text
+            confidence = compute_link_confidence(title, body, commit_messages)
 
             # Get the actual base commit (first parent of merge commit)
             merge_commit_sha = pr.get("merge_commit_sha") or ""
@@ -215,6 +304,7 @@ def collect_prs(
                 resolved_issues=sorted(resolved),
                 created_at=created_at,
                 merged_at=pr["merged_at"],
+                link_confidence=confidence,
             )
             candidates.append(candidate)
 
