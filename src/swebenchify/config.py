@@ -49,6 +49,7 @@ class PipelineConfig:
     max_prs_per_repo: int | None = None
     pr_after: str | None = None
     pr_before: str | None = None
+    go_n_runs: int = 3  # number of validation runs for Go flake quarantine
 
 
 @dataclass
@@ -153,6 +154,7 @@ def _build_pipeline_config(data: dict | None) -> PipelineConfig:
         max_prs_per_repo=data.get("max_prs_per_repo"),
         pr_after=pr_date_range.get("after"),
         pr_before=pr_date_range.get("before"),
+        go_n_runs=data.get("go_n_runs", PipelineConfig.go_n_runs),
     )
 
 
