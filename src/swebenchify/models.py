@@ -6,6 +6,8 @@ flow through the pipeline stages.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 
 
@@ -75,6 +77,50 @@ class EnvironmentSpec:
     pre_install: list[str] = field(default_factory=list)
     pip_packages: list[str] = field(default_factory=list)
     system_dependencies: list[str] = field(default_factory=list)
+
+
+@dataclass
+class GoEnvironmentSpec:
+    """Build and test configuration for a Go repository version.
+
+    Discovered by the Go branch of the Environment Discovery Agent.
+    The ``env_spec_hash`` field is a stable content hash computed from all
+    other fields — it acts as the cache key for per-``(repo, era)`` images
+    and the spec registry.
+    """
+
+    language: str = "go"
+    go_version: str = ""           # from go.mod "go" directive, e.g. "1.22"
+    build_cmd: str = ""            # e.g. "make build" or "go build ./..."
+    test_cmd: str = ""             # e.g. "go test ./pkg/..." or "make test"
+    module_mode: str = "modules"   # "modules" | "vendored"
+    goflags: str = ""              # e.g. "-mod=vendor"
+    system_dependencies: list[str] = field(default_factory=list)
+    env_spec_hash: str = ""        # populated by compute_env_spec_hash()
+
+
+def compute_env_spec_hash(spec: GoEnvironmentSpec) -> str:
+    """Return a stable SHA-256 hex digest of a GoEnvironmentSpec.
+
+    All fields except ``env_spec_hash`` itself are included. The digest is
+    computed over a sorted JSON serialisation so field insertion order does
+    not affect the result.
+    """
+    payload = {
+        "language": spec.language,
+        "go_version": spec.go_version,
+        "build_cmd": spec.build_cmd,
+        "test_cmd": spec.test_cmd,
+        "module_mode": spec.module_mode,
+        "goflags": spec.goflags,
+        "system_dependencies": sorted(spec.system_dependencies),
+    }
+    serialised = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialised.encode()).hexdigest()
+
+
+# Type alias used by pipeline code that accepts either language's spec.
+AnyEnvironmentSpec = EnvironmentSpec | GoEnvironmentSpec
 
 
 @dataclass

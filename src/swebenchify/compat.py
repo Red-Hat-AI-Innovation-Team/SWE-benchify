@@ -126,6 +126,24 @@ def get_environment_setup_commit(
     return None
 
 
+def get_go_version_string(
+    spec: "GoEnvironmentSpec",
+    registry: "GoSpecRegistry",
+) -> str:
+    """Return the version string for a Go spec from the registry.
+
+    Falls back to a hash-based string if not found (should not happen after
+    a successful ``discover_go_environment`` call).
+    """
+    from swebenchify.models import compute_env_spec_hash
+    spec_hash = compute_env_spec_hash(spec)
+    version = registry.get_version(spec_hash)
+    if version:
+        return version
+    # Fallback: construct inline (registry may not be loaded yet)
+    return f"{spec.go_version}-{spec_hash[:8]}" if spec.go_version else spec_hash[:12]
+
+
 def filter_compatible_instances(instances: list, repo: str) -> tuple[list, list]:
     """Split instances into compatible (version supported) and incompatible.
 

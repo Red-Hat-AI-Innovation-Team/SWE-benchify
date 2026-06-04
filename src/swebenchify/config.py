@@ -85,6 +85,7 @@ class Config:
     agent: AgentConfig = field(default_factory=AgentConfig)
     filters: FilterConfig = field(default_factory=FilterConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
+    go_repos: list[str] = field(default_factory=list)
 
 
 _ENV_VAR_PATTERN = re.compile(r"^\$([A-Za-z_][A-Za-z0-9_]*)$")
@@ -245,6 +246,7 @@ def load_config(path: str) -> Config:
         agent=_build_agent_config(raw.get("agent")),
         filters=_build_filter_config(raw.get("filters")),
         output=_build_output_config(raw.get("output")),
+        go_repos=raw.get("go_repos", []) or [],
     )
 
     if not cfg.github_token and not cfg.github_tokens:

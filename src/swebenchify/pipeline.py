@@ -13,12 +13,13 @@ from pathlib import Path
 
 from swebenchify.collector import collect_prs, load_prs, save_prs
 from swebenchify.config import Config
-from swebenchify.discovery import discover_environment
+from swebenchify.discovery import discover_environment, discover_go_environment
 from swebenchify.dispatcher import CostTracker
 from swebenchify.emitter import emit_dataset
 from swebenchify.extractor import extract_all, load_candidates, save_candidates
 from swebenchify.filters import apply_filters
-from swebenchify.models import EnvironmentSpec, QualityScore, Repository, TaskInstance
+from swebenchify.go_registry import GoSpecRegistry
+from swebenchify.models import AnyEnvironmentSpec, EnvironmentSpec, GoEnvironmentSpec, QualityScore, Repository, TaskInstance
 from swebenchify.sandbox import SandboxConfig, is_docker_available
 from swebenchify.validator import validate_instances
 from swebenchify.versioning import detect_version
@@ -133,37 +134,75 @@ async def run_repo_pipeline(
     # Ensure bare clone exists before version detection
     workspace_mgr.ensure_bare_clone(repo)
     bare_clone = workspace_mgr.bare_clone_path(repo)
+
+    is_go_repo = repo.full_name in config.go_repos
+
     instance_versions: dict[str, str] = {}
     version_commits: dict[str, str] = {}  # version -> representative commit
-    for c in viable:
-        v = detect_version(str(bare_clone), c.base_commit) or "unknown"
-        instance_versions[c.instance_id] = v
-        if v not in version_commits:
-            version_commits[v] = c.base_commit
+
+    if is_go_repo:
+        # For Go repos, all instances share a single spec keyed by env_spec_hash;
+        # we use a sentinel version key "go" and discover once.
+        for c in viable:
+            instance_versions[c.instance_id] = "go"
+        version_commits["go"] = viable[0].base_commit
+    else:
+        for c in viable:
+            v = detect_version(str(bare_clone), c.base_commit) or "unknown"
+            instance_versions[c.instance_id] = v
+            if v not in version_commits:
+                version_commits[v] = c.base_commit
 
     logger.info(f"  Detected {len(version_commits)} unique version(s): {list(version_commits.keys())}")
 
     # Discover environment for each unique version
-    env_specs: dict[str, EnvironmentSpec] = {}
-    for version, commit in version_commits.items():
+    env_specs: dict[str, AnyEnvironmentSpec] = {}
+    go_registry: GoSpecRegistry | None = None
+
+    if is_go_repo:
+        go_registry = GoSpecRegistry(workspace_mgr.workspace_root)
+        commit = version_commits["go"]
         try:
-            env_spec, repo_version = await discover_environment(
+            go_spec, repo_version = await discover_go_environment(
                 repo=repo,
                 commit=commit,
-                version=version,
                 workspace_mgr=workspace_mgr,
+                registry=go_registry,
                 cost_tracker=cost_tracker,
                 max_attempts=config.agent.max_attempts,
                 max_turns=config.agent.env_discovery.max_turns,
                 budget_usd=config.agent.env_discovery.budget_usd,
             )
-            if env_spec:
-                env_specs[version] = env_spec
-                logger.info(f"  v{version}: {env_spec.language} {env_spec.language_version}, test: {env_spec.test_cmd}")
+            if go_spec:
+                env_specs["go"] = go_spec
+                logger.info(
+                    "  Go env: go%s, test=%s, mode=%s",
+                    go_spec.go_version, go_spec.test_cmd, go_spec.module_mode,
+                )
             else:
-                logger.warning(f"  v{version}: env discovery failed, skipping instances at this version")
-        except Exception as e:
-            logger.warning(f"  v{version}: env discovery error ({e}), skipping")
+                logger.error("Go environment discovery failed for %s", repo.full_name)
+        except Exception as exc:
+            logger.warning("Go env discovery error for %s: %s", repo.full_name, exc)
+    else:
+        for version, commit in version_commits.items():
+            try:
+                env_spec, repo_version = await discover_environment(
+                    repo=repo,
+                    commit=commit,
+                    version=version,
+                    workspace_mgr=workspace_mgr,
+                    cost_tracker=cost_tracker,
+                    max_attempts=config.agent.max_attempts,
+                    max_turns=config.agent.env_discovery.max_turns,
+                    budget_usd=config.agent.env_discovery.budget_usd,
+                )
+                if env_spec:
+                    env_specs[version] = env_spec
+                    logger.info(f"  v{version}: {env_spec.language} {env_spec.language_version}, test: {env_spec.test_cmd}")
+                else:
+                    logger.warning(f"  v{version}: env discovery failed, skipping instances at this version")
+            except Exception as exc:
+                logger.warning(f"  v{version}: env discovery error ({exc}), skipping")
 
     if not env_specs:
         logger.error(f"No environments discovered for {repo.full_name}")
@@ -193,7 +232,8 @@ async def run_repo_pipeline(
     )
 
     # Build TaskInstances from validated candidates
-    from swebenchify.compat import snap_version, get_environment_setup_commit
+    from swebenchify.compat import snap_version, get_environment_setup_commit, get_go_version_string
+    from swebenchify.go_registry import get_go_environment_setup_commit
 
     # Get environment_setup_commit from the bare clone
     bare_clone = workspace_mgr.bare_clone_path(repo)
@@ -204,11 +244,16 @@ async def run_repo_pipeline(
         vr = validation_results.get(candidate.instance_id)
         if vr and vr.status == "valid":
             raw_version = instance_versions.get(candidate.instance_id, "unknown")
-            version = snap_version(repo.full_name, raw_version) or raw_version
-            if version != raw_version:
-                logger.debug("  Snapped version %s -> %s for %s", raw_version, version, candidate.instance_id)
 
-            env_commit = get_environment_setup_commit(repo.full_name, version, repo_path=str(bare_clone))
+            if is_go_repo and go_registry is not None:
+                go_spec = env_specs.get("go")
+                version = get_go_version_string(go_spec, go_registry) if isinstance(go_spec, GoEnvironmentSpec) else raw_version
+                env_commit = get_go_environment_setup_commit(str(bare_clone), go_spec, go_registry) if isinstance(go_spec, GoEnvironmentSpec) else None
+            else:
+                version = snap_version(repo.full_name, raw_version) or raw_version
+                if version != raw_version:
+                    logger.debug("  Snapped version %s -> %s for %s", raw_version, version, candidate.instance_id)
+                env_commit = get_environment_setup_commit(repo.full_name, version, repo_path=str(bare_clone))
 
             task_instances.append(
                 TaskInstance(
