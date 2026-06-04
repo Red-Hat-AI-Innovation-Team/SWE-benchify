@@ -15,7 +15,7 @@ from swebenchify.collector import collect_prs, load_prs, save_prs
 from swebenchify.config import Config
 from swebenchify.discovery import discover_environment, discover_go_environment
 from swebenchify.dispatcher import CostTracker
-from swebenchify.emitter import emit_dataset
+from swebenchify.emitter import emit_dataset, load_product_map
 from swebenchify.extractor import extract_all, load_candidates, save_candidates
 from swebenchify.filters import apply_filters
 from swebenchify.go_registry import GoSpecRegistry
@@ -245,11 +245,16 @@ async def run_repo_pipeline(
     )
 
     # Build TaskInstances from validated candidates
+    from io import StringIO
     from swebenchify.compat import snap_version, get_environment_setup_commit, get_go_version_string
     from swebenchify.go_registry import get_go_environment_setup_commit
+    from unidiff import PatchSet
 
     # Get environment_setup_commit from the bare clone
     bare_clone = workspace_mgr.bare_clone_path(repo)
+
+    # Load product map once per repo pipeline run
+    product_map = load_product_map()
 
     task_instances: list[TaskInstance] = []
     skipped_version = 0
@@ -267,6 +272,25 @@ async def run_repo_pipeline(
                 if version != raw_version:
                     logger.debug("  Snapped version %s -> %s for %s", raw_version, version, candidate.instance_id)
                 env_commit = get_environment_setup_commit(repo.full_name, version, repo_path=str(bare_clone))
+
+            # Compute segmentation columns from patch
+            patch_str = candidate.patch or ""
+            try:
+                patch_set = PatchSet(StringIO(patch_str))
+                files_touched = len(patch_set)
+            except Exception:
+                files_touched = 0
+            patch_lines = len(patch_str.splitlines())
+
+            # env_spec for this candidate
+            cand_version = instance_versions.get(candidate.instance_id, "unknown")
+            env_spec = env_specs.get(cand_version if not is_go_repo else "go")
+            spec_hash = (
+                env_spec.env_spec_hash
+                if isinstance(env_spec, GoEnvironmentSpec)
+                else None
+            )
+            repo_language = env_spec.language if env_spec else None
 
             task_instances.append(
                 TaskInstance(
@@ -286,6 +310,16 @@ async def run_repo_pipeline(
                     fix_merge_date=candidate.merged_at or None,
                     provenance="public_upstream",
                     link_confidence=candidate.link_confidence,
+                    repo_language=repo_language,
+                    product=product_map.get(candidate.repo),
+                    n_fail_to_pass=len(vr.FAIL_TO_PASS),
+                    patch_lines=patch_lines,
+                    files_touched=files_touched,
+                    cross_file=files_touched > 1,
+                    env_spec_hash=spec_hash,
+                    n_runs=vr.n_runs,
+                    flake_count=vr.flake_count,
+                    quarantined_tests=vr.quarantined_tests,
                 )
             )
 

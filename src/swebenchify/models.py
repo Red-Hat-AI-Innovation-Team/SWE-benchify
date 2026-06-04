@@ -171,6 +171,18 @@ class TaskInstance:
     fix_merge_date: str | None = None  # UTC timestamp of PR merge (== merged_at)
     provenance: str = "public_upstream"  # "public_upstream" | "internal"
     link_confidence: float = 0.0       # from compute_link_confidence()
+    # Segmentation columns (all derivable mechanically from patch/PR/spec)
+    repo_language: str | None = None   # "python" | "go"
+    product: str | None = None         # from repo→product map
+    n_fail_to_pass: int = 0
+    patch_lines: int = 0
+    files_touched: int = 0
+    cross_file: bool = False           # files_touched > 1
+    env_spec_hash: str | None = None   # content hash of EnvironmentSpec
+    # Validation-evidence columns (from flake quarantine, issue #38)
+    n_runs: int = 1
+    flake_count: int = 0
+    quarantined_tests: list[str] = field(default_factory=list)
 
 
 @dataclass
