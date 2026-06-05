@@ -144,8 +144,12 @@ def grade(
         (tmp / "candidate.patch").write_text(candidate_patch)
 
         # Identify which packages the test_patch touches so we can scope
-        # the test run (running ./... on kubernetes/kubernetes takes hours)
-        pkg_scope = " ".join(_affected_packages(test_patch)) or "./..."
+        # the test run (running ./... on kubernetes/kubernetes takes hours).
+        # Returns (module_root, rel_pkg) pairs to handle multi-module repos.
+        pkg_pairs = _affected_packages(test_patch) or [(".", "./...")]
+        pkg_scope = " ".join(
+            f"{r}:{p}" if r != "." else p for r, p in pkg_pairs
+        )  # human-readable for telemetry only
 
         build_tag = f"swebenchify-grade-{_short_hash(repo + base_commit)}"
 
@@ -176,7 +180,7 @@ def grade(
         run_start = time.monotonic()
         run_rc, raw_output = _docker_run(
             image=build_tag,
-            script=_make_run_script(pkg_scope),
+            script=_make_run_script(pkg_pairs),
             timeout=timeout,
         )
         run_elapsed = time.monotonic() - run_start
@@ -303,23 +307,46 @@ def _make_dockerfile(go_image: str, repo: str, base_commit: str) -> str:
     )
 
 
-def _make_run_script(pkg_scope: str) -> str:
+def _make_run_script(pkg_pairs: list[tuple[str, str]]) -> str:
+    """Build the shell script that applies patches and runs scoped tests.
+
+    For sub-module repos (e.g. etcd's ``server/`` directory has its own
+    ``go.mod``), each pair is ``(module_root, rel_pkg)`` and the test must
+    run from the sub-module directory, not the repo root.
+    """
+    test_cmds: list[str] = []
+    for module_root, rel_pkg in pkg_pairs:
+        # Always use /... to include sub-packages (e.g. etcdhttp/types alongside etcdhttp)
+        scope = rel_pkg if rel_pkg.endswith("...") else f"{rel_pkg}/..."
+        if module_root == ".":
+            test_cmds.append(f"go test -json -count=1 {scope} 2>&1 || true")
+        else:
+            # cd into the sub-module so Go picks up the right go.mod
+            test_cmds.append(
+                f"(cd /repo/{module_root} && go test -json -count=1 {scope} 2>&1) || true"
+            )
+    test_body = "\n".join(test_cmds) if test_cmds else "go test -json -count=1 ./... 2>&1 || true"
     return (
         "set -e\n"
         "cd /repo\n"
         "git apply /patches/test.patch /patches/candidate.patch "
         "2>&1 || { echo PATCH_APPLY_FAILED; exit 0; }\n"
-        f"go test -json -count=1 {pkg_scope} 2>&1 || true\n"
+        f"{test_body}\n"
     )
 
 
-def _affected_packages(test_patch: str) -> list[str]:
-    """Return relative package paths touched by the test_patch.
+def _affected_packages(test_patch: str) -> list[tuple[str, str]]:
+    """Return ``(module_root, rel_pkg)`` pairs for packages touched by the test_patch.
 
-    Handles etcd-style multi-module repos by detecting sub-module roots
-    (top-level directories that own their own go.mod).
+    ``module_root`` is ``"."`` for the main module or the top-level directory
+    name for a sub-module (e.g. ``"server"`` for etcd's ``server/`` sub-module).
+    ``rel_pkg`` is the ``./``-prefixed relative package path within that module.
+
+    Handles etcd-style multi-module repos where a top-level directory such as
+    ``server/`` owns its own ``go.mod`` — those packages must be tested with
+    ``cd /repo/server && go test ./etcdserver/api/...`` not from the repo root.
     """
-    seen: dict[str, list[str]] = {}  # module_root -> [pkg_paths]
+    seen: dict[str, set[str]] = {}  # module_root -> {rel_pkg}
     for line in test_patch.splitlines():
         if not line.startswith("diff --git"):
             continue
@@ -328,20 +355,27 @@ def _affected_packages(test_patch: str) -> list[str]:
             continue
         b_path = parts[3]
         path = b_path[2:] if b_path.startswith("b/") else b_path
-        top = Path(path).parts[0] if Path(path).parts else "."
-        rel_pkg = str(Path(*Path(path).parts[1:-1])) if len(Path(path).parts) > 2 else "."
-        pkg = f"./{rel_pkg}" if rel_pkg != "." else "./..."
-        if top not in seen:
-            seen[top] = []
-        if pkg not in seen[top]:
-            seen[top].append(pkg)
-
-    cmds: list[str] = []
-    for root, pkgs in seen.items():
-        if root == ".":
-            cmds.extend(pkgs)
+        path_parts = Path(path).parts
+        if not path_parts:
+            continue
+        top = path_parts[0]
+        if len(path_parts) > 2:
+            # e.g. server/etcdserver/api/etcdhttp/health_test.go
+            # module_root=server, rel_pkg=./etcdserver/api/etcdhttp
+            inner = str(Path(*path_parts[1:-1]))
+            rel_pkg = f"./{inner}"
+        elif len(path_parts) == 2:
+            # e.g. server/main.go → test in root of that module
+            rel_pkg = "./..."
         else:
-            # Sub-module: prefix with the module root directory
-            for pkg in pkgs:
-                cmds.append(f"{root}/{pkg.lstrip('./')}")
-    return cmds or ["./..."]
+            # File at repo root → main module, test ./...
+            top = "."
+            rel_pkg = "./..."
+
+        seen.setdefault(top, set()).add(rel_pkg)
+
+    result: list[tuple[str, str]] = []
+    for root in sorted(seen):
+        for pkg in sorted(seen[root]):
+            result.append((root, pkg))
+    return result
