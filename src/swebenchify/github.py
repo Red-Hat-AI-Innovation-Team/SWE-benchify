@@ -56,7 +56,21 @@ def github_get(
     headers = make_headers(token)
     backoff = initial_backoff
     for attempt in range(max_retries):
-        resp = requests.get(url, headers=headers, params=params, timeout=30)
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=60)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            wait = backoff
+            logger.warning(
+                "Network error (attempt %d/%d), retrying in %ds: %s",
+                attempt + 1,
+                max_retries,
+                wait,
+                exc,
+            )
+            time.sleep(wait)
+            backoff = min(backoff * 2, 300)
+            continue
+
         if resp.status_code == 200:
             remaining = int(resp.headers.get("X-RateLimit-Remaining", 1))
             if remaining == 0:
@@ -65,18 +79,30 @@ def github_get(
                 logger.warning("Rate limit reached, sleeping %ds", sleep_time)
                 time.sleep(sleep_time)
             return resp
-        elif resp.status_code in (403, 429):
+        elif resp.status_code == 429:
             retry_after = resp.headers.get("Retry-After")
-            if retry_after:
-                wait = int(retry_after)
-            else:
-                wait = backoff
+            wait = int(retry_after) if retry_after else backoff
             logger.warning(
-                "HTTP %d, backing off %ds (attempt %d/%d)",
-                resp.status_code,
-                wait,
-                attempt + 1,
-                max_retries,
+                "HTTP 429, backing off %ds (attempt %d/%d)", wait, attempt + 1, max_retries
+            )
+            time.sleep(wait)
+            backoff = min(backoff * 2, 300)
+        elif resp.status_code == 403:
+            # Only retry if GitHub flagged this as a rate limit; otherwise fail fast.
+            body = resp.text.lower()
+            is_rate_limit = (
+                "rate limit" in body
+                or "secondary rate" in body
+                or "abuse" in body
+                or resp.headers.get("X-RateLimit-Remaining") == "0"
+            )
+            if not is_rate_limit:
+                resp.raise_for_status()
+            retry_after = resp.headers.get("Retry-After")
+            wait = int(retry_after) if retry_after else backoff
+            logger.warning(
+                "HTTP 403 (rate limit), backing off %ds (attempt %d/%d)",
+                wait, attempt + 1, max_retries,
             )
             time.sleep(wait)
             backoff = min(backoff * 2, 300)

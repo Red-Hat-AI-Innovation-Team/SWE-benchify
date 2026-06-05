@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import Callable
 from dataclasses import asdict
 
 import requests
@@ -195,6 +196,7 @@ def collect_prs(
     pr_after: str | None = None,
     pr_before: str | None = None,
     existing_pr_numbers: set[int] | None = None,
+    on_candidate: Callable[[CandidatePR], None] | None = None,
 ) -> list[CandidatePR]:
     """Collect merged pull requests that reference issues from a repository.
 
@@ -231,6 +233,13 @@ def collect_prs(
             "page": str(page),
         }
 
+        if page % 10 == 1:
+            logger.info(
+                "%s/%s: scanning page %d (%d candidates so far)",
+                owner, name, page, len(candidates),
+            )
+
+        time.sleep(1)  # stay well under GitHub's secondary rate limit
         resp = _github_get(url, headers, params=params)
         pulls = resp.json()
 
@@ -257,27 +266,19 @@ def collect_prs(
             if pr_before and created_at > pr_before:
                 continue
 
-            # Extract resolved issues from title + body
+            # Extract resolved issues from title + body only.
+            # Commit-message scanning was removed: it required one extra API
+            # call per PR (~87% of PRs for large repos), triggering GitHub's
+            # secondary rate limit at scale.
             title = pr.get("title") or ""
             body = pr.get("body") or ""
             resolved = set(extract_resolved_issues(title))
             resolved.update(extract_resolved_issues(body))
 
-            # Fetch commit messages — needed for both issue resolution and
-            # link_confidence computation (trailers live in commit messages)
-            commit_messages: list[str] = []
-            if not resolved:
-                commits = _fetch_pr_commits(owner, name, pr_number, headers)
-                for commit in commits:
-                    msg = commit.get("commit", {}).get("message", "")
-                    commit_messages.append(msg)
-                    resolved.update(extract_resolved_issues(msg))
-
             if not resolved:
                 continue
 
-            # Compute link confidence across all available text
-            confidence = compute_link_confidence(title, body, commit_messages)
+            confidence = compute_link_confidence(title, body)
 
             # Get the actual base commit (first parent of merge commit)
             merge_commit_sha = pr.get("merge_commit_sha") or ""
@@ -307,6 +308,8 @@ def collect_prs(
                 link_confidence=confidence,
             )
             candidates.append(candidate)
+            if on_candidate is not None:
+                on_candidate(candidate)
 
             if max_prs is not None and len(candidates) >= max_prs:
                 return candidates
