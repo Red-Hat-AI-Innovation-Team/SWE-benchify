@@ -111,16 +111,27 @@ def tail_log(n: int = 8) -> list[str]:
     return lines[-n:]
 
 
-def render() -> None:
-    print("\033[2J\033[H", end="")  # clear screen, move to top
+ERASE_LINE = "\033[2K\r"   # clear entire line, return to col 0
+CURSOR_UP  = "\033[{}A"    # move cursor up N lines
+
+
+def _lines(text: str) -> list[str]:
+    """Split rendered text into lines, expanding any embedded newlines."""
+    return text.splitlines()
+
+
+def build_frame() -> list[str]:
+    """Return the full monitor frame as a list of plain lines (no trailing \\n)."""
+    out: list[str] = []
 
     now = datetime.now().strftime("%H:%M:%S")
-    print(f"{BOLD}SWE-benchify Validation Monitor{RESET}  "
-          f"{DIM}{now}  output={OUTPUT_DIR}  refresh={REFRESH}s{RESET}\n")
+    out.append(f"{BOLD}SWE-benchify Validation Monitor{RESET}  "
+               f"{DIM}{now}  output={OUTPUT_DIR}  refresh={REFRESH}s{RESET}")
+    out.append("")
 
     col = f"{'Repo':<42} {'Viable':>7} {'Done':>6} {'Partial':>8} {'Emitted':>8}  Progress"
-    print(BOLD + col + RESET)
-    print("─" * 90)
+    out.append(BOLD + col + RESET)
+    out.append("─" * 90)
 
     total_viable = total_done = total_partial = total_emitted = 0
 
@@ -148,52 +159,74 @@ def render() -> None:
         filled = int(pct / 5)
         bar = GREEN + "█" * filled + DIM + "░" * (20 - filled) + RESET
 
-        d = (CYAN  + str(n_done)    + RESET) if n_done    else DIM + "0" + RESET
+        d = (CYAN   + str(n_done)    + RESET) if n_done    else DIM + "0" + RESET
         p = (YELLOW + str(n_partial) + RESET) if n_partial else DIM + "0" + RESET
         e = (GREEN  + str(n_emitted) + RESET) if n_emitted else DIM + "—" + RESET
 
-        print(f"{repo:<42} {n_viable:>7}  {d:>14}  {p:>16}  {e:>14}  {bar} {pct:4.0f}%")
+        out.append(f"{repo:<42} {n_viable:>7}  {d:>14}  {p:>16}  {e:>14}  {bar} {pct:4.0f}%")
 
-    print("─" * 90)
+    out.append("─" * 90)
     pct_t = total_done / total_viable * 100 if total_viable else 0
-    print(f"{BOLD}{'TOTAL':<42} {total_viable:>7} {total_done:>7} {total_partial:>8} "
-          f"{total_emitted:>8}{RESET}   {CYAN}{pct_t:.1f}%{RESET}\n")
+    out.append(f"{BOLD}{'TOTAL':<42} {total_viable:>7} {total_done:>7} {total_partial:>8} "
+               f"{total_emitted:>8}{RESET}   {CYAN}{pct_t:.1f}%{RESET}")
+    out.append("")
 
-    # Rate & ETA
     n_fin, n_miss, rate = parse_log()
     remaining = total_viable - total_done
     fail_str = (f"{RED}{n_miss/n_fin*100:.0f}%{RESET}" if n_fin else "—")
-    print(f"Sessions finished: {n_fin}   Missing outputs: {RED}{n_miss}{RESET}   "
-          f"Fail rate: {fail_str}")
+    out.append(f"Sessions finished: {n_fin}   Missing outputs: {RED}{n_miss}{RESET}   "
+               f"Fail rate: {fail_str}")
     if rate and remaining > 0:
         eta = timedelta(minutes=int(remaining / rate))
-        print(f"Rate: {CYAN}{rate:.1f}{RESET} sessions/min   "
-              f"Remaining: {remaining}   ETA: {BOLD}{eta}{RESET}")
+        out.append(f"Rate: {CYAN}{rate:.1f}{RESET} sessions/min   "
+                   f"Remaining: {remaining}   ETA: {BOLD}{eta}{RESET}")
     elif remaining == 0:
-        print(f"{GREEN}{BOLD}✓ All instances complete!{RESET}")
+        out.append(f"{GREEN}{BOLD}✓ All instances complete!{RESET}")
     else:
-        print(f"Rate: {DIM}computing...{RESET}   Remaining: {remaining}")
+        out.append(f"Rate: {DIM}computing...{RESET}   Remaining: {remaining}")
 
-    # Recent log
-    print(f"\n{DIM}── Recent log ──────────────────────────────────────────────────────────{RESET}")
+    out.append(f"\n{DIM}── Recent log ──────────────────────────────────────────────────────────{RESET}")
     for line in tail_log(8):
         if "ERROR" in line or "Missing output" in line:
-            print(f"  {RED}{line}{RESET}")
+            out.append(f"  {RED}{line}{RESET}")
         elif "succeeded" in line or "emitted" in line or "validated" in line:
-            print(f"  {GREEN}{line}{RESET}")
+            out.append(f"  {GREEN}{line}{RESET}")
         elif "WARNING" in line:
-            print(f"  {YELLOW}{line}{RESET}")
+            out.append(f"  {YELLOW}{line}{RESET}")
         else:
-            print(f"  {DIM}{line}{RESET}")
+            out.append(f"  {DIM}{line}{RESET}")
+
+    return out
 
 
 def main() -> None:
+    prev_height = 0
+    first = True
     try:
         while True:
-            render()
+            frame = build_frame()
+            if first:
+                # First render: just print normally
+                sys.stdout.write("\n".join(frame) + "\n")
+                first = False
+            else:
+                # Move cursor up to the first line of the previous frame,
+                # then overwrite each line in place.
+                sys.stdout.write(CURSOR_UP.format(prev_height))
+                for line in frame:
+                    sys.stdout.write(ERASE_LINE + line + "\n")
+                # If the new frame is shorter, blank out leftover lines
+                for _ in range(prev_height - len(frame)):
+                    sys.stdout.write(ERASE_LINE + "\n")
+                # Move back up so next refresh starts at same position
+                extra = max(0, prev_height - len(frame))
+                if extra:
+                    sys.stdout.write(CURSOR_UP.format(extra))
+            sys.stdout.flush()
+            prev_height = len(frame)
             time.sleep(REFRESH)
     except KeyboardInterrupt:
-        print("\nMonitor stopped.")
+        sys.stdout.write("\nMonitor stopped.\n")
 
 
 if __name__ == "__main__":
