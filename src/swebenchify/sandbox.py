@@ -225,29 +225,29 @@ class GoImageCache:
         """
         dockerfile_content = GoDockerfile.generate(spec)
 
-        # Pipe the Dockerfile via stdin with "-" as the build context so
-        # Docker never scans the repo directory (which can be multiple GB).
-        # Layer caching still works normally — only the Dockerfile content
-        # determines the cache key.
-        cmd = ["docker", "build", "-f", "-", "-t", image_name, "-"]
-        try:
-            result = subprocess.run(
-                cmd,
-                input=dockerfile_content,
-                capture_output=True,
-                text=True,
-                timeout=300,
-            )
-            if result.returncode == 0:
-                logger.info("Built Go image: %s", image_name)
-                return True
-            logger.error(
-                "docker build failed for %s:\n%s", image_name, result.stderr
-            )
-            return False
-        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-            logger.error("docker build error for %s: %s", image_name, exc)
-            return False
+        # Empty temp dir as build context; Dockerfile piped via stdin.
+        # Avoids sending the (potentially multi-GB) repo to the daemon.
+        import tempfile
+        with tempfile.TemporaryDirectory() as empty_ctx:
+            cmd = ["docker", "build", "-f", "-", "-t", image_name, empty_ctx]
+            try:
+                result = subprocess.run(
+                    cmd,
+                    input=dockerfile_content,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+                if result.returncode == 0:
+                    logger.info("Built Go image: %s", image_name)
+                    return True
+                logger.error(
+                    "docker build failed for %s:\n%s", image_name, result.stderr
+                )
+                return False
+            except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+                logger.error("docker build error for %s: %s", image_name, exc)
+                return False
 
     def get_or_build(
         self,
