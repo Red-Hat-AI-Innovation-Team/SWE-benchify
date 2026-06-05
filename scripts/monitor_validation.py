@@ -20,7 +20,7 @@ from pathlib import Path
 
 OUTPUT_DIR = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("output/rh-v1")
 LOG_FILE   = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("output/rh-v1-pipeline.log")
-REFRESH    = 5
+REFRESH    = 60
 
 BOLD   = "\033[1m"
 GREEN  = "\033[92m"
