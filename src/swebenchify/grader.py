@@ -597,5 +597,5 @@ def _affected_packages(test_patch: str) -> list[str]:
         else:
             # Sub-module: prefix with the module root directory
             for pkg in pkgs:
-                cmds.append(f"{root}/{pkg.lstrip('./')}")
+                cmds.append(f"./{root}/{pkg.lstrip('./')}")
     return cmds or ["./..."]

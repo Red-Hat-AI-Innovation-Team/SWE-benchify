@@ -92,10 +92,10 @@ github:
   token: $GITHUB_TOKEN
 
 pipeline:
-  max_concurrent_repos: 5
-  max_concurrent_validations: 16
+  max_concurrent_repos: 3
+  max_concurrent_validations: 6
   # max_prs_per_repo omitted → unlimited (collect all 2024+ issue-linked PRs)
-  go_n_runs: 3
+  go_n_runs: 1
   pr_date_range:
     after: "2025-07-01T00:00:00Z"
     # no 'before' → collects through the current date
