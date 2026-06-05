@@ -177,7 +177,7 @@ class TestConformanceDeterministicParser:
 
     def test_f2p_computation_deterministic(self) -> None:
         """Fixed pre/post fixtures → identical F2P list across 10 calls."""
-        from swebenchify.validator import _compute_f2p_p2p
+        from swebenchify.grader import _compute_f2p_p2p
 
         parser = GoJSONParser()
         pre = parser.parse(_FAILING_OUTPUT)["tests"]
@@ -204,7 +204,7 @@ class TestConformanceDeterministicParser:
         assert result["tests"]["github.com/foo/bar.TestA"] == "failed"
 
     def test_f2p_from_pre_fail_post_pass(self) -> None:
-        from swebenchify.validator import _compute_f2p_p2p
+        from swebenchify.grader import _compute_f2p_p2p
 
         parser = GoJSONParser()
         pre = parser.parse(_FAILING_OUTPUT)["tests"]

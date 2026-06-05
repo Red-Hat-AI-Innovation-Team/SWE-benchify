@@ -243,6 +243,8 @@ async def run_repo_pipeline(
         max_turns=config.agent.validation.max_turns,
         budget_usd=config.agent.validation.budget_usd,
         instance_versions=instance_versions,
+        timeout=config.pipeline.go_validation_timeout,
+        n_runs=config.pipeline.go_n_runs if is_go_repo else 1,
     )
 
     # Build TaskInstances from validated candidates

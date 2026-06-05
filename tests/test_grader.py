@@ -15,12 +15,18 @@ import pytest
 
 from swebenchify.grader import (
     GradeResult,
-    GoTestResult,
     __version__,
     _affected_packages,
+    _compute_f2p_p2p,
     _decode_list,
+    _extract_section,
+    _F2P_PHASE_SEPARATOR,
     _make_dockerfile,
+    _make_f2p_dockerfile,
+    _make_f2p_run_script,
     _make_run_script,
+    _parse_f2p_output,
+    compute_f2p,
     grade,
 )
 
@@ -377,3 +383,215 @@ class TestVersion:
         parts = __version__.split(".")
         assert len(parts) >= 2
         assert all(p.isdigit() for p in parts)
+
+
+# ---------------------------------------------------------------------------
+# compute_f2p() and helpers
+# ---------------------------------------------------------------------------
+
+
+class TestComputeF2PP2P:
+    def test_basic_f2p(self) -> None:
+        pre = {"pkg.TestA": "failed", "pkg.TestB": "passed"}
+        post = {"pkg.TestA": "passed", "pkg.TestB": "passed"}
+        f2p, p2p = _compute_f2p_p2p(pre, post)
+        assert "pkg.TestA" in f2p
+        assert "pkg.TestB" in p2p
+
+    def test_empty_inputs(self) -> None:
+        f2p, p2p = _compute_f2p_p2p({}, {})
+        assert f2p == []
+        assert p2p == []
+
+    def test_no_flip(self) -> None:
+        pre = {"pkg.TestA": "failed"}
+        post = {"pkg.TestA": "failed"}
+        f2p, _ = _compute_f2p_p2p(pre, post)
+        assert f2p == []
+
+    def test_sorted_output(self) -> None:
+        pre = {"pkg.TestZ": "failed", "pkg.TestA": "failed"}
+        post = {"pkg.TestZ": "passed", "pkg.TestA": "passed"}
+        f2p, _ = _compute_f2p_p2p(pre, post)
+        assert f2p == sorted(f2p)
+
+
+class TestMakeF2PDockerfile:
+    def test_contains_base_image(self) -> None:
+        df = _make_f2p_dockerfile("golang:1.23", "etcd-io/etcd", "abc123")
+        assert "golang:1.23" in df
+
+    def test_copies_gold_patch(self) -> None:
+        df = _make_f2p_dockerfile("golang:latest", "etcd-io/etcd", "abc123")
+        assert "gold.patch" in df
+        assert "candidate.patch" not in df
+
+    def test_uses_env_spec_go_version(self) -> None:
+        from swebenchify.models import GoEnvironmentSpec
+        spec = GoEnvironmentSpec(go_version="1.22", test_cmd="go test ./...")
+        df = _make_f2p_dockerfile("golang:latest", "etcd-io/etcd", "abc123", spec)
+        assert "golang:1.22" in df
+
+    def test_includes_system_deps(self) -> None:
+        from swebenchify.models import GoEnvironmentSpec
+        spec = GoEnvironmentSpec(
+            go_version="1.22", test_cmd="go test ./...",
+            system_dependencies=["git", "make"],
+        )
+        df = _make_f2p_dockerfile("golang:latest", "etcd-io/etcd", "abc123", spec)
+        assert "git make" in df
+
+    def test_includes_goflags(self) -> None:
+        from swebenchify.models import GoEnvironmentSpec
+        spec = GoEnvironmentSpec(
+            go_version="1.22", test_cmd="go test ./...",
+            goflags="-mod=vendor",
+        )
+        df = _make_f2p_dockerfile("golang:latest", "etcd-io/etcd", "abc123", spec)
+        assert "-mod=vendor" in df
+
+
+class TestMakeF2PRunScript:
+    def test_single_run_has_pre_and_post_markers(self) -> None:
+        script = _make_f2p_run_script("./...", n_runs=1)
+        assert f"{_F2P_PHASE_SEPARATOR}_RUN_1_PRE" in script
+        assert f"{_F2P_PHASE_SEPARATOR}_RUN_1_POST" in script
+
+    def test_three_runs_has_all_markers(self) -> None:
+        script = _make_f2p_run_script("./...", n_runs=3)
+        for i in range(1, 4):
+            assert f"{_F2P_PHASE_SEPARATOR}_RUN_{i}_PRE" in script
+            assert f"{_F2P_PHASE_SEPARATOR}_RUN_{i}_POST" in script
+
+    def test_applies_test_and_gold_patches(self) -> None:
+        script = _make_f2p_run_script("./...", n_runs=1)
+        assert "test.patch" in script
+        assert "gold.patch" in script
+
+    def test_resets_between_runs(self) -> None:
+        script = _make_f2p_run_script("./...", n_runs=2)
+        assert "git checkout -- ." in script
+        assert "git clean" in script
+
+
+class TestExtractSection:
+    def test_extracts_between_markers(self) -> None:
+        text = "before\n===START===\ndata line 1\ndata line 2\n===END===\nafter"
+        result = _extract_section(text, "===START===", "===END===")
+        assert "data line 1" in result
+        assert "data line 2" in result
+        assert "before" not in result
+        assert "after" not in result
+
+    def test_extracts_to_end_when_no_end_marker(self) -> None:
+        text = "before\n===START===\ndata\n"
+        result = _extract_section(text, "===START===", "===MISSING===")
+        assert "data" in result
+
+    def test_returns_empty_when_no_start_marker(self) -> None:
+        result = _extract_section("just text", "===MISSING===", "===END===")
+        assert result == ""
+
+
+class TestParseF2POutput:
+    def _make_f2p_raw(self, pre_output: str, post_output: str, run: int = 1) -> str:
+        return (
+            f"{_F2P_PHASE_SEPARATOR}_RUN_{run}_PRE\n"
+            f"{pre_output}\n"
+            f"{_F2P_PHASE_SEPARATOR}_RUN_{run}_POST\n"
+            f"{post_output}\n"
+        )
+
+    def test_basic_f2p_computation(self) -> None:
+        pre = _failing_output(_PKG, "TestHTTPSubPath")
+        post = _passing_output(_PKG, "TestHTTPSubPath")
+        raw = self._make_f2p_raw(pre, post)
+        result = _parse_f2p_output(raw, n_runs=1)
+        assert result.status == "valid"
+        assert len(result.FAIL_TO_PASS) > 0
+
+    def test_no_flip_gives_invalid(self) -> None:
+        output = _failing_output(_PKG, "TestHTTPSubPath")
+        raw = self._make_f2p_raw(output, output)
+        result = _parse_f2p_output(raw, n_runs=1)
+        assert result.status == "invalid"
+        assert result.FAIL_TO_PASS == []
+
+    def test_p2p_computed(self) -> None:
+        pre = _mixed_output(_PKG, passing=["TestServeHealth"], failing=["TestHTTPSubPath"])
+        post = _mixed_output(_PKG, passing=["TestServeHealth", "TestHTTPSubPath"], failing=[])
+        raw = self._make_f2p_raw(pre, post)
+        result = _parse_f2p_output(raw, n_runs=1)
+        assert len(result.PASS_TO_PASS) > 0
+
+    def test_patch_apply_failure(self) -> None:
+        raw = "PATCH_APPLY_FAILED\n"
+        result = _parse_f2p_output(raw, n_runs=1)
+        assert result.status == "error"
+
+    def test_multi_run_quarantine(self) -> None:
+        pre_flaky_fail = _mixed_output(_PKG, passing=[], failing=["TestStable", "TestFlaky"])
+        pre_flaky_pass = _mixed_output(_PKG, passing=["TestFlaky"], failing=["TestStable"])
+        post_both = _mixed_output(_PKG, passing=["TestStable", "TestFlaky"], failing=[])
+
+        # Run 1: both TestStable and TestFlaky in F2P
+        run1 = self._make_f2p_raw(pre_flaky_fail, post_both, run=1)
+        # Run 2: only TestStable in F2P (TestFlaky passes pre-fix)
+        run2 = self._make_f2p_raw(pre_flaky_pass, post_both, run=2)
+
+        raw = run1 + run2
+        result = _parse_f2p_output(raw, n_runs=2)
+        assert result.n_runs == 2
+        assert result.flake_count >= 1
+
+    def test_compile_error_detected(self) -> None:
+        pre = _compile_error_output(_PKG)
+        post = _passing_output(_PKG, "TestHTTPSubPath")
+        raw = self._make_f2p_raw(pre, post)
+        result = _parse_f2p_output(raw, n_runs=1)
+        assert result.compiled is False
+
+
+class TestComputeF2PFunction:
+    def test_no_docker_raises(self) -> None:
+        with patch("swebenchify.grader._docker_available", return_value=False):
+            with pytest.raises(RuntimeError, match="Docker is not available"):
+                compute_f2p("etcd-io/etcd", "abc123", "test", "gold")
+
+    def test_build_failure_returns_error(self) -> None:
+        with patch.multiple(
+            "swebenchify.grader",
+            _docker_available=MagicMock(return_value=True),
+            _docker_build=MagicMock(return_value=(1, "build failed")),
+        ):
+            result = compute_f2p("etcd-io/etcd", "abc123", "test", "gold")
+        assert result.status == "error"
+        assert result.compiled is False
+
+    def test_timeout_returns_error(self) -> None:
+        with patch.multiple(
+            "swebenchify.grader",
+            _docker_available=MagicMock(return_value=True),
+            _docker_build=MagicMock(return_value=(0, "ok")),
+            _docker_run=MagicMock(return_value=(-1, "TIMEOUT after 600s")),
+        ):
+            result = compute_f2p("etcd-io/etcd", "abc123", "test", "gold")
+        assert result.status == "error"
+        assert "timed out" in result.error_message
+
+    def test_successful_run(self) -> None:
+        pre = _failing_output(_PKG, "TestHTTPSubPath")
+        post = _passing_output(_PKG, "TestHTTPSubPath")
+        raw = (
+            f"{_F2P_PHASE_SEPARATOR}_RUN_1_PRE\n{pre}\n"
+            f"{_F2P_PHASE_SEPARATOR}_RUN_1_POST\n{post}\n"
+        )
+        with patch.multiple(
+            "swebenchify.grader",
+            _docker_available=MagicMock(return_value=True),
+            _docker_build=MagicMock(return_value=(0, "ok")),
+            _docker_run=MagicMock(return_value=(0, raw)),
+        ):
+            result = compute_f2p("etcd-io/etcd", "abc123", "test", "gold")
+        assert result.status == "valid"
+        assert len(result.FAIL_TO_PASS) > 0

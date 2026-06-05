@@ -181,6 +181,8 @@ class TestValidateInstanceSignature:
         assert "max_attempts" in param_names
         assert "max_turns" in param_names
         assert "budget_usd" in param_names
+        assert "n_runs" in param_names
+        assert "timeout" in param_names
 
     def test_default_values(self) -> None:
         from swebenchify.validator import validate_instance
@@ -191,6 +193,8 @@ class TestValidateInstanceSignature:
         assert params["max_attempts"].default == 3
         assert params["max_turns"].default == 60
         assert params["budget_usd"].default == 3.0
+        assert params["n_runs"].default == 1
+        assert params["timeout"].default == 300
 
 
 class TestValidateInstancesSignature:
@@ -221,6 +225,8 @@ class TestValidateInstancesSignature:
         assert "max_turns" in param_names
         assert "budget_usd" in param_names
         assert "instance_versions" in param_names
+        assert "timeout" in param_names
+        assert "n_runs" in param_names
 
     def test_default_values(self) -> None:
         from swebenchify.validator import validate_instances
@@ -233,6 +239,8 @@ class TestValidateInstancesSignature:
         assert params["max_turns"].default == 60
         assert params["budget_usd"].default == 3.0
         assert params["instance_versions"].default is None
+        assert params["timeout"].default == 300
+        assert params["n_runs"].default == 1
 
 
 class TestValidationResultConstruction:
@@ -302,94 +310,11 @@ class TestValidationResultConstruction:
         assert vr.post_fix_log is None
 
 
-class TestGoValidationPrompt:
-    """Test that GO_VALIDATION_PROMPT formats correctly for Go instances."""
-
-    def test_formats_without_error(self) -> None:
-        from swebenchify.validator import GO_VALIDATION_PROMPT
-
-        result = GO_VALIDATION_PROMPT.format(
-            repo="kubernetes/kubectl",
-            commit="abc123",
-            env_spec='{"language": "go"}',
-            test_cmd="go test ./pkg/...",
-            test_patch_path="/tmp/test.patch",
-            gold_patch_path="/tmp/gold.patch",
-        )
-        assert isinstance(result, str)
-
-    def test_contains_repo_name(self) -> None:
-        from swebenchify.validator import GO_VALIDATION_PROMPT
-
-        result = GO_VALIDATION_PROMPT.format(
-            repo="etcd-io/etcd",
-            commit="deadbeef",
-            env_spec="{}",
-            test_cmd="make test",
-            test_patch_path="/tmp/test.patch",
-            gold_patch_path="/tmp/gold.patch",
-        )
-        assert "etcd-io/etcd" in result
-
-    def test_contains_pre_fix_output_filename(self) -> None:
-        from swebenchify.validator import GO_VALIDATION_PROMPT
-
-        result = GO_VALIDATION_PROMPT.format(
-            repo="kubernetes/kubectl",
-            commit="abc123",
-            env_spec="{}",
-            test_cmd="go test ./...",
-            test_patch_path="/tmp/test.patch",
-            gold_patch_path="/tmp/gold.patch",
-        )
-        assert "pre_fix_output.txt" in result
-
-    def test_contains_post_fix_output_filename(self) -> None:
-        from swebenchify.validator import GO_VALIDATION_PROMPT
-
-        result = GO_VALIDATION_PROMPT.format(
-            repo="kubernetes/kubectl",
-            commit="abc123",
-            env_spec="{}",
-            test_cmd="go test ./...",
-            test_patch_path="/tmp/test.patch",
-            gold_patch_path="/tmp/gold.patch",
-        )
-        assert "post_fix_output.txt" in result
-
-    def test_instructs_no_interpretation(self) -> None:
-        from swebenchify.validator import GO_VALIDATION_PROMPT
-
-        result = GO_VALIDATION_PROMPT.format(
-            repo="kubernetes/kubectl",
-            commit="abc123",
-            env_spec="{}",
-            test_cmd="go test ./...",
-            test_patch_path="/tmp/test.patch",
-            gold_patch_path="/tmp/gold.patch",
-        )
-        assert "Python side" in result or "python side" in result.lower()
-
-    def test_has_literal_braces_for_json_schema(self) -> None:
-        from swebenchify.validator import GO_VALIDATION_PROMPT
-
-        result = GO_VALIDATION_PROMPT.format(
-            repo="kubernetes/kubectl",
-            commit="abc123",
-            env_spec="{}",
-            test_cmd="go test ./...",
-            test_patch_path="/tmp/test.patch",
-            gold_patch_path="/tmp/gold.patch",
-        )
-        assert "{{" not in result
-        assert "}}" not in result
-
-
 class TestComputeF2PP2P:
     """Test _compute_f2p_p2p helper directly."""
 
     def test_basic_f2p(self) -> None:
-        from swebenchify.validator import _compute_f2p_p2p
+        from swebenchify.grader import _compute_f2p_p2p
 
         pre = {"pkg.TestA": "failed", "pkg.TestB": "passed"}
         post = {"pkg.TestA": "passed", "pkg.TestB": "passed"}
@@ -399,14 +324,14 @@ class TestComputeF2PP2P:
         assert "pkg.TestB" in p2p
 
     def test_empty_inputs(self) -> None:
-        from swebenchify.validator import _compute_f2p_p2p
+        from swebenchify.grader import _compute_f2p_p2p
 
         f2p, p2p = _compute_f2p_p2p({}, {})
         assert f2p == []
         assert p2p == []
 
     def test_no_flip(self) -> None:
-        from swebenchify.validator import _compute_f2p_p2p
+        from swebenchify.grader import _compute_f2p_p2p
 
         pre = {"pkg.TestA": "failed"}
         post = {"pkg.TestA": "failed"}
@@ -414,7 +339,7 @@ class TestComputeF2PP2P:
         assert f2p == []
 
     def test_f2p_sorted(self) -> None:
-        from swebenchify.validator import _compute_f2p_p2p
+        from swebenchify.grader import _compute_f2p_p2p
 
         pre = {"pkg.TestZ": "failed", "pkg.TestA": "failed"}
         post = {"pkg.TestZ": "passed", "pkg.TestA": "passed"}
@@ -422,7 +347,7 @@ class TestComputeF2PP2P:
         assert f2p == sorted(f2p)
 
     def test_deterministic(self) -> None:
-        from swebenchify.validator import _compute_f2p_p2p
+        from swebenchify.grader import _compute_f2p_p2p
 
         pre = {"pkg.TestA": "failed", "pkg.TestB": "passed", "pkg.TestC": "failed"}
         post = {"pkg.TestA": "passed", "pkg.TestB": "passed", "pkg.TestC": "failed"}

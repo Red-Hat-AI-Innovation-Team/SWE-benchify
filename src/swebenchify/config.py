@@ -50,6 +50,7 @@ class PipelineConfig:
     pr_after: str | None = None
     pr_before: str | None = None
     go_n_runs: int = 3  # number of validation runs for Go flake quarantine
+    go_validation_timeout: int = 300  # seconds per test run phase in Docker
 
 
 @dataclass
@@ -157,6 +158,9 @@ def _build_pipeline_config(data: dict | None) -> PipelineConfig:
         pr_after=pr_date_range.get("after"),
         pr_before=pr_date_range.get("before"),
         go_n_runs=data.get("go_n_runs", PipelineConfig.go_n_runs),
+        go_validation_timeout=data.get(
+            "go_validation_timeout", PipelineConfig.go_validation_timeout
+        ),
     )
 
 
