@@ -101,11 +101,25 @@ You are validating a Go benchmark instance for {repo} at commit {commit}.
    git apply {test_patch_path}
    ```
 
-3. Run the test command and capture raw JSON output:
-   ```
-   {test_cmd} -json 2>&1 | tee pre_fix_output.txt
-   ```
-   If the test command already includes -json, omit the flag.
+3. Run tests and capture raw JSON output to pre_fix_output.txt.
+
+   The configured test command is: `{test_cmd}`
+
+   - If test_cmd starts with `go test`, append `-json` (unless already present)
+     and pipe to pre_fix_output.txt:
+     ```
+     {test_cmd} -json 2>&1 | tee pre_fix_output.txt
+     ```
+   - If test_cmd starts with `make`, do NOT pass `-json` to make. Instead,
+     identify which Go packages the test patch touches, then run:
+     ```
+     go test -json -count=1 ./path/to/package/... 2>&1 | tee pre_fix_output.txt
+     ```
+     If you cannot determine the affected packages from the patch, run:
+     ```
+     go test -json -count=1 ./... 2>&1 | tee pre_fix_output.txt
+     ```
+
    If the command fails to compile (exit code non-zero with no test output),
    that is a build error — continue to step 6.
 
@@ -114,9 +128,10 @@ You are validating a Go benchmark instance for {repo} at commit {commit}.
    git apply {gold_patch_path}
    ```
 
-5. Run the test command again and capture JSON output:
+5. Run the same test command again (using the same approach as step 3) and
+   capture JSON output:
    ```
-   {test_cmd} -json 2>&1 | tee post_fix_output.txt
+   ... 2>&1 | tee post_fix_output.txt
    ```
 
 6. Write validation_meta.json:
