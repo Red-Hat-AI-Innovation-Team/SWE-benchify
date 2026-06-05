@@ -6,20 +6,25 @@ Usage:
 
 Defaults:
     output_dir = ./output/rh-v1
-    log_file   = ./output/rh-v1-pipeline.log
+    log_file   = (auto-detected from running swebenchify process, or ./output/rh-v1-pipeline.log)
 
-Refreshes every 5 seconds. Press Ctrl-C to exit.
+Parses pipeline log lines to track per-repo progress through stages 3-6.
+Works with both the old agent-based validation and the new Docker-based
+compute_f2p() path.
+
+Refreshes every 60 seconds. Press Ctrl-C to exit.
 """
 
 import json
 import os
+import re
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 OUTPUT_DIR = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("output/rh-v1")
-LOG_FILE   = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("output/rh-v1-pipeline.log")
+LOG_FILE   = Path(sys.argv[2]) if len(sys.argv) > 2 else None
 REFRESH    = 60
 
 BOLD   = "\033[1m"
@@ -29,6 +34,31 @@ YELLOW = "\033[93m"
 CYAN   = "\033[96m"
 DIM    = "\033[2m"
 RESET  = "\033[0m"
+
+
+def _find_log_file() -> Path | None:
+    """Try to find the pipeline log from a running process or fallback."""
+    if LOG_FILE and LOG_FILE.exists():
+        return LOG_FILE
+    # First try to find output from a running swebenchify process —
+    # this is more current than a stale log file on disk.
+    try:
+        task_dir = Path("/private/tmp") / f"claude-{os.getuid()}"
+        if task_dir.exists():
+            for output in sorted(task_dir.rglob("*.output"), key=lambda p: p.stat().st_mtime, reverse=True):
+                try:
+                    text = output.read_text(errors="replace")[:500]
+                except Exception:
+                    continue
+                if "swebenchify" in text:
+                    return output
+    except Exception:
+        pass
+    # Fall back to the default log path
+    default = Path("output/rh-v1-pipeline.log")
+    if default.exists():
+        return default
+    return None
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -45,180 +75,259 @@ def read_jsonl(path: Path) -> list[dict]:
     return out
 
 
-def instance_statuses(ws_dir: Path) -> dict[str, str]:
-    """Map instance_id → 'done' | 'partial' | 'pending'."""
-    result: dict[str, str] = {}
-    inst_root = ws_dir / "instances"
-    if not inst_root.exists():
-        return result
-    for inst in inst_root.iterdir():
-        if not inst.is_dir():
-            continue
-        repo = inst / "repo"
-        pre  = repo / "pre_fix_output.txt"
-        post = repo / "post_fix_output.txt"
-        meta = repo / "validation_meta.json"
-        if pre.exists() and post.exists() and meta.exists():
-            try:
-                status = json.loads(meta.read_text()).get("status", "done")
-                result[inst.name] = "error" if status == "error" else "done"
-            except Exception:
-                result[inst.name] = "done"
-        elif pre.exists() or post.exists() or meta.exists():
-            result[inst.name] = "partial"
-        else:
-            result[inst.name] = "pending"
-    return result
+# ---------------------------------------------------------------------------
+# Log parsing — extract per-repo progress from pipeline log lines
+# ---------------------------------------------------------------------------
+
+_RE_STAGE4 = re.compile(
+    r"Stage 4: Validating (\d+) instances for (.+)"
+)
+_RE_F2P_DONE = re.compile(
+    r"compute_f2p finished: repo=(\S+) status=(\w+) f2p=(\d+) p2p=(\d+) elapsed=([\d.]+)s"
+)
+_RE_AGENT_DONE = re.compile(
+    r"Agent session finished: status=(\w+) cost_usd=([\d.]+)"
+)
+_RE_VALIDATED = re.compile(
+    r"(\d+)/(\d+) instances validated successfully"
+)
+_RE_EMITTED = re.compile(
+    r"(\d+) instances emitted for (.+)"
+)
+_RE_STAGE3 = re.compile(
+    r"Stage 3: Discovering environment for (.+)"
+)
+_RE_ENV_DONE = re.compile(
+    r"Go env: go([\d.]+), test=(.+), mode=(\w+)"
+)
+_RE_PIPELINE_DONE = re.compile(
+    r"Pipeline complete\."
+)
 
 
-def count_emitted(slug: str) -> int:
-    p = OUTPUT_DIR / f"{slug}-task-instances.jsonl"
-    return sum(1 for _ in p.open() if _.strip()) if p.exists() else 0
+class RepoProgress:
+    def __init__(self, name: str, n_viable: int = 0):
+        self.name = name
+        self.n_viable = n_viable
+        self.stage = "pending"  # pending, env-discovery, validating, done
+        self.n_done = 0
+        self.n_valid = 0
+        self.n_invalid = 0
+        self.n_error = 0
+        self.n_emitted = 0
+        self.total_elapsed = 0.0
+        self.validated_str = ""  # "5/13 instances validated successfully"
 
 
-def parse_log() -> tuple[int, int, float | None]:
-    """Return (n_finished, n_missing, sessions_per_min)."""
-    if not LOG_FILE.exists():
-        return 0, 0, None
-    finished = 0
-    missing  = 0
-    stamps: list[float] = []
-    today = datetime.now().date()
-    for line in LOG_FILE.open():
-        if "Agent session finished" in line:
-            finished += 1
-            try:
-                t = datetime.strptime(line.split()[0], "%H:%M:%S").replace(
-                    year=today.year, month=today.month, day=today.day
-                )
-                stamps.append(t.timestamp())
-            except Exception:
-                pass
-        if "Missing output files" in line:
-            missing += 1
-    rate = None
-    if len(stamps) >= 2:
-        span = stamps[-1] - stamps[0]
-        if span > 0:
-            rate = (len(stamps) - 1) / span * 60
-    return finished, missing, rate
+def parse_log(log_path: Path) -> tuple[dict[str, RepoProgress], list[str], bool]:
+    """Parse pipeline log and return per-repo progress, recent lines, and done flag."""
+    repos: dict[str, RepoProgress] = {}
+    recent: list[str] = []
+    current_repo: str | None = None
+    pipeline_done = False
+    agent_sessions = 0
+    total_cost = 0.0
+
+    if not log_path or not log_path.exists():
+        return repos, [], False
+
+    for line in log_path.open(errors="replace"):
+        line = line.rstrip()
+
+        m = _RE_STAGE3.search(line)
+        if m:
+            repo = m.group(1)
+            current_repo = repo.replace("/", "__")
+            if current_repo not in repos:
+                repos[current_repo] = RepoProgress(repo)
+            repos[current_repo].stage = "env-discovery"
+
+        m = _RE_STAGE4.search(line)
+        if m:
+            n, repo = int(m.group(1)), m.group(2)
+            slug = repo.replace("/", "__")
+            if slug not in repos:
+                repos[slug] = RepoProgress(repo, n)
+            repos[slug].n_viable = n
+            repos[slug].stage = "validating"
+            current_repo = slug
+
+        m = _RE_F2P_DONE.search(line)
+        if m:
+            repo, status = m.group(1), m.group(2)
+            elapsed = float(m.group(5))
+            slug = repo.replace("/", "__")
+            if slug not in repos:
+                repos[slug] = RepoProgress(repo)
+            repos[slug].n_done += 1
+            repos[slug].total_elapsed += elapsed
+            if status == "valid":
+                repos[slug].n_valid += 1
+            elif status == "invalid":
+                repos[slug].n_invalid += 1
+            elif status == "error":
+                repos[slug].n_error += 1
+
+        m = _RE_VALIDATED.search(line)
+        if m:
+            valid, total = int(m.group(1)), int(m.group(2))
+            if current_repo and current_repo in repos:
+                repos[current_repo].validated_str = f"{valid}/{total}"
+                repos[current_repo].stage = "done"
+                repos[current_repo].n_done = total
+
+        m = _RE_EMITTED.search(line)
+        if m:
+            n_emitted, repo = int(m.group(1)), m.group(2)
+            slug = repo.replace("/", "__")
+            if slug in repos:
+                repos[slug].n_emitted = n_emitted
+
+        m = _RE_AGENT_DONE.search(line)
+        if m:
+            agent_sessions += 1
+            total_cost += float(m.group(2))
+
+        if _RE_PIPELINE_DONE.search(line):
+            pipeline_done = True
+
+        recent.append(line)
+
+    return repos, recent[-10:], pipeline_done
 
 
-def tail_log(n: int = 8) -> list[str]:
-    if not LOG_FILE.exists():
-        return []
-    lines = LOG_FILE.read_text().splitlines()
-    return lines[-n:]
+def count_candidates(slug: str) -> int:
+    p = OUTPUT_DIR / f"{slug}-candidates.jsonl"
+    if not p.exists():
+        return 0
+    candidates = read_jsonl(p)
+    return sum(1 for c in candidates
+               if c.get("patch") and c.get("test_patch") and c.get("problem_statement"))
 
 
-ERASE_LINE = "\033[2K\r"   # clear entire line, return to col 0
-CURSOR_UP  = "\033[{}A"    # move cursor up N lines
+# ---------------------------------------------------------------------------
+# Rendering
+# ---------------------------------------------------------------------------
+
+ERASE_LINE = "\033[2K\r"
+CURSOR_UP  = "\033[{}A"
 
 
-def _lines(text: str) -> list[str]:
-    """Split rendered text into lines, expanding any embedded newlines."""
-    return text.splitlines()
-
-
-def build_frame() -> list[str]:
-    """Return the full monitor frame as a list of plain lines (no trailing \\n)."""
+def build_frame(log_path: Path | None) -> list[str]:
     out: list[str] = []
 
     now = datetime.now().strftime("%H:%M:%S")
+    log_name = log_path.name if log_path else "not found"
     out.append(f"{BOLD}SWE-benchify Validation Monitor{RESET}  "
-               f"{DIM}{now}  output={OUTPUT_DIR}  refresh={REFRESH}s{RESET}")
+               f"{DIM}{now}  output={OUTPUT_DIR}  log={log_name}  refresh={REFRESH}s{RESET}")
     out.append("")
 
-    col = f"{'Repo':<42} {'Viable':>7} {'Done':>6} {'Partial':>8} {'Emitted':>8}  Progress"
-    out.append(BOLD + col + RESET)
-    out.append("─" * 90)
+    repos, recent, pipeline_done = parse_log(log_path) if log_path else ({}, [], False)
 
-    total_viable = total_done = total_partial = total_emitted = 0
-
+    # Also check for repos with candidates but not yet in the log
     for cand_file in sorted(OUTPUT_DIR.glob("*-candidates.jsonl")):
         slug = cand_file.stem.replace("-candidates", "")
-        repo = slug.replace("__", "/")
-        candidates = read_jsonl(cand_file)
-        viable = [c for c in candidates
-                  if c.get("patch") and c.get("test_patch") and c.get("problem_statement")]
-        n_viable = len(viable)
+        if slug not in repos:
+            n = count_candidates(slug)
+            if n > 0:
+                repos[slug] = RepoProgress(slug.replace("__", "/"), n)
+
+    col = f"{'Repo':<45} {'Stage':<14} {'Done':>5}/{'Total':<5} {'Valid':>5} {'Inv':>5} {'Emit':>5}  Progress"
+    out.append(BOLD + col + RESET)
+    out.append("─" * 105)
+
+    total_viable = total_done = total_valid = total_emitted = 0
+
+    for slug in sorted(repos):
+        rp = repos[slug]
+        n_viable = rp.n_viable or count_candidates(slug)
         if n_viable == 0:
             continue
 
-        sts = instance_statuses(OUTPUT_DIR / "workspaces" / slug)
-        n_done    = sum(1 for s in sts.values() if s in ("done", "error"))
-        n_partial = sum(1 for s in sts.values() if s == "partial")
-        n_emitted = count_emitted(slug)
+        total_viable += n_viable
+        total_done += rp.n_done
+        total_valid += rp.n_valid
+        total_emitted += rp.n_emitted
 
-        total_viable  += n_viable
-        total_done    += n_done
-        total_partial += n_partial
-        total_emitted += n_emitted
+        # Stage display
+        if rp.stage == "env-discovery":
+            stage_str = f"{YELLOW}env-disc{RESET}"
+        elif rp.stage == "validating":
+            stage_str = f"{CYAN}validating{RESET}"
+        elif rp.stage == "done":
+            stage_str = f"{GREEN}done{RESET}"
+        else:
+            stage_str = f"{DIM}pending{RESET}"
 
-        pct = n_done / n_viable * 100 if n_viable else 0
+        pct = rp.n_done / n_viable * 100 if n_viable else 0
         filled = int(pct / 5)
         bar = GREEN + "█" * filled + DIM + "░" * (20 - filled) + RESET
 
-        d = (CYAN   + str(n_done)    + RESET) if n_done    else DIM + "0" + RESET
-        p = (YELLOW + str(n_partial) + RESET) if n_partial else DIM + "0" + RESET
-        e = (GREEN  + str(n_emitted) + RESET) if n_emitted else DIM + "—" + RESET
+        v = (GREEN + str(rp.n_valid) + RESET) if rp.n_valid else DIM + "0" + RESET
+        inv = (YELLOW + str(rp.n_invalid) + RESET) if rp.n_invalid else DIM + "0" + RESET
+        e = (GREEN + str(rp.n_emitted) + RESET) if rp.n_emitted else DIM + "—" + RESET
 
-        out.append(f"{repo:<42} {n_viable:>7}  {d:>14}  {p:>16}  {e:>14}  {bar} {pct:4.0f}%")
+        avg = f" {rp.total_elapsed / rp.n_done:.0f}s/ea" if rp.n_done else ""
 
-    out.append("─" * 90)
+        out.append(
+            f"{rp.name:<45} {stage_str:<23} {rp.n_done:>5}/{n_viable:<5} "
+            f"{v:>14} {inv:>14} {e:>14}  {bar} {pct:4.0f}%{DIM}{avg}{RESET}"
+        )
+
+    out.append("─" * 105)
     pct_t = total_done / total_viable * 100 if total_viable else 0
-    out.append(f"{BOLD}{'TOTAL':<42} {total_viable:>7} {total_done:>7} {total_partial:>8} "
-               f"{total_emitted:>8}{RESET}   {CYAN}{pct_t:.1f}%{RESET}")
+    out.append(f"{BOLD}{'TOTAL':<45} {'':14} {total_done:>5}/{total_viable:<5} "
+               f"{total_valid:>5} {'':>5} {total_emitted:>5}{RESET}   {CYAN}{pct_t:.1f}%{RESET}")
     out.append("")
 
-    n_fin, n_miss, rate = parse_log()
-    remaining = total_viable - total_done
-    fail_str = (f"{RED}{n_miss/n_fin*100:.0f}%{RESET}" if n_fin else "—")
-    out.append(f"Sessions finished: {n_fin}   Missing outputs: {RED}{n_miss}{RESET}   "
-               f"Fail rate: {fail_str}")
-    if rate and remaining > 0:
-        eta = timedelta(minutes=int(remaining / rate))
-        out.append(f"Rate: {CYAN}{rate:.1f}{RESET} sessions/min   "
-                   f"Remaining: {remaining}   ETA: {BOLD}{eta}{RESET}")
-    elif remaining == 0:
-        out.append(f"{GREEN}{BOLD}✓ All instances complete!{RESET}")
+    if pipeline_done:
+        out.append(f"{GREEN}{BOLD}Pipeline complete.{RESET}")
     else:
-        out.append(f"Rate: {DIM}computing...{RESET}   Remaining: {remaining}")
-
-    out.append(f"\n{DIM}── Recent log ──────────────────────────────────────────────────────────{RESET}")
-    for line in tail_log(8):
-        if "ERROR" in line or "Missing output" in line:
-            out.append(f"  {RED}{line}{RESET}")
-        elif "succeeded" in line or "emitted" in line or "validated" in line:
-            out.append(f"  {GREEN}{line}{RESET}")
-        elif "WARNING" in line:
-            out.append(f"  {YELLOW}{line}{RESET}")
+        remaining = total_viable - total_done
+        if remaining == 0 and total_viable > 0:
+            out.append(f"{GREEN}{BOLD}All instances processed.{RESET}")
         else:
-            out.append(f"  {DIM}{line}{RESET}")
+            out.append(f"Remaining: {remaining} instances")
+
+    out.append(f"\n{DIM}── Recent log ──────────────────────────────────────────────────────────────────{RESET}")
+    for line in recent:
+        if "ERROR" in line or "error" in line.lower() and "error_message" not in line:
+            out.append(f"  {RED}{line[:120]}{RESET}")
+        elif "compute_f2p finished" in line or "validated" in line or "emitted" in line:
+            out.append(f"  {GREEN}{line[:120]}{RESET}")
+        elif "WARNING" in line:
+            out.append(f"  {YELLOW}{line[:120]}{RESET}")
+        elif "Stage" in line:
+            out.append(f"  {CYAN}{line[:120]}{RESET}")
+        else:
+            out.append(f"  {DIM}{line[:120]}{RESET}")
 
     return out
 
 
 def main() -> None:
+    log_path = _find_log_file() if LOG_FILE is None else LOG_FILE
+    if log_path:
+        print(f"Monitoring: {log_path}", flush=True)
+    else:
+        print("No log file found. Start swebenchify or pass log path as arg.", flush=True)
+
     prev_height = 0
     first = True
     try:
         while True:
-            frame = build_frame()
+            if log_path is None or not log_path.exists():
+                log_path = _find_log_file()
+            frame = build_frame(log_path)
             if first:
-                # First render: just print normally
                 sys.stdout.write("\n".join(frame) + "\n")
                 first = False
             else:
-                # Move cursor up to the first line of the previous frame,
-                # then overwrite each line in place.
                 sys.stdout.write(CURSOR_UP.format(prev_height))
                 for line in frame:
                     sys.stdout.write(ERASE_LINE + line + "\n")
-                # If the new frame is shorter, blank out leftover lines
                 for _ in range(prev_height - len(frame)):
                     sys.stdout.write(ERASE_LINE + "\n")
-                # Move back up so next refresh starts at same position
                 extra = max(0, prev_height - len(frame))
                 if extra:
                     sys.stdout.write(CURSOR_UP.format(extra))
