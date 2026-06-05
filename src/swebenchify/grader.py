@@ -378,7 +378,11 @@ def _make_f2p_run_script(pkg_scope: str, n_runs: int = 1) -> str:
             "2>&1 || { echo PATCH_APPLY_FAILED; exit 0; }"
         )
         parts.append(f"echo '{_F2P_PHASE_SEPARATOR}_RUN_{i}_PRE'")
-        parts.append(f"go test -json -count=1 {pkg_scope} 2>&1 || true")
+        parts.append(f"go test -json -count=1 {pkg_scope} 2>&1 | tee /tmp/pre_out.txt || true")
+        parts.append(
+            'grep -q \'"Action":"fail"\' /tmp/pre_out.txt || '
+            "{ echo NO_FAILING_TESTS; exit 0; }"
+        )
         parts.append(
             "git apply /patches/gold.patch "
             "2>&1 || { echo PATCH_APPLY_FAILED; exit 0; }"
@@ -398,6 +402,12 @@ def _parse_f2p_output(
         return ValidationResult(
             status="error",
             error_message="Patch apply failed",
+        )
+
+    if "NO_FAILING_TESTS" in raw_output:
+        return ValidationResult(
+            status="invalid",
+            error_message="No tests failed in pre-fix run",
         )
 
     parser = GoJSONParser()
@@ -517,6 +527,21 @@ def compute_f2p(
     """
     if not _docker_available():
         raise RuntimeError("Docker is not available — cannot run compute_f2p()")
+
+    has_test_file = any(
+        "_test.go" in line
+        for line in test_patch.splitlines()
+        if line.startswith("diff --git")
+    )
+    if not has_test_file:
+        logger.info(
+            "compute_f2p finished: repo=%s status=invalid f2p=0 p2p=0 elapsed=0.0s",
+            repo,
+        )
+        return ValidationResult(
+            status="invalid",
+            error_message="test_patch contains no _test.go files",
+        )
 
     t0 = time.monotonic()
 

@@ -179,7 +179,6 @@ def parse_log(log_path: Path) -> tuple[dict[str, RepoProgress], list[str], bool]
             if current_repo and current_repo in repos:
                 repos[current_repo].validated_str = f"{valid}/{total}"
                 repos[current_repo].stage = "done"
-                repos[current_repo].n_done = total
 
         m = _RE_EMITTED.search(line)
         if m:
