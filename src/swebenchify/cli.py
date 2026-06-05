@@ -28,16 +28,91 @@ def _cmd_run(args: argparse.Namespace) -> None:
 
     from swebenchify.pipeline import run_pipeline
 
+    _setup_logging()
     config = load_config(args.config)
     asyncio.run(run_pipeline(config, resume=args.resume))
 
 
+def _setup_logging() -> None:
+    import logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+
 def _cmd_collect(args: argparse.Namespace) -> None:
     """Run Stage 1: PR collection only."""
+    _setup_logging()
     config = load_config(args.config)
     from pathlib import Path
 
-    from swebenchify.collector import collect_prs, save_prs
+    from swebenchify.collector import collect_prs, load_prs, save_prs
+    from swebenchify.models import Repository
+
+    output_dir = Path(config.output.dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    import json
+    from dataclasses import asdict
+
+    total_repos = len(config.repos)
+    for idx, repo_name in enumerate(config.repos, 1):
+        token = config.github_tokens.get(repo_name, config.github_token)
+        repo = Repository(full_name=repo_name, access_token=token)
+        out_file = output_dir / f"{repo.slug}-prs.jsonl"
+
+        existing_numbers: set[int] = set()
+        if out_file.exists():
+            existing_prs = load_prs(str(out_file))
+            existing_numbers = {pr.pr_number for pr in existing_prs}
+            print(
+                f"[{idx}/{total_repos}] {repo.full_name}: resuming "
+                f"({len(existing_numbers)} already collected)",
+                flush=True,
+            )
+        else:
+            print(f"[{idx}/{total_repos}] {repo.full_name}: collecting ...", flush=True)
+
+        # Stream-write each new candidate as it's found so crashes don't lose progress
+        mode = "a" if existing_numbers else "w"
+        new_count = 0
+        with open(out_file, mode) as out_f:
+            def _write(pr: "CandidatePR", _f=out_f) -> None:
+                nonlocal new_count
+                _f.write(json.dumps(asdict(pr)) + "\n")
+                _f.flush()
+                new_count += 1
+
+            collect_prs(
+                repo,
+                max_prs=config.pipeline.max_prs_per_repo,
+                pr_after=config.pipeline.pr_after,
+                pr_before=config.pipeline.pr_before,
+                existing_pr_numbers=existing_numbers,
+                on_candidate=_write,
+            )
+
+        total = len(existing_numbers) + new_count
+        print(
+            f"[{idx}/{total_repos}] {repo.full_name}: {new_count} new "
+            f"({total} total) -> {out_file}",
+            flush=True,
+        )
+
+
+def _cmd_extract(args: argparse.Namespace) -> None:
+    """Run Stage 2: patch extraction from collected PRs."""
+    _setup_logging()
+    import json
+    from dataclasses import asdict
+    from pathlib import Path
+
+    config = load_config(args.config)
+
+    from swebenchify.collector import load_prs
+    from swebenchify.extractor import extract_patches, load_candidates
     from swebenchify.models import Repository
 
     output_dir = Path(config.output.dir)
@@ -46,15 +121,59 @@ def _cmd_collect(args: argparse.Namespace) -> None:
     for repo_name in config.repos:
         token = config.github_tokens.get(repo_name, config.github_token)
         repo = Repository(full_name=repo_name, access_token=token)
-        prs = collect_prs(
-            repo,
-            max_prs=config.pipeline.max_prs_per_repo,
-            pr_after=config.pipeline.pr_after,
-            pr_before=config.pipeline.pr_before,
-        )
-        out_file = output_dir / f"{repo.slug}-prs.jsonl"
-        save_prs(prs, str(out_file))
-        print(f"{repo.full_name}: {len(prs)} candidate PRs -> {out_file}")
+
+        prs_file = output_dir / f"{repo.slug}-prs.jsonl"
+        candidates_file = output_dir / f"{repo.slug}-candidates.jsonl"
+
+        if not prs_file.exists():
+            print(
+                f"{repo.full_name}: no PRs file ({prs_file}), run 'collect' first",
+                file=sys.stderr,
+            )
+            continue
+
+        prs = load_prs(str(prs_file))
+
+        # Resume: skip already-extracted PR numbers
+        already_done: set[int] = set()
+        if candidates_file.exists():
+            for c in load_candidates(str(candidates_file)):
+                already_done.add(c.pr_number)
+            if already_done:
+                print(
+                    f"{repo.full_name}: {len(already_done)} already extracted, "
+                    f"{len(prs) - len(already_done)} remaining"
+                )
+
+        pending = [pr for pr in prs if pr.pr_number not in already_done]
+        if not pending:
+            print(f"{repo.full_name}: nothing new to extract", flush=True)
+        else:
+            mode = "a" if already_done else "w"
+            with open(candidates_file, mode) as out_f:
+                for i, pr in enumerate(pending):
+                    instance = extract_patches(pr, github_token=token)
+                    out_f.write(json.dumps(asdict(instance)) + "\n")
+                    out_f.flush()
+                    if (i + 1) % 50 == 0 or (i + 1) == len(pending):
+                        print(
+                            f"  {repo.full_name}: {i + 1}/{len(pending)} extracted",
+                            flush=True,
+                        )
+
+        # Summary stats
+        if candidates_file.exists():
+            all_candidates = load_candidates(str(candidates_file))
+            viable = sum(
+                1 for c in all_candidates if c.patch and c.test_patch and c.problem_statement
+            )
+            print(
+                f"{repo.full_name}: {len(all_candidates)} total, "
+                f"{viable} viable (have patch + test_patch + problem_statement)",
+                flush=True,
+            )
+        else:
+            print(f"{repo.full_name}: 0 PRs, nothing to extract", flush=True)
 
 
 def _cmd_validate(args: argparse.Namespace) -> None:
@@ -254,6 +373,19 @@ def build_parser() -> argparse.ArgumentParser:
         "collect", help="Stage 1: Collect merged PRs with linked issues"
     )
     _add_common_args(collect_parser)
+    collect_parser.add_argument(
+        "--resume",
+        action="store_true",
+        default=False,
+        help="Merge newly collected PRs with existing output instead of overwriting",
+    )
+
+    # extract
+    extract_parser = subparsers.add_parser(
+        "extract",
+        help="Stage 2: Download patches and issue bodies from collected PRs",
+    )
+    _add_common_args(extract_parser)
 
     # validate
     validate_parser = subparsers.add_parser(
@@ -305,6 +437,7 @@ def main(argv: list[str] | None = None) -> int:
     commands = {
         "run": _cmd_run,
         "collect": _cmd_collect,
+        "extract": _cmd_extract,
         "validate": _cmd_validate,
         "emit": _cmd_emit,
         "eval": _cmd_eval,
