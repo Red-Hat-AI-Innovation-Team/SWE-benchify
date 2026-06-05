@@ -36,12 +36,17 @@ DIM    = "\033[2m"
 RESET  = "\033[0m"
 
 
+_RE_PIPELINE_LOG_LINE = re.compile(
+    r"\d{2}:\d{2}:\d{2}\s+(INFO|WARNING|ERROR)\s+swebenchify\."
+)
+
+
 def _find_log_file() -> Path | None:
     """Try to find the pipeline log from a running process or fallback."""
     if LOG_FILE and LOG_FILE.exists():
         return LOG_FILE
-    # First try to find output from a running swebenchify process —
-    # this is more current than a stale log file on disk.
+    # Prefer live output from a running swebenchify process.
+    # Match on actual pipeline log format to avoid picking up agent transcripts.
     try:
         task_dir = Path("/private/tmp") / f"claude-{os.getuid()}"
         if task_dir.exists():
@@ -50,12 +55,12 @@ def _find_log_file() -> Path | None:
                     text = output.read_text(errors="replace")[:500]
                 except Exception:
                     continue
-                if "swebenchify" in text:
+                if _RE_PIPELINE_LOG_LINE.search(text):
                     return output
     except Exception:
         pass
-    # Fall back to the default log path
-    default = Path("output/rh-v1-pipeline.log")
+    # Fall back to the on-disk log
+    default = OUTPUT_DIR.parent / f"{OUTPUT_DIR.name}-pipeline.log"
     if default.exists():
         return default
     return None
