@@ -113,11 +113,12 @@ async def run_repo_pipeline(
         save_candidates(candidates, str(candidates_file))
 
     # Filter to viable candidates (has patch + test_patch + problem_statement)
-    viable = [
-        c
-        for c in candidates
-        if c.patch and c.test_patch and c.problem_statement
-    ]
+    # Sort newest-first so 2026 instances are validated before 2025 ones.
+    viable = sorted(
+        (c for c in candidates if c.patch and c.test_patch and c.problem_statement),
+        key=lambda c: c.created_at,
+        reverse=True,
+    )
     logger.info(
         "  %d/%d viable candidates (have patch + test_patch + problem_statement)",
         len(viable),
