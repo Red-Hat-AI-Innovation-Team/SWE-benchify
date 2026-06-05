@@ -292,7 +292,15 @@ def build_frame(log_path: Path | None) -> list[str]:
         if remaining == 0 and total_viable > 0:
             out.append(f"{GREEN}{BOLD}All instances processed.{RESET}")
         else:
-            out.append(f"Remaining: {remaining} instances")
+            total_elapsed = sum(r.total_elapsed for r in repos.values())
+            if total_done > 0:
+                avg_secs = total_elapsed / total_done
+                eta_secs = avg_secs * remaining
+                h, m = int(eta_secs // 3600), int(eta_secs % 3600 // 60)
+                eta_str = f"{h}h {m:02d}m" if h else f"{m}m"
+                out.append(f"Remaining: {remaining} instances  {DIM}ETA ~{eta_str} ({avg_secs:.0f}s/instance){RESET}")
+            else:
+                out.append(f"Remaining: {remaining} instances")
 
     out.append(f"\n{DIM}── Recent log ──────────────────────────────────────────────────────────────────{RESET}")
     for line in recent:
