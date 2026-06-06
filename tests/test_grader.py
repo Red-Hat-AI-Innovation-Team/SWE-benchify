@@ -553,10 +553,12 @@ class TestParseF2POutput:
 
 
 class TestComputeF2PFunction:
+    _FAKE_TEST_PATCH = "diff --git a/pkg/foo_test.go b/pkg/foo_test.go\n--- a/pkg/foo_test.go\n+++ b/pkg/foo_test.go\n"
+
     def test_no_docker_raises(self) -> None:
         with patch("swebenchify.grader._docker_available", return_value=False):
             with pytest.raises(RuntimeError, match="Docker is not available"):
-                compute_f2p("etcd-io/etcd", "abc123", "test", "gold")
+                compute_f2p("etcd-io/etcd", "abc123", self._FAKE_TEST_PATCH, "gold")
 
     def test_build_failure_returns_error(self) -> None:
         with patch.multiple(
@@ -564,7 +566,7 @@ class TestComputeF2PFunction:
             _docker_available=MagicMock(return_value=True),
             _docker_build=MagicMock(return_value=(1, "build failed")),
         ):
-            result = compute_f2p("etcd-io/etcd", "abc123", "test", "gold")
+            result = compute_f2p("etcd-io/etcd", "abc123", self._FAKE_TEST_PATCH, "gold")
         assert result.status == "error"
         assert result.compiled is False
 
@@ -575,7 +577,7 @@ class TestComputeF2PFunction:
             _docker_build=MagicMock(return_value=(0, "ok")),
             _docker_run=MagicMock(return_value=(-1, "TIMEOUT after 600s")),
         ):
-            result = compute_f2p("etcd-io/etcd", "abc123", "test", "gold")
+            result = compute_f2p("etcd-io/etcd", "abc123", self._FAKE_TEST_PATCH, "gold")
         assert result.status == "error"
         assert "timed out" in result.error_message
 
@@ -592,6 +594,6 @@ class TestComputeF2PFunction:
             _docker_build=MagicMock(return_value=(0, "ok")),
             _docker_run=MagicMock(return_value=(0, raw)),
         ):
-            result = compute_f2p("etcd-io/etcd", "abc123", "test", "gold")
+            result = compute_f2p("etcd-io/etcd", "abc123", self._FAKE_TEST_PATCH, "gold")
         assert result.status == "valid"
         assert len(result.FAIL_TO_PASS) > 0
