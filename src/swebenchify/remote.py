@@ -19,6 +19,7 @@ from pathlib import Path
 from swebenchify.models import (
     CandidateInstance,
     GoEnvironmentSpec,
+    TaskInstance,
     ValidationResult,
 )
 
@@ -296,3 +297,76 @@ def remote_validate(
     logger.info("Remote validation complete: %d/%d valid", valid_total, len(all_results))
 
     return all_results
+
+
+def build_task_instances(
+    candidates: list[CandidateInstance],
+    results: dict[str, ValidationResult],
+    env_spec: GoEnvironmentSpec | None,
+) -> list[TaskInstance]:
+    """Build TaskInstance objects from validated candidates.
+
+    Pairs each valid ValidationResult with its candidate to produce
+    TaskInstances ready for filtering and emission.
+    """
+    from io import StringIO
+
+    try:
+        from unidiff import PatchSet
+    except ImportError:
+        PatchSet = None
+
+    spec_hash = env_spec.env_spec_hash if isinstance(env_spec, GoEnvironmentSpec) else None
+    repo_language = env_spec.language if env_spec else None
+
+    if isinstance(env_spec, GoEnvironmentSpec) and env_spec.go_version:
+        version = f"{env_spec.go_version}-{spec_hash[:8]}" if spec_hash else env_spec.go_version
+    else:
+        version = "unknown"
+
+    instances: list[TaskInstance] = []
+    for candidate in candidates:
+        vr = results.get(candidate.instance_id)
+        if not vr or vr.status != "valid":
+            continue
+
+        patch_str = candidate.patch or ""
+        patch_lines = len(patch_str.splitlines())
+        files_touched = 0
+        if PatchSet:
+            try:
+                files_touched = len(PatchSet(StringIO(patch_str)))
+            except Exception:
+                pass
+
+        instances.append(
+            TaskInstance(
+                repo=candidate.repo,
+                instance_id=candidate.instance_id,
+                base_commit=candidate.base_commit,
+                patch=candidate.patch,
+                test_patch=candidate.test_patch,
+                problem_statement=candidate.problem_statement or "",
+                hints_text=candidate.hints_text or "",
+                created_at=candidate.created_at,
+                version=version,
+                FAIL_TO_PASS=json.dumps(vr.FAIL_TO_PASS),
+                PASS_TO_PASS=json.dumps(vr.PASS_TO_PASS),
+                environment_setup_commit=None,
+                image_name=None,
+                fix_merge_date=candidate.merged_at or None,
+                provenance="public_upstream",
+                link_confidence=candidate.link_confidence,
+                repo_language=repo_language,
+                n_fail_to_pass=len(vr.FAIL_TO_PASS),
+                patch_lines=patch_lines,
+                files_touched=files_touched,
+                cross_file=files_touched > 1,
+                env_spec_hash=spec_hash,
+                n_runs=vr.n_runs,
+                flake_count=vr.flake_count,
+                quarantined_tests=vr.quarantined_tests,
+            )
+        )
+
+    return instances

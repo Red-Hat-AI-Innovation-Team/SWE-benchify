@@ -272,15 +272,15 @@ def _cmd_emit(args: argparse.Namespace) -> None:
 def _cmd_remote_validate(args: argparse.Namespace) -> None:
     """Dispatch validation to GitHub Actions runners."""
     import json
-    from dataclasses import asdict
-    from pathlib import Path
 
     _setup_logging()
     config = load_config(args.config)
 
+    from swebenchify.emitter import emit_dataset
     from swebenchify.extractor import load_candidates
+    from swebenchify.filters import apply_go_filters
     from swebenchify.models import GoEnvironmentSpec
-    from swebenchify.remote import remote_validate
+    from swebenchify.remote import build_task_instances, remote_validate
 
     candidates = load_candidates(args.input)
     viable = [c for c in candidates if c.patch and c.test_patch and c.problem_statement]
@@ -302,15 +302,27 @@ def _cmd_remote_validate(args: argparse.Namespace) -> None:
         timeout=args.timeout,
     )
 
-    output_path = Path(args.output or f"{config.output.dir}/remote-validation-results.jsonl")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w") as f:
-        for instance_id, vr in results.items():
-            f.write(json.dumps({"instance_id": instance_id, **asdict(vr)}) + "\n")
+    task_instances = build_task_instances(viable, results, env_spec)
+    print(f"{len(task_instances)}/{len(results)} instances valid")
 
-    valid = sum(1 for v in results.values() if v.status == "valid")
-    print(f"\n{valid}/{len(results)} instances valid")
-    print(f"Results written to {output_path}")
+    if not task_instances:
+        print("No valid instances to emit")
+        return
+
+    is_go = isinstance(env_spec, GoEnvironmentSpec)
+    if is_go:
+        filtered = apply_go_filters(task_instances, config.filters, results)
+    else:
+        from swebenchify.filters import apply_filters
+        filtered = apply_filters(task_instances, config.filters)
+
+    if not filtered:
+        print("All instances filtered out")
+        return
+
+    repo_slug = viable[0].repo.replace("/", "__")
+    emit_dataset(filtered, config.output.dir, repo_slug=repo_slug)
+    print(f"{len(filtered)} instances emitted to {config.output.dir}")
 
 
 def _cmd_eval(args: argparse.Namespace) -> None:
@@ -454,7 +466,6 @@ def build_parser() -> argparse.ArgumentParser:
     rv_parser.add_argument("--env-spec", help="Path to GoEnvironmentSpec JSON file")
     rv_parser.add_argument("--n-runs", type=int, default=1, help="Flake quarantine runs")
     rv_parser.add_argument("--timeout", type=int, default=300, help="Per-validation timeout (seconds)")
-    rv_parser.add_argument("--output", "-o", help="Output results JSONL")
 
     # eval
     eval_parser = subparsers.add_parser(
