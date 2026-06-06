@@ -292,6 +292,11 @@ def extract_patches(
         owner, repo_name, candidate.resolved_issues, headers
     )
 
+    # Jira-only PRs: use PR title + body as problem statement
+    if problem_statement is None and candidate.resolved_jira_issues:
+        fallback = f"{candidate.title}\n{candidate.body or ''}".strip()
+        problem_statement = fallback or None
+
     # 4. Get first commit date and fetch hints
     first_commit_date = _get_first_commit_date(
         owner, repo_name, candidate.pr_number, headers
@@ -315,6 +320,7 @@ def extract_patches(
         hints_text=hints_text,
         created_at=candidate.created_at,
         resolved_issues=candidate.resolved_issues,
+        resolved_jira_issues=candidate.resolved_jira_issues,
         merged_at=candidate.merged_at,
         link_confidence=candidate.link_confidence,
     )

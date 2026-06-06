@@ -19,7 +19,7 @@ from swebenchify.emitter import emit_dataset, load_product_map
 from swebenchify.extractor import extract_all, load_candidates, save_candidates
 from swebenchify.filters import apply_filters
 from swebenchify.go_registry import GoSpecRegistry
-from swebenchify.models import AnyEnvironmentSpec, EnvironmentSpec, GoEnvironmentSpec, QualityScore, Repository, TaskInstance
+from swebenchify.models import AnyEnvironmentSpec, GoEnvironmentSpec, QualityScore, Repository, TaskInstance
 from swebenchify.sandbox import GoImageCache, SandboxConfig, is_docker_available
 from swebenchify.validator import validate_instances
 from swebenchify.versioning import detect_version
@@ -96,6 +96,7 @@ async def run_repo_pipeline(
             max_prs=config.pipeline.max_prs_per_repo,
             pr_after=config.pipeline.pr_after,
             pr_before=config.pipeline.pr_before,
+            rh_jira_projects=config.rh_jira_projects,
         )
         save_prs(prs, str(prs_file))
     logger.info("  %d candidate PRs collected", len(prs))
@@ -260,7 +261,6 @@ async def run_repo_pipeline(
     product_map = load_product_map()
 
     task_instances: list[TaskInstance] = []
-    skipped_version = 0
     for candidate in viable:
         vr = validation_results.get(candidate.instance_id)
         if vr and vr.status == "valid":

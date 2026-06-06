@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from swebenchify.collector import compute_link_confidence, extract_resolved_issues, load_prs, save_prs
+from swebenchify.collector import compute_link_confidence, extract_jira_issues, extract_resolved_issues, load_prs, save_prs
 from swebenchify.models import CandidatePR
 
 
@@ -87,6 +87,52 @@ class TestExtractResolvedIssues:
     def test_commit_message_single_line(self) -> None:
         """A single-line commit message with a keyword should match."""
         assert extract_resolved_issues("closes #88 -- quick patch") == [88]
+
+
+class TestExtractJiraIssues:
+    """Test Jira issue key extraction from PR text."""
+
+    def test_ocpbugs_single(self) -> None:
+        assert extract_jira_issues("OCPBUGS-1234 fix") == ["OCPBUGS-1234"]
+
+    def test_ocpbugs_multiple(self) -> None:
+        result = extract_jira_issues("OCPBUGS-100 and OCPBUGS-200")
+        assert result == ["OCPBUGS-100", "OCPBUGS-200"]
+
+    def test_configured_project(self) -> None:
+        result = extract_jira_issues("STOR-567 fix", rh_jira_projects=["STOR"])
+        assert result == ["STOR-567"]
+
+    def test_unknown_project_ignored(self) -> None:
+        result = extract_jira_issues("ZZZZ-1234", rh_jira_projects=["STOR"])
+        assert result == []
+
+    def test_ocpbugs_always_recognized(self) -> None:
+        result = extract_jira_issues("OCPBUGS-99", rh_jira_projects=["STOR"])
+        assert result == ["OCPBUGS-99"]
+
+    def test_mixed_ocpbugs_and_project(self) -> None:
+        result = extract_jira_issues("OCPBUGS-1 MGMT-2")
+        assert result == ["MGMT-2", "OCPBUGS-1"]
+
+    def test_empty_string(self) -> None:
+        assert extract_jira_issues("") == []
+
+    def test_none_input(self) -> None:
+        assert extract_jira_issues(None) == []
+
+    def test_deduplication(self) -> None:
+        result = extract_jira_issues("OCPBUGS-1234 again OCPBUGS-1234")
+        assert result == ["OCPBUGS-1234"]
+
+    def test_default_projects_recognized(self) -> None:
+        assert extract_jira_issues("MGMT-100") == ["MGMT-100"]
+        assert extract_jira_issues("STOR-200") == ["STOR-200"]
+
+    def test_no_github_issues_extracted(self) -> None:
+        result = extract_jira_issues("fixes #123 OCPBUGS-1")
+        assert result == ["OCPBUGS-1"]
+        assert 123 not in result
 
 
 class TestComputeLinkConfidence:
@@ -228,7 +274,7 @@ class TestPRJsonlRoundTrip:
         save_prs(sample_prs, path)
 
         with open(path) as f:
-            lines = [l.strip() for l in f if l.strip()]
+            lines = [raw.strip() for raw in f if raw.strip()]
 
         assert len(lines) == 2
         for line in lines:
@@ -263,3 +309,40 @@ class TestPRJsonlRoundTrip:
         assert len(loaded) == 1
         assert loaded[0].base_commit == "parent_sha_of_merge"
         assert loaded[0].merge_commit == "merge_sha_abc"
+
+    def test_round_trip_jira_issues(self, tmp_path: Path) -> None:
+        """resolved_jira_issues survives JSONL round-trip."""
+        pr = CandidatePR(
+            repo="openshift/origin",
+            pr_number=99,
+            title="OCPBUGS-1234 fix crash",
+            body="Resolves OCPBUGS-1234",
+            base_commit="aaa",
+            merge_commit="bbb",
+            diff_url="https://github.com/openshift/origin/pull/99.diff",
+            resolved_issues=[],
+            created_at="2025-06-01T00:00:00Z",
+            merged_at="2025-06-02T00:00:00Z",
+            resolved_jira_issues=["OCPBUGS-1234"],
+            link_confidence=0.9,
+        )
+        path = str(tmp_path / "jira.jsonl")
+        save_prs([pr], path)
+        loaded = load_prs(path)
+        assert len(loaded) == 1
+        assert loaded[0].resolved_jira_issues == ["OCPBUGS-1234"]
+        assert loaded[0].resolved_issues == []
+
+    def test_backward_compat_missing_jira_field(self, tmp_path: Path) -> None:
+        """Old JSONL without resolved_jira_issues loads with empty default."""
+        line = json.dumps({
+            "repo": "o/r", "pr_number": 1, "title": "t", "body": None,
+            "base_commit": "a", "merge_commit": "b", "diff_url": "u",
+            "resolved_issues": [1], "created_at": "2024-01-01T00:00:00Z",
+            "merged_at": "2024-01-02T00:00:00Z",
+        })
+        path = str(tmp_path / "old.jsonl")
+        with open(path, "w") as f:
+            f.write(line + "\n")
+        loaded = load_prs(path)
+        assert loaded[0].resolved_jira_issues == []

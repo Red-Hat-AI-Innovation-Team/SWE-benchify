@@ -48,8 +48,8 @@ def _cmd_collect(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     from pathlib import Path
 
-    from swebenchify.collector import collect_prs, load_prs, save_prs
-    from swebenchify.models import Repository
+    from swebenchify.collector import collect_prs, load_prs
+    from swebenchify.models import CandidatePR, Repository
 
     output_dir = Path(config.output.dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -92,6 +92,7 @@ def _cmd_collect(args: argparse.Namespace) -> None:
                 pr_before=config.pipeline.pr_before,
                 existing_pr_numbers=existing_numbers,
                 on_candidate=_write,
+                rh_jira_projects=config.rh_jira_projects,
             )
 
         total = len(existing_numbers) + new_count
@@ -216,8 +217,6 @@ def _cmd_validate(args: argparse.Namespace) -> None:
         if not env_spec:
             print("Environment discovery failed")
             return
-
-        import json
 
         results = {}
         for c in viable:

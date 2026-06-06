@@ -45,6 +45,7 @@ class CandidatePR:
     resolved_issues: list[int]
     created_at: str
     merged_at: str
+    resolved_jira_issues: list[str] = field(default_factory=list)
     link_confidence: float = 0.0  # confidence this PR resolves a tracked issue
 
 
@@ -63,6 +64,7 @@ class CandidateInstance:
     hints_text: str | None
     created_at: str
     resolved_issues: list[int] = field(default_factory=list)
+    resolved_jira_issues: list[str] = field(default_factory=list)
     merged_at: str = ""        # ISO 8601 merge timestamp from GitHub API
     link_confidence: float = 0.0
 

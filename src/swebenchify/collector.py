@@ -144,6 +144,39 @@ def extract_resolved_issues(text: str) -> list[int]:
     return sorted(issues)
 
 
+def extract_jira_issues(
+    text: str,
+    rh_jira_projects: list[str] | None = None,
+) -> list[str]:
+    """Extract Jira issue keys from text.
+
+    Always recognises ``OCPBUGS-NNNN``.  Additionally recognises
+    ``PROJECT-NNNN`` for each key in *rh_jira_projects* (defaults to
+    ``["STOR", "MGMT"]``).
+
+    Args:
+        text: PR title, body, or commit message text to scan.
+        rh_jira_projects: Additional Jira project keys to recognise.
+
+    Returns:
+        Sorted list of unique Jira issue keys (e.g. ``["OCPBUGS-1234"]``).
+    """
+    if not text:
+        return []
+
+    issues: set[str] = set()
+
+    for m in _OCPBUGS_PATTERN.finditer(text):
+        issues.add(m.group(0))
+
+    extra_projects = rh_jira_projects if rh_jira_projects is not None else ["STOR", "MGMT"]
+    for project in extra_projects:
+        for m in re.finditer(rf"\b{re.escape(project)}-\d+\b", text):
+            issues.add(m.group(0))
+
+    return sorted(issues)
+
+
 def _make_headers(token: str | None) -> dict[str, str]:
     """Build HTTP headers for GitHub API requests."""
     return make_headers(token)
@@ -197,6 +230,7 @@ def collect_prs(
     pr_before: str | None = None,
     existing_pr_numbers: set[int] | None = None,
     on_candidate: Callable[[CandidatePR], None] | None = None,
+    rh_jira_projects: list[str] | None = None,
 ) -> list[CandidatePR]:
     """Collect merged pull requests that reference issues from a repository.
 
@@ -275,10 +309,15 @@ def collect_prs(
             resolved = set(extract_resolved_issues(title))
             resolved.update(extract_resolved_issues(body))
 
-            if not resolved:
+            jira_resolved = set(extract_jira_issues(title, rh_jira_projects))
+            jira_resolved.update(extract_jira_issues(body, rh_jira_projects))
+
+            if not resolved and not jira_resolved:
                 continue
 
-            confidence = compute_link_confidence(title, body)
+            confidence = compute_link_confidence(
+                title, body, rh_jira_projects=rh_jira_projects,
+            )
 
             # Get the actual base commit (first parent of merge commit)
             merge_commit_sha = pr.get("merge_commit_sha") or ""
@@ -305,6 +344,7 @@ def collect_prs(
                 resolved_issues=sorted(resolved),
                 created_at=created_at,
                 merged_at=pr["merged_at"],
+                resolved_jira_issues=sorted(jira_resolved),
                 link_confidence=confidence,
             )
             candidates.append(candidate)

@@ -243,6 +243,20 @@ class TestCandidateInstanceJsonlRoundTrip:
                 created_at="2020-06-15T12:00:00Z",
                 resolved_issues=[12340, 12341],
             ),
+            CandidateInstance(
+                repo="openshift/origin",
+                instance_id="openshift__origin-99",
+                pr_number=99,
+                base_commit="ccc333",
+                merge_commit="ddd444",
+                patch="diff --git a/pkg/fix.go b/pkg/fix.go\n+fixed\n",
+                test_patch="diff --git a/pkg/fix_test.go b/pkg/fix_test.go\n+test\n",
+                problem_statement="OCPBUGS-1234 crash on startup",
+                hints_text=None,
+                created_at="2025-06-01T00:00:00Z",
+                resolved_issues=[],
+                resolved_jira_issues=["OCPBUGS-1234"],
+            ),
         ]
 
     def test_round_trip(
@@ -265,6 +279,7 @@ class TestCandidateInstanceJsonlRoundTrip:
             assert restored.hints_text == original.hints_text
             assert restored.created_at == original.created_at
             assert restored.resolved_issues == original.resolved_issues
+            assert restored.resolved_jira_issues == original.resolved_jira_issues
 
     def test_jsonl_format(
         self, sample_candidates: list[CandidateInstance], tmp_path: Path
@@ -274,9 +289,9 @@ class TestCandidateInstanceJsonlRoundTrip:
         save_candidates(sample_candidates, path)
 
         with open(path) as f:
-            lines = [l.strip() for l in f if l.strip()]
+            lines = [raw.strip() for raw in f if raw.strip()]
 
-        assert len(lines) == 2
+        assert len(lines) == 3
         for line in lines:
             data = json.loads(line)
             assert "instance_id" in data
@@ -294,7 +309,7 @@ class TestCandidateInstanceJsonlRoundTrip:
 class TestMergedAtPropagation:
     """merged_at and link_confidence flow from CandidatePR → CandidateInstance."""
 
-    def _make_pr(self, **overrides) -> "CandidatePR":
+    def _make_pr(self, **overrides):
         from swebenchify.models import CandidatePR
         defaults = dict(
             repo="pallets/flask",
