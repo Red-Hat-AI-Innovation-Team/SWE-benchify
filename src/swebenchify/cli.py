@@ -269,6 +269,50 @@ def _cmd_emit(args: argparse.Namespace) -> None:
     print(f"{len(filtered)}/{len(instances)} instances emitted to {config.output.dir}")
 
 
+def _cmd_remote_validate(args: argparse.Namespace) -> None:
+    """Dispatch validation to GitHub Actions runners."""
+    import json
+    from dataclasses import asdict
+    from pathlib import Path
+
+    _setup_logging()
+    config = load_config(args.config)
+
+    from swebenchify.extractor import load_candidates
+    from swebenchify.models import GoEnvironmentSpec
+    from swebenchify.remote import remote_validate
+
+    candidates = load_candidates(args.input)
+    viable = [c for c in candidates if c.patch and c.test_patch and c.problem_statement]
+    if not viable:
+        print("No viable candidates found")
+        return
+
+    env_spec = None
+    if args.env_spec:
+        with open(args.env_spec) as f:
+            env_spec = GoEnvironmentSpec(**json.load(f))
+
+    print(f"Dispatching {len(viable)} validations to GitHub Actions ...")
+
+    results = remote_validate(
+        candidates=viable,
+        env_spec=env_spec,
+        n_runs=args.n_runs,
+        timeout=args.timeout,
+    )
+
+    output_path = Path(args.output or f"{config.output.dir}/remote-validation-results.jsonl")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as f:
+        for instance_id, vr in results.items():
+            f.write(json.dumps({"instance_id": instance_id, **asdict(vr)}) + "\n")
+
+    valid = sum(1 for v in results.values() if v.status == "valid")
+    print(f"\n{valid}/{len(results)} instances valid")
+    print(f"Results written to {output_path}")
+
+
 def _cmd_eval(args: argparse.Namespace) -> None:
     """Run evaluation: dispatch a coding agent to solve instances."""
     import asyncio
@@ -400,6 +444,18 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_args(emit_parser)
     emit_parser.add_argument("--input", "-i", help="Input validated instances JSONL file")
 
+    # remote-validate
+    rv_parser = subparsers.add_parser(
+        "remote-validate",
+        help="Dispatch validation to GitHub Actions runners",
+    )
+    _add_common_args(rv_parser)
+    rv_parser.add_argument("--input", "-i", required=True, help="Input candidates JSONL")
+    rv_parser.add_argument("--env-spec", help="Path to GoEnvironmentSpec JSON file")
+    rv_parser.add_argument("--n-runs", type=int, default=1, help="Flake quarantine runs")
+    rv_parser.add_argument("--timeout", type=int, default=300, help="Per-validation timeout (seconds)")
+    rv_parser.add_argument("--output", "-o", help="Output results JSONL")
+
     # eval
     eval_parser = subparsers.add_parser(
         "eval", help="Evaluate: run a coding agent on benchmark instances"
@@ -438,6 +494,7 @@ def main(argv: list[str] | None = None) -> int:
         "collect": _cmd_collect,
         "extract": _cmd_extract,
         "validate": _cmd_validate,
+        "remote-validate": _cmd_remote_validate,
         "emit": _cmd_emit,
         "eval": _cmd_eval,
     }
