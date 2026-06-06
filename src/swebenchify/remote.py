@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
 
 WORKFLOW_FILE = "remote-validate.yml"
 MANIFEST_REL_PATH = ".remote-validate/manifest.jsonl"
-MAX_MATRIX_SIZE = 250
+MAX_MANIFEST_MB = 90
+MAX_MATRIX_SIZE = 256
 POLL_INTERVAL = 30
 MAX_POLL_DURATION = 7200
 
@@ -246,6 +247,38 @@ def cleanup(batch_id: str) -> None:
         logger.warning("Failed to delete remote branch %s", branch)
 
 
+def _split_batches(
+    candidates: list[CandidateInstance],
+    env_spec: GoEnvironmentSpec | None,
+) -> list[list[CandidateInstance]]:
+    """Split candidates into batches that fit under GitHub's 100MB file limit."""
+    max_bytes = MAX_MANIFEST_MB * 1024 * 1024
+    env_dict = asdict(env_spec) if env_spec else None
+    batches: list[list[CandidateInstance]] = []
+    current: list[CandidateInstance] = []
+    current_size = 0
+
+    for c in candidates:
+        entry_size = len(json.dumps({
+            "instance_id": c.instance_id,
+            "repo": c.repo,
+            "base_commit": c.base_commit,
+            "test_patch": c.test_patch,
+            "gold_patch": c.patch,
+            "env_spec": env_dict,
+        }).encode())
+        if current and (current_size + entry_size > max_bytes or len(current) >= MAX_MATRIX_SIZE):
+            batches.append(current)
+            current = []
+            current_size = 0
+        current.append(c)
+        current_size += entry_size + 1
+
+    if current:
+        batches.append(current)
+    return batches
+
+
 def remote_validate(
     candidates: list[CandidateInstance],
     env_spec: GoEnvironmentSpec | None,
@@ -263,10 +296,7 @@ def remote_validate(
         logger.info("No viable candidates to validate")
         return {}
 
-    batches = [
-        viable[i : i + MAX_MATRIX_SIZE]
-        for i in range(0, len(viable), MAX_MATRIX_SIZE)
-    ]
+    batches = _split_batches(viable, env_spec)
 
     all_results: dict[str, ValidationResult] = {}
 
