@@ -58,7 +58,11 @@ def export_manifest(
 
 def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     logger.debug("Running: %s", " ".join(cmd))
-    return subprocess.run(cmd, capture_output=True, text=True, check=True, **kwargs)
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, check=True, **kwargs)
+    except subprocess.CalledProcessError as exc:
+        logger.error("Command failed: %s\nstderr: %s", " ".join(cmd), exc.stderr)
+        raise
 
 
 def _run_git(*args: str) -> str:
@@ -80,8 +84,12 @@ def dispatch(
     batch_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
     branch = f"remote-validate/{batch_id}"
 
-    manifest_data = manifest_path.read_bytes()
-    blob_sha = _run_git("hash-object", "-w", "--stdin", input=manifest_data)
+    manifest_data = manifest_path.read_text()
+    result = subprocess.run(
+        ["git", "hash-object", "-w", "--stdin"],
+        input=manifest_data, capture_output=True, text=True, check=True,
+    )
+    blob_sha = result.stdout.strip()
 
     head_tree = _run_git("rev-parse", "HEAD^{tree}")
 
