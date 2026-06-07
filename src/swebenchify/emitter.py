@@ -60,8 +60,22 @@ def emit_dataset(
         logger.info("Wrote %d instances to %s", len(instances), repo_file)
 
     all_file = output_path / "all-task-instances.jsonl"
-    _write_jsonl(instances, all_file, append=True)
-    logger.info("Appended %d instances to %s", len(instances), all_file)
+    existing_ids: set[str] = set()
+    if all_file.exists():
+        with open(all_file) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        existing_ids.add(json.loads(line)["instance_id"])
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+    new_instances = [i for i in instances if i.instance_id not in existing_ids]
+    skipped = len(instances) - len(new_instances)
+    if skipped:
+        logger.info("Skipped %d duplicate instances already in %s", skipped, all_file)
+    _write_jsonl(new_instances, all_file, append=True)
+    logger.info("Appended %d instances to %s", len(new_instances), all_file)
 
 
 def _write_jsonl(
