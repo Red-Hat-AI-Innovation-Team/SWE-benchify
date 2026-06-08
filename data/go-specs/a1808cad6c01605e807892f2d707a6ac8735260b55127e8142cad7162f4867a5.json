@@ -1,0 +1,24 @@
+{
+  "language": "go",
+  "go_version": "1.24.0",
+  "build_cmd": "go build ./cmd/... ./pkg/...",
+  "test_cmd": "go test -v -race -skip FuzzAdmitter -timeout 15m -mod=vendor ./pkg/... ./cmd/...",
+  "module_mode": "vendored",
+  "goflags": "-mod=vendor",
+  "system_dependencies": [
+    "libvirt-devel",
+    "gcc",
+    "gcc-c++",
+    "glibc-static",
+    "libstdc++-static",
+    "glibc-devel",
+    "make",
+    "git",
+    "cpio",
+    "patch",
+    "protobuf-compiler",
+    "qemu-img",
+    "jq",
+    "libnbd-devel"
+  ]
+}

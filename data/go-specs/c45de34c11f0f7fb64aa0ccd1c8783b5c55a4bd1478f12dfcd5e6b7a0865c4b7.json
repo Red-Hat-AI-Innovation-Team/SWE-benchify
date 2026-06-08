@@ -1,0 +1,11 @@
+{
+  "language": "go",
+  "go_version": "1.25.7",
+  "build_cmd": "go build -mod=vendor ./cmd/...",
+  "test_cmd": "go test -mod=vendor -timeout 5m ./...",
+  "module_mode": "vendored",
+  "goflags": "-mod=vendor",
+  "system_dependencies": [
+    "yamllint"
+  ]
+}

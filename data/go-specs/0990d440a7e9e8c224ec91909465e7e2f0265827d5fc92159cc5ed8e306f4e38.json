@@ -1,0 +1,9 @@
+{
+  "language": "go",
+  "go_version": "1.24.3",
+  "build_cmd": "make build",
+  "test_cmd": "make unit",
+  "module_mode": "vendored",
+  "goflags": "-mod=vendor",
+  "system_dependencies": []
+}

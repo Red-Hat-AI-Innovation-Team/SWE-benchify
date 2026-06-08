@@ -1,0 +1,16 @@
+{
+  "language": "go",
+  "go_version": "1.24.0",
+  "build_cmd": "hack/build.sh",
+  "test_cmd": "go test -mod=vendor ./cmd/... ./data/... ./pkg/...",
+  "module_mode": "vendored",
+  "goflags": "-mod=vendor",
+  "system_dependencies": [
+    "openssl",
+    "unzip",
+    "jq",
+    "openssh-clients",
+    "nmstate",
+    "openshift-clients"
+  ]
+}

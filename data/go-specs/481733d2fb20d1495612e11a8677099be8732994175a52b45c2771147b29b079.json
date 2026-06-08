@@ -1,0 +1,23 @@
+{
+  "language": "go",
+  "go_version": "1.25.6",
+  "build_cmd": "make all",
+  "test_cmd": "make test-unit",
+  "module_mode": "vendored",
+  "goflags": "-mod=vendor",
+  "system_dependencies": [
+    "btrfs-progs-devel",
+    "containers-common",
+    "go-md2man",
+    "gpgme-devel",
+    "libassuan-devel",
+    "libseccomp-devel",
+    "make",
+    "net-tools",
+    "runc",
+    "shadow-utils",
+    "glibc-static",
+    "libselinux-static",
+    "libseccomp-static"
+  ]
+}

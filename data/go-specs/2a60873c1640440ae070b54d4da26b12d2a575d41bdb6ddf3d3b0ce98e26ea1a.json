@@ -1,0 +1,9 @@
+{
+  "language": "go",
+  "go_version": "1.25.6",
+  "build_cmd": "make build",
+  "test_cmd": "make GO_ONLY=1 test",
+  "module_mode": "modules",
+  "goflags": "",
+  "system_dependencies": []
+}
