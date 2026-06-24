@@ -7,9 +7,8 @@ import json
 import logging
 import subprocess
 from dataclasses import asdict
-from pathlib import Path
 
-from swebenchify.dispatcher import AgentResult, CostTracker, run_agent_task
+from swebenchify.dispatcher import CostTracker, run_agent_task
 from swebenchify.models import EnvironmentSpec, EvalResult, Repository, TaskInstance
 from swebenchify.workspace import WorkspaceManager
 
@@ -189,9 +188,6 @@ async def eval_instance(
 
     for test_id in f2p_tests:
         try:
-            # Run the specific test by appending the test ID to the base command
-            # pytest accepts test IDs directly; other frameworks may need adaptation
-            base_cmd = env_spec.test_cmd.split()[0]  # e.g., "python" or "PYTHONPATH=."
             test_cmd = f"{env_spec.test_cmd} {test_id}" if "::" in test_id else env_spec.test_cmd
             # For pytest-style test IDs, run them directly
             if "::" in test_id:

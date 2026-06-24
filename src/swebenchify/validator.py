@@ -19,6 +19,7 @@ from swebenchify.grader import compute_f2p
 from swebenchify.models import (
     AnyEnvironmentSpec,
     CandidateInstance,
+    EnvironmentSpec,
     GoEnvironmentSpec,
     Repository,
     ValidationResult,
@@ -135,10 +136,8 @@ async def validate_instance(
     Go repos use deterministic Docker-based validation (no agent needed).
     Python repos use the original agent-based approach.
     """
-    is_go = isinstance(env_spec, GoEnvironmentSpec)
-
     # Go: deterministic Docker path (handles quarantine internally)
-    if is_go:
+    if isinstance(env_spec, GoEnvironmentSpec):
         return await _validate_go_docker(
             candidate=candidate,
             env_spec=env_spec,
@@ -170,6 +169,7 @@ async def validate_instance(
     )
     worktree = inst_dir / "repo"
 
+    assert isinstance(env_spec, EnvironmentSpec)
     prompt = VALIDATION_PROMPT.format(
         repo=repo.full_name,
         commit=candidate.base_commit,
@@ -360,7 +360,7 @@ async def validate_instances(
     tasks = [validate_one(c) for c in candidates]
     raw_results = await asyncio.gather(*tasks, return_exceptions=True)
     for r in raw_results:
-        if isinstance(r, Exception):
+        if isinstance(r, BaseException):
             logger.error("Validation task failed: %s", r)
             continue
         instance_id, vr = r

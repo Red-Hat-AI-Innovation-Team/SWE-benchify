@@ -267,9 +267,9 @@ async def run_repo_pipeline(
             raw_version = instance_versions.get(candidate.instance_id, "unknown")
 
             if is_go_repo and go_registry is not None:
-                go_spec = env_specs.get("go")
-                version = get_go_version_string(go_spec, go_registry) if isinstance(go_spec, GoEnvironmentSpec) else raw_version
-                env_commit = get_go_environment_setup_commit(str(bare_clone), go_spec, go_registry) if isinstance(go_spec, GoEnvironmentSpec) else None
+                go_spec_lookup: AnyEnvironmentSpec | None = env_specs.get("go")
+                version = get_go_version_string(go_spec_lookup, go_registry) if isinstance(go_spec_lookup, GoEnvironmentSpec) else raw_version
+                env_commit = get_go_environment_setup_commit(str(bare_clone), go_spec_lookup, go_registry) if isinstance(go_spec_lookup, GoEnvironmentSpec) else None
             else:
                 version = snap_version(repo.full_name, raw_version) or raw_version
                 if version != raw_version:
@@ -287,21 +287,21 @@ async def run_repo_pipeline(
 
             # env_spec for this candidate
             cand_version = instance_versions.get(candidate.instance_id, "unknown")
-            env_spec = env_specs.get(cand_version if not is_go_repo else "go")
+            cand_env_spec: AnyEnvironmentSpec | None = env_specs.get(cand_version if not is_go_repo else "go")
             spec_hash = (
-                env_spec.env_spec_hash
-                if isinstance(env_spec, GoEnvironmentSpec)
+                cand_env_spec.env_spec_hash
+                if isinstance(cand_env_spec, GoEnvironmentSpec)
                 else None
             )
-            repo_language = env_spec.language if env_spec else None
+            repo_language = cand_env_spec.language if cand_env_spec else None
 
             task_instances.append(
                 TaskInstance(
                     repo=candidate.repo,
                     instance_id=candidate.instance_id,
                     base_commit=candidate.base_commit,
-                    patch=candidate.patch,
-                    test_patch=candidate.test_patch,
+                    patch=candidate.patch or "",
+                    test_patch=candidate.test_patch or "",
                     problem_statement=candidate.problem_statement or "",
                     hints_text=candidate.hints_text or "",
                     created_at=candidate.created_at,

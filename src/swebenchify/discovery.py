@@ -9,10 +9,9 @@ from __future__ import annotations
 import json
 import logging
 import shutil
-from pathlib import Path
 
 from swebenchify.dispatcher import AgentResult, CostTracker, run_agent_with_retry
-from swebenchify.go_registry import GoSpecRegistry, get_go_environment_setup_commit
+from swebenchify.go_registry import GoSpecRegistry
 from swebenchify.models import (
     GoEnvironmentSpec,
     EnvironmentSpec,
@@ -320,7 +319,7 @@ async def discover_go_environment(
     if not result.is_error and spec_path.exists() and version_path.exists():
         try:
             spec_data = json.loads(spec_path.read_text())
-            ver_data = json.loads(version_path.read_text())
+            json.loads(version_path.read_text())  # validate JSON is parseable
 
             spec = GoEnvironmentSpec(
                 **{

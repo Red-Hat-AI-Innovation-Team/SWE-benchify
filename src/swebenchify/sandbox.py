@@ -17,6 +17,10 @@ import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from swebenchify.models import GoEnvironmentSpec
 
 logger = logging.getLogger(__name__)
 
