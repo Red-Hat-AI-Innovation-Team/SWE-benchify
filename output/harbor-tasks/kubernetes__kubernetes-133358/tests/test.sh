@@ -1,0 +1,214 @@
+#!/bin/bash
+set -uo pipefail
+
+cd /testbed
+
+# Apply the test patch (restores test expectations)
+echo 'diff --git a/staging/src/k8s.io/apiserver/pkg/endpoints/handlers/delete_test.go b/staging/src/k8s.io/apiserver/pkg/endpoints/handlers/delete_test.go
+index c0396ee4aecf6..3fbeef7f63e59 100644
+--- a/staging/src/k8s.io/apiserver/pkg/endpoints/handlers/delete_test.go
++++ b/staging/src/k8s.io/apiserver/pkg/endpoints/handlers/delete_test.go
+@@ -33,6 +33,7 @@ import (
+ 	"k8s.io/apimachinery/pkg/runtime"
+ 	"k8s.io/apimachinery/pkg/runtime/schema"
+ 	"k8s.io/apimachinery/pkg/runtime/serializer"
++	jsonserializer "k8s.io/apimachinery/pkg/runtime/serializer/json"
+ 	"k8s.io/apiserver/pkg/admission"
+ 	auditinternal "k8s.io/apiserver/pkg/apis/audit"
+ 	"k8s.io/apiserver/pkg/audit"
+@@ -147,6 +148,73 @@ func TestDeleteResourceAuditLogRequestObject(t *testing.T) {
+ 	}
+ }
+ 
++// For issue https://github.com/kubernetes/kubernetes/issues/132359
++func TestDeleteResourceDeleteOptions(t *testing.T) {
++	ctx := t.Context()
++	fakeDeleterFn := func(ctx context.Context, _ rest.ValidateObjectFunc, _ *metav1.DeleteOptions) (runtime.Object, bool, error) {
++		return nil, false, nil
++	}
++	js := jsonserializer.NewSerializerWithOptions(jsonserializer.DefaultMetaFactory, nil, nil, jsonserializer.SerializerOptions{})
++	scope := &RequestScope{
++		Namer: &mockNamer{},
++		Serializer: &fakeSerializer{
++			serializer: runtime.NewCodec(js, js),
++		},
++	}
++	handler := DeleteResource(fakeDeleterFunc(fakeDeleterFn), true, scope, nil)
++
++	tests := []struct {
++		name       string
++		body       string
++		expectCode int
++	}{
++		{
++			name:       "valid delete options",
++			body:       "{}",
++			expectCode: 200,
++		},
++		{
++			name:       "orphanDependents invalid Go type",
++			body:       `{"orphanDependents": "randomString"}`,
++			expectCode: 400,
++		},
++		{
++			name:       "apiVersion/kind mismatch",
++			body:       `{ "apiVersion": "v1", "kind": "APIResourceList" }`,
++			expectCode: 400,
++		},
++		{
++			name:       "apiVersion invalid type",
++			body:       `{ "apiVersion": false, "kind": "DeleteOptions" }`,
++			expectCode: 400,
++		},
++	}
++
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			req, err := http.NewRequestWithContext(ctx, request.MethodDelete, "/api/v1/namespaces/default/pods/testpod", strings.NewReader(test.body))
++			if err != nil {
++				t.Fatalf("unexpected error: %v", err)
++			}
++			req.Header.Set("Content-Type", "application/json")
++			req.Header.Set("Accept", "*/*")
++
++			recorder := httptest.NewRecorder()
++			handler.ServeHTTP(recorder, req)
++			gotCode := recorder.Code
++			if gotCode != test.expectCode {
++				t.Fatalf("expected status %v but got %v", test.expectCode, gotCode)
++			}
++		})
++	}
++}
++
++type fakeDeleterFunc func(ctx context.Context, deleteValidation rest.ValidateObjectFunc, options *metav1.DeleteOptions) (runtime.Object, bool, error)
++
++func (f fakeDeleterFunc) Delete(ctx context.Context, name string, deleteValidation rest.ValidateObjectFunc, options *metav1.DeleteOptions) (runtime.Object, bool, error) {
++	return f(ctx, deleteValidation, options)
++}
++
+ func TestDeleteCollection(t *testing.T) {
+ 	req := &http.Request{
+ 		Header: http.Header{},
+@@ -216,6 +284,67 @@ func TestDeleteCollection(t *testing.T) {
+ 	}
+ }
+ 
++// For issue https://github.com/kubernetes/kubernetes/issues/132359
++func TestDeleteCollectionDeleteOptions(t *testing.T) {
++	ctx := t.Context()
++	fakeDeleterFn := func(ctx context.Context, _ rest.ValidateObjectFunc, _ *metav1.DeleteOptions, _ *metainternalversion.ListOptions) (runtime.Object, error) {
++		return nil, nil
++	}
++	js := jsonserializer.NewSerializerWithOptions(jsonserializer.DefaultMetaFactory, nil, nil, jsonserializer.SerializerOptions{})
++	scope := &RequestScope{
++		Namer: &mockNamer{},
++		Serializer: &fakeSerializer{
++			serializer: runtime.NewCodec(js, js),
++		},
++	}
++	handler := DeleteCollection(fakeCollectionDeleterFunc(fakeDeleterFn), true, scope, nil)
++
++	tests := []struct {
++		name       string
++		body       string
++		expectCode int
++	}{
++		{
++			name:       "valid delete options",
++			body:       "{}",
++			expectCode: 200,
++		},
++		{
++			name:       "orphanDependents invalid Go type",
++			body:       `{"orphanDependents": "randomString"}`,
++			expectCode: 400,
++		},
++		{
++			name:       "apiVersion/kind mismatch",
++			body:       `{ "apiVersion": "v1", "kind": "APIResourceList" }`,
++			expectCode: 400,
++		},
++		{
++			name:       "apiVersion invalid type",
++			body:       `{ "apiVersion": false, "kind": "DeleteOptions" }`,
++			expectCode: 400,
++		},
++	}
++
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			req, err := http.NewRequestWithContext(ctx, request.MethodDelete, "/api/v1/namespaces/default/pods/testpod", strings.NewReader(test.body))
++			if err != nil {
++				t.Fatalf("unexpected error: %v", err)
++			}
++			req.Header.Set("Content-Type", "application/json")
++			req.Header.Set("Accept", "*/*")
++
++			recorder := httptest.NewRecorder()
++			handler.ServeHTTP(recorder, req)
++			gotCode := recorder.Code
++			if gotCode != test.expectCode {
++				t.Fatalf("expected status %v but got %v", test.expectCode, gotCode)
++			}
++		})
++	}
++}
++
+ func TestDeleteCollectionWithNoContextDeadlineEnforced(t *testing.T) {
+ 	ctx := t.Context()
+ 	var invokedGot, hasDeadlineGot int32
+' > /tmp/test_patch.diff
+git apply /tmp/test_patch.diff 2>/dev/null || patch --fuzz=5 -p1 -i /tmp/test_patch.diff
+
+# Run tests and capture output
+go test -json -count=1 ./staging/src/k8s.io/apiserver/pkg/endpoints/handlers/... 2>&1 | tee /tmp/test_output.txt || true
+
+# Parse results: check if all FAIL_TO_PASS tests now pass
+cat > /tmp/check_f2p.py << 'PYEOF'
+import json, sys
+
+f2p = ["TestDeleteCollectionDeleteOptions", "TestDeleteResourceDeleteOptions"]
+passed = set()
+with open("/tmp/test_output.txt") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        test = event.get("Test")
+        action = event.get("Action", "")
+        if test and action == "pass":
+            passed.add(test)
+            # Also add the bare test name (no subtest suffix)
+            passed.add(test.split("/")[0])
+
+all_pass = all(
+    t in passed or t.split("/")[0] in passed
+    for t in f2p
+)
+
+if all_pass and f2p:
+    print("RESOLVED: all FAIL_TO_PASS tests now pass")
+    sys.exit(0)
+else:
+    missing = [t for t in f2p if t not in passed and t.split("/")[0] not in passed]
+    print(f"NOT RESOLVED: {len(missing)}/{len(f2p)} tests still failing: {missing}")
+    sys.exit(1)
+PYEOF
+
+python3 /tmp/check_f2p.py
+exit_code=$?
+
+# Write reward for Harbor
+mkdir -p /logs/verifier
+if [ "${exit_code}" -eq 0 ]; then
+    echo 1 > /logs/verifier/reward.txt
+else
+    echo 0 > /logs/verifier/reward.txt
+fi
+
+exit "${exit_code}"

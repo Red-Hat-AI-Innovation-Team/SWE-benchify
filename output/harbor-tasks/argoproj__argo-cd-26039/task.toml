@@ -1,0 +1,27 @@
+schema_version = "1.0"
+
+[task]
+name = "swebenchify/argoproj__argo-cd-26039"
+description = "Fix a bug in argoproj/argo-cd (go)"
+authors = [
+    { name = "Red Hat AI Innovation Team" },
+]
+keywords = ["swe-bench", "debugging", "go"]
+
+[metadata]
+difficulty = "easy"
+category = "debugging"
+repo_language = "go"
+repo = "argoproj/argo-cd"
+product = ""
+
+[verifier]
+network_mode = "public"
+timeout_sec = 3000
+
+[agent]
+network_mode = "public"
+timeout_sec = 3000
+
+[environment]
+build_timeout_sec = 1800.0

@@ -1,0 +1,13 @@
+FROM python:3.11-slim
+
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends git patch build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir pytest
+
+RUN git clone https://github.com/ansible/ansible-lint.git /testbed && \
+    cd /testbed && git checkout f07c652e32a102c0286680dc50d247cb2c9e00fb
+
+WORKDIR /testbed
+RUN mkdir -p /logs/verifier

@@ -1,0 +1,156 @@
+#!/bin/bash
+set -uo pipefail
+
+cd /testbed
+
+# Apply the test patch (restores test expectations)
+echo 'diff --git a/pkg/registry/core/service/ipallocator/controller/repairip_test.go b/pkg/registry/core/service/ipallocator/controller/repairip_test.go
+index 1e44687f02576..8a4af0b8d4a67 100644
+--- a/pkg/registry/core/service/ipallocator/controller/repairip_test.go
++++ b/pkg/registry/core/service/ipallocator/controller/repairip_test.go
+@@ -24,6 +24,7 @@ import (
+ 	"github.com/google/go-cmp/cmp"
+ 	v1 "k8s.io/api/core/v1"
+ 	networkingv1 "k8s.io/api/networking/v1"
++	apierrors "k8s.io/apimachinery/pkg/api/errors"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/runtime"
+ 	"k8s.io/apimachinery/pkg/util/wait"
+@@ -707,3 +708,83 @@ func expectEvents(t *testing.T, actual <-chan string, expected []string) {
+ 		}
+ 	}
+ }
++
++func TestRepairIPAddress_runOnce(t *testing.T) {
++	tests := []struct {
++		name          string
++		conflictCount int
++		errorType     func(string) error
++		expectedRuns  int
++		expectedErr   bool
++	}{
++		{
++			name:          "Retry on Conflict",
++			conflictCount: 2,
++			errorType: func(name string) error {
++				return apierrors.NewConflict(networkingv1.Resource("ipaddresses"), name, fmt.Errorf("conflict"))
++			},
++			expectedRuns: 3,
++			expectedErr:  false,
++		},
++		{
++			name:          "Retry on Forbidden",
++			conflictCount: 2,
++			errorType: func(name string) error {
++				return apierrors.NewForbidden(networkingv1.Resource("ipaddresses"), name, fmt.Errorf("forbidden"))
++			},
++			expectedRuns: 3,
++			expectedErr:  false,
++		},
++		{
++			name:          "No Retry on InternalError",
++			conflictCount: 1, // It will fail once and stop
++			errorType: func(name string) error {
++				return apierrors.NewInternalError(fmt.Errorf("internal error"))
++			},
++			expectedRuns: 1,
++			expectedErr:  true,
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			client, r := newFakeRepair(testTimeNow)
++			// Add a service that needs repair (missing IPAddress)
++			svc := newService("test-svc", []string{"10.0.1.1"})
++			err := r.serviceStore.Add(svc)
++			if err != nil {
++				t.Fatalf("Unexpected error adding service: %v", err)
++			}
++			r.servicesSynced = func() bool { return true }
++			r.ipAddressSynced = func() bool { return true }
++			r.serviceCIDRSynced = func() bool { return true }
++
++			// Add a default ServiceCIDR
++			cidr := newServiceCIDR("kubernetes", serviceCIDRv4, serviceCIDRv6)
++			err = r.serviceCIDRStore.Add(cidr)
++			if err != nil {
++				t.Fatalf("Unexpected error adding ServiceCIDR: %v", err)
++			}
++
++			// Track how many times create is called
++			createCalls := 0
++			client.PrependReactor("create", "ipaddresses", func(action k8stesting.Action) (bool, runtime.Object, error) {
++				createCalls++
++				if createCalls <= tt.conflictCount {
++					return true, nil, tt.errorType("10.0.1.1")
++				}
++				// Pass through to the default reactor (which creates the object)
++				return false, nil, nil
++			})
++
++			err = r.runOnce()
++			if (err != nil) != tt.expectedErr {
++				t.Errorf("runOnce() error = %v, expectedErr %v", err, tt.expectedErr)
++			}
++
++			if createCalls != tt.expectedRuns {
++				t.Errorf("Expected %d create calls, got %d", tt.expectedRuns, createCalls)
++			}
++		})
++	}
++}
+' > /tmp/test_patch.diff
+git apply /tmp/test_patch.diff 2>/dev/null || patch --fuzz=5 -p1 -i /tmp/test_patch.diff
+
+# Run tests and capture output
+go test -json -count=1 ./pkg/registry/core/service/ipallocator/controller/... 2>&1 | tee /tmp/test_output.txt || true
+
+# Parse results: check if all FAIL_TO_PASS tests now pass
+cat > /tmp/check_f2p.py << 'PYEOF'
+import json, sys
+
+f2p = ["TestRepairIPAddress_runOnce"]
+passed = set()
+with open("/tmp/test_output.txt") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        test = event.get("Test")
+        action = event.get("Action", "")
+        if test and action == "pass":
+            passed.add(test)
+            # Also add the bare test name (no subtest suffix)
+            passed.add(test.split("/")[0])
+
+all_pass = all(
+    t in passed or t.split("/")[0] in passed
+    for t in f2p
+)
+
+if all_pass and f2p:
+    print("RESOLVED: all FAIL_TO_PASS tests now pass")
+    sys.exit(0)
+else:
+    missing = [t for t in f2p if t not in passed and t.split("/")[0] not in passed]
+    print(f"NOT RESOLVED: {len(missing)}/{len(f2p)} tests still failing: {missing}")
+    sys.exit(1)
+PYEOF
+
+python3 /tmp/check_f2p.py
+exit_code=$?
+
+# Write reward for Harbor
+mkdir -p /logs/verifier
+if [ "${exit_code}" -eq 0 ]; then
+    echo 1 > /logs/verifier/reward.txt
+else
+    echo 0 > /logs/verifier/reward.txt
+fi
+
+exit "${exit_code}"

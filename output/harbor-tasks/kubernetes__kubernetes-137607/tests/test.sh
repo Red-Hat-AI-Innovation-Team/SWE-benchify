@@ -1,0 +1,213 @@
+#!/bin/bash
+set -uo pipefail
+
+cd /testbed
+
+# Apply the test patch (restores test expectations)
+echo 'diff --git a/pkg/scheduler/framework/plugins/dynamicresources/dynamicresources_test.go b/pkg/scheduler/framework/plugins/dynamicresources/dynamicresources_test.go
+index 222fbbced2173..79a00ae099426 100644
+--- a/pkg/scheduler/framework/plugins/dynamicresources/dynamicresources_test.go
++++ b/pkg/scheduler/framework/plugins/dynamicresources/dynamicresources_test.go
+@@ -2114,12 +2114,11 @@ func testPlugin(tCtx ktesting.TContext) {
+ 			want: want{
+ 				filter: perNodeResult{
+ 					workerNode.Name: {
+-						status: fwk.NewStatus(fwk.UnschedulableAndUnresolvable, `timed out trying to allocate devices`),
++						// Timeouts return Error so the pod retries via backoff.
++						status: fwk.AsStatus(fmt.Errorf("node %s: timed out trying to allocate devices", workerNode.Name)),
+ 					},
+ 				},
+-				postfilter: result{
+-					status: fwk.NewStatus(fwk.Unschedulable, `still not schedulable`),
+-				},
++				// No postfilter: Error aborts scheduling immediately.
+ 			},
+ 			// Skipping this test case on Windows as a 1ns timeout is not guaranteed to
+ 			// expire immediately on Windows due to its coarser timer granularity -
+diff --git a/test/integration/dra/core.go b/test/integration/dra/core.go
+index 6d4bacdf84944..23a48b7aeb887 100644
+--- a/test/integration/dra/core.go
++++ b/test/integration/dra/core.go
+@@ -95,23 +95,30 @@ func testConvert(tCtx ktesting.TContext) {
+ // testFilterTimeout covers the scheduler plugin'"'"'s filter timeout configuration and behavior.
+ //
+ // It runs the scheduler with non-standard settings and thus cannot run in parallel.
+-func testFilterTimeout(tCtx ktesting.TContext, devicesPerSlice int) {
++func testFilterTimeout(tCtx ktesting.TContext, requestDeviceCount int) {
+ 	namespace := createTestNamespace(tCtx, nil)
+ 	class, driverName := createTestClass(tCtx, namespace)
+-	deviceNames := make([]string, devicesPerSlice)
+-	for i := range devicesPerSlice {
++	deviceNames := make([]string, requestDeviceCount)
++	for i := range requestDeviceCount {
+ 		deviceNames[i] = fmt.Sprintf("dev-%d", i)
+ 	}
+ 	slice := st.MakeResourceSlice("worker-0", driverName).Devices(deviceNames...)
+ 	createSlice(tCtx, slice.Obj())
+-	otherSlice := st.MakeResourceSlice("worker-1", driverName).Devices(deviceNames...)
++	otherSlice := st.MakeResourceSlice("worker-1", driverName).Devices(deviceNames[:requestDeviceCount-1]...)
+ 	createdOtherSlice := createSlice(tCtx, otherSlice.Obj())
+-	claim := claim.DeepCopy()
+-	claim.Spec.Devices.Requests[0].Exactly.Count = int64(devicesPerSlice + 1) // Impossible to allocate.
+-	claim = createClaim(tCtx, namespace, "", class, claim)
++
++	// Impossible to allocate on worker-1: not enough devices, but allocation is too
++	// dumb to notice that upfront and keeps trying until it times out.
++	// On worker-0 we can allocate, but don'"'"'t schedule because of the timeout on worker-1.
++	newClaim := func(suffix string) *resourceapi.ResourceClaim {
++		c := claim.DeepCopy()
++		c.Spec.Devices.Requests[0].Exactly.Count = int64(requestDeviceCount)
++		return createClaim(tCtx, namespace, suffix, class, c)
++	}
+ 
+ 	runSubTest(tCtx, "disabled", func(tCtx ktesting.TContext) {
+-		pod := createPod(tCtx, namespace, "", podWithClaimName, claim)
++		cl := newClaim("-disabled")
++		pod := createPod(tCtx, namespace, "-disabled", podWithClaimName, cl)
+ 		startSchedulerWithConfig(tCtx, `
+ profiles:
+ - schedulerName: default-scheduler
+@@ -120,11 +127,14 @@ profiles:
+     args:
+       filterTimeout: 0s
+ `)
+-		expectPodUnschedulable(tCtx, pod, "cannot allocate all claims")
++		// Without a timeout, the allocator runs to completion on both nodes.
++		// worker-0 has enough devices and succeeds, so the pod gets scheduled.
++		tCtx.ExpectNoError(e2epod.WaitForPodScheduled(tCtx, tCtx.Client(), namespace, pod.Name))
+ 	})
+ 
+ 	runSubTest(tCtx, "enabled", func(tCtx ktesting.TContext) {
+-		pod := createPod(tCtx, namespace, "", podWithClaimName, claim)
++		cl := newClaim("-enabled")
++		pod := createPod(tCtx, namespace, "-enabled", podWithClaimName, cl)
+ 		startSchedulerWithConfig(tCtx, `
+ profiles:
+ - schedulerName: default-scheduler
+@@ -133,12 +143,13 @@ profiles:
+     args:
+       filterTimeout: 10ms
+ `)
+-		expectPodUnschedulable(tCtx, pod, "timed out trying to allocate devices")
++		expectPodSchedulerError(tCtx, pod, "timed out trying to allocate devices")
+ 
+-		// Update one slice such that allocation succeeds.
+-		// The scheduler must retry and should succeed now.
++		// Update the smaller slice such that allocation also succeeds.
++		// The scheduler retries automatically (timeouts go through
++		// backoff queue, not unschedulable pool) and should succeed now.
+ 		createdOtherSlice.Spec.Devices = append(createdOtherSlice.Spec.Devices, resourceapi.Device{
+-			Name: fmt.Sprintf("dev-%d", devicesPerSlice),
++			Name: deviceNames[requestDeviceCount-1],
+ 		})
+ 		_, err := tCtx.Client().ResourceV1().ResourceSlices().Update(tCtx, createdOtherSlice, metav1.UpdateOptions{})
+ 		tCtx.ExpectNoError(err, "update worker-1'"'"'s ResourceSlice")
+diff --git a/test/integration/dra/dra.go b/test/integration/dra/dra.go
+index 35ce2cc6daf2c..0fb153a387bca 100644
+--- a/test/integration/dra/dra.go
++++ b/test/integration/dra/dra.go
+@@ -133,7 +133,7 @@ func run(tCtx ktesting.TContext, whatRE string) {
+ 				runSubTest(tCtx, "EvictClusterWithSlices", func(tCtx ktesting.TContext) { testEvictCluster(tCtx, useNoRule) })
+ 				// Number of devices per slice is chosen so that Filter takes a few seconds:
+ 				// without a timeout, the test doesn'"'"'t run too long, but long enough that a short timeout triggers.
+-				runSubTest(tCtx, "FilterTimeout", func(tCtx ktesting.TContext) { testFilterTimeout(tCtx, 20) })
++				runSubTest(tCtx, "FilterTimeout", func(tCtx ktesting.TContext) { testFilterTimeout(tCtx, 21) })
+ 				runSubTest(tCtx, "UsesAllResources", testUsesAllResources)
+ 			},
+ 		},
+@@ -243,7 +243,7 @@ func run(tCtx ktesting.TContext, whatRE string) {
+ 				// Number of devices per slice is chosen so that Filter takes a few seconds: The allocator
+ 				// in the experimental channel has an improvement that requires a higher number here than
+ 				// in the incubating and stable channels.
+-				runSubTest(tCtx, "FilterTimeout", func(tCtx ktesting.TContext) { testFilterTimeout(tCtx, 20) })
++				runSubTest(tCtx, "FilterTimeout", func(tCtx ktesting.TContext) { testFilterTimeout(tCtx, 21) })
+ 				runSubTest(tCtx, "ShareResourceClaimSequentially", testShareResourceClaimSequentially)
+ 				runSubTest(tCtx, "UsesAllResources", testUsesAllResources)
+ 			},
+diff --git a/test/integration/dra/helpers.go b/test/integration/dra/helpers.go
+index b52e6c10addf1..96f6967fe334c 100644
+--- a/test/integration/dra/helpers.go
++++ b/test/integration/dra/helpers.go
+@@ -272,17 +272,18 @@ func waitForClaimAllocatedToDevice(tCtx ktesting.TContext, namespace, claimName
+ 	)
+ }
+ 
+-func expectPodUnschedulable(tCtx ktesting.TContext, pod *v1.Pod, reason string) {
++func expectPodSchedulerError(tCtx ktesting.TContext, pod *v1.Pod, reason string) {
+ 	tCtx.Helper()
+-	tCtx.ExpectNoError(e2epod.WaitForPodNameUnschedulableInNamespace(tCtx, tCtx.Client(), pod.Name, pod.Namespace), fmt.Sprintf("expected pod to be unschedulable because %q", reason))
+-	pod, err := tCtx.Client().CoreV1().Pods(pod.Namespace).Get(tCtx, pod.Name, metav1.GetOptions{})
+-	tCtx.ExpectNoError(err)
+-	gomega.NewWithT(tCtx).Expect(pod).To(gomega.HaveField("Status.Conditions", gomega.ContainElement(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+-		"Type":    gomega.Equal(v1.PodScheduled),
+-		"Status":  gomega.Equal(v1.ConditionFalse),
+-		"Reason":  gomega.Equal(v1.PodReasonUnschedulable),
+-		"Message": gomega.ContainSubstring(reason),
+-	}))))
++	tCtx.ExpectNoError(e2epod.WaitForPodCondition(tCtx, tCtx.Client(), pod.Namespace, pod.Name, v1.PodReasonSchedulerError, time.Minute, func(pod *v1.Pod) (bool, error) {
++		if pod.Status.Phase == v1.PodPending {
++			for _, cond := range pod.Status.Conditions {
++				if cond.Type == v1.PodScheduled && cond.Status == v1.ConditionFalse && cond.Reason == v1.PodReasonSchedulerError && strings.Contains(cond.Message, reason) {
++					return true, nil
++				}
++			}
++		}
++		return false, nil
++	}), fmt.Sprintf("expected pod to have scheduler error because %q", reason))
+ }
+ 
+ type nodeInfo struct {
+' > /tmp/test_patch.diff
+git apply /tmp/test_patch.diff 2>/dev/null || patch --fuzz=5 -p1 -i /tmp/test_patch.diff
+
+# Run tests and capture output
+go test -json -count=1 ./pkg/scheduler/framework/plugins/dynamicresources/... ./test/integration/dra/... 2>&1 | tee /tmp/test_output.txt || true
+
+# Parse results: check if all FAIL_TO_PASS tests now pass
+cat > /tmp/check_f2p.py << 'PYEOF'
+import json, sys
+
+f2p = ["TestPlugin"]
+passed = set()
+with open("/tmp/test_output.txt") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        test = event.get("Test")
+        action = event.get("Action", "")
+        if test and action == "pass":
+            passed.add(test)
+            # Also add the bare test name (no subtest suffix)
+            passed.add(test.split("/")[0])
+
+all_pass = all(
+    t in passed or t.split("/")[0] in passed
+    for t in f2p
+)
+
+if all_pass and f2p:
+    print("RESOLVED: all FAIL_TO_PASS tests now pass")
+    sys.exit(0)
+else:
+    missing = [t for t in f2p if t not in passed and t.split("/")[0] not in passed]
+    print(f"NOT RESOLVED: {len(missing)}/{len(f2p)} tests still failing: {missing}")
+    sys.exit(1)
+PYEOF
+
+python3 /tmp/check_f2p.py
+exit_code=$?
+
+# Write reward for Harbor
+mkdir -p /logs/verifier
+if [ "${exit_code}" -eq 0 ]; then
+    echo 1 > /logs/verifier/reward.txt
+else
+    echo 0 > /logs/verifier/reward.txt
+fi
+
+exit "${exit_code}"
