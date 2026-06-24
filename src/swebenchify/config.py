@@ -6,12 +6,15 @@ values. See SPEC.md Section 6 for the configuration schema.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -222,18 +225,22 @@ def load_config(path: str) -> Config:
         ValueError: If required fields are missing or invalid.
     """
     config_path = Path(path)
+    logger.info("Loading config from %s", config_path)
     if not config_path.exists():
+        logger.error("Config file not found: %s", path)
         raise FileNotFoundError(f"Config file not found: {path}")
 
     with open(config_path) as f:
         raw = yaml.safe_load(f)
 
     if not isinstance(raw, dict):
+        logger.error("Config file must contain a YAML mapping")
         raise ValueError("Config file must contain a YAML mapping")
 
     # Validate required fields
     repos = raw.get("repos")
     if not repos or not isinstance(repos, list) or len(repos) == 0:
+        logger.error("'repos' is required and must be a non-empty list")
         raise ValueError("'repos' is required and must be a non-empty list")
 
     # Resolve GitHub tokens
@@ -245,6 +252,13 @@ def load_config(path: str) -> Config:
         resolved = _resolve_env_var(token_val)
         if resolved is not None:
             github_tokens[repo_name] = str(resolved)
+
+    repos_with_tokens = sorted(github_tokens.keys())
+    logger.debug(
+        "Token resolution: global_token=%s, per_repo_tokens=%s",
+        "set" if github_token else "unset",
+        repos_with_tokens or "none",
+    )
 
     cfg = Config(
         repos=repos,
@@ -260,6 +274,7 @@ def load_config(path: str) -> Config:
     )
 
     if not cfg.github_token and not cfg.github_tokens:
+        logger.error("No GitHub token configured")
         raise ValueError(
             "No GitHub token configured. Set github.token or github.tokens "
             "in config, or $GITHUB_TOKEN env var."
@@ -268,6 +283,8 @@ def load_config(path: str) -> Config:
     output_path = Path(cfg.output.dir)
     output_path.mkdir(parents=True, exist_ok=True)
     if not os.access(str(output_path), os.W_OK):
+        logger.error("Output directory is not writable: %s", cfg.output.dir)
         raise ValueError(f"Output directory is not writable: {cfg.output.dir}")
 
+    logger.info("Config loaded: %d repos=%s", len(repos), repos)
     return cfg

@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -152,6 +155,15 @@ class ValidationResult:
     flake_count: int = 0             # number of tests quarantined as flaky
     quarantined_tests: list[str] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        f2p_count = len(self.FAIL_TO_PASS)
+        if self.status == "valid":
+            logger.info("ValidationResult: status=%s f2p=%d", self.status, f2p_count)
+        elif self.status == "error":
+            logger.error("ValidationResult: status=error error=%s", self.error_message)
+        else:
+            logger.debug("ValidationResult: status=%s f2p=%d", self.status, f2p_count)
+
 
 @dataclass
 class TaskInstance:
@@ -188,6 +200,9 @@ class TaskInstance:
     # Decontamination overlap flag (computed at emit time, issue #43)
     decontamination_overlap: bool = False
     decontamination_overlap_source: str | None = None  # "swe-bench" | "rh-swe-bench"
+
+    def __post_init__(self) -> None:
+        logger.debug("TaskInstance created: instance_id=%s repo=%s", self.instance_id, self.repo)
 
 
 @dataclass
