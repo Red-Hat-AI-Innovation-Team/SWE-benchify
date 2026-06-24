@@ -1,11 +1,7 @@
 FROM golang:1.25.6
 
 RUN apt-get update -qq && \
-    apt-get install -y --no-install-recommends git patch && \
-    rm -rf /var/lib/apt/lists/*
-
-RUN apt-get update -qq && \
-    apt-get install -y --no-install-recommends gawk libassuan-dev libbtrfs-dev libgpgme-dev libseccomp-dev libsystemd-dev libclone-perl man-db pandoc python3-pip && \
+    apt-get install -y --no-install-recommends git patch gawk libassuan-dev libbtrfs-dev libgpgme-dev libseccomp-dev libsystemd-dev libclone-perl man-db pandoc python3-pip && \
     rm -rf /var/lib/apt/lists/*
 ENV GOFLAGS="-mod=vendor"
 

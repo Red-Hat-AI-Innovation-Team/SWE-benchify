@@ -1,11 +1,7 @@
 FROM golang:1.26.3
 
 RUN apt-get update -qq && \
-    apt-get install -y --no-install-recommends git patch && \
-    rm -rf /var/lib/apt/lists/*
-
-RUN apt-get update -qq && \
-    apt-get install -y --no-install-recommends git make gcc openssh-server openssh-client nginx unzip zip fcgiwrap wget sudo tini ca-certificates gpg gpg-agent tzdata connect-proxy shellcheck && \
+    apt-get install -y --no-install-recommends git patch make gcc openssh-server openssh-client nginx unzip zip fcgiwrap wget sudo tini ca-certificates gpg gpg-agent tzdata connect-proxy shellcheck && \
     rm -rf /var/lib/apt/lists/*
 
 RUN git clone https://github.com/argoproj/argo-cd.git /testbed && \
