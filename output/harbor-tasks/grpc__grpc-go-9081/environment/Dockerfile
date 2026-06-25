@@ -5,7 +5,7 @@ RUN apt-get update -qq && \
     rm -rf /var/lib/apt/lists/*
 
 RUN git clone https://github.com/grpc/grpc-go.git /testbed && \
-    cd /testbed && git checkout a481b8f755bccf5c0308f1530e785bb58a770150
+    cd /testbed && git checkout -b main a481b8f755bccf5c0308f1530e785bb58a770150
 
 WORKDIR /testbed
 RUN mkdir -p /logs/verifier /logs/agent
