@@ -20,6 +20,7 @@ from swebenchify.models import (
     AnyEnvironmentSpec,
     CandidateInstance,
     GoEnvironmentSpec,
+    RustEnvironmentSpec,
     Repository,
     ValidationResult,
 )
@@ -94,6 +95,27 @@ async def _validate_go_docker(
     )
 
 
+async def _validate_rust_docker(
+    candidate: CandidateInstance,
+    env_spec: RustEnvironmentSpec,
+    timeout: int = 600,
+    n_runs: int = 1,
+) -> ValidationResult:
+    """Validate a Rust instance using deterministic Docker execution."""
+    from swebenchify.rust_grader import compute_rust_f2p
+
+    return await asyncio.to_thread(
+        compute_rust_f2p,
+        repo=candidate.repo,
+        base_commit=candidate.base_commit,
+        test_patch=candidate.test_patch or "",
+        gold_patch=candidate.patch or "",
+        env_spec=env_spec,
+        timeout=timeout,
+        n_runs=n_runs,
+    )
+
+
 async def _run_once(
     candidate: CandidateInstance,
     env_spec: AnyEnvironmentSpec,
@@ -136,10 +158,20 @@ async def validate_instance(
     Python repos use the original agent-based approach.
     """
     is_go = isinstance(env_spec, GoEnvironmentSpec)
+    is_rust = isinstance(env_spec, RustEnvironmentSpec)
 
     # Go: deterministic Docker path (handles quarantine internally)
     if is_go:
         return await _validate_go_docker(
+            candidate=candidate,
+            env_spec=env_spec,
+            timeout=timeout,
+            n_runs=n_runs,
+        )
+
+    # Rust: deterministic Docker path (handles quarantine internally)
+    if is_rust:
+        return await _validate_rust_docker(
             candidate=candidate,
             env_spec=env_spec,
             timeout=timeout,

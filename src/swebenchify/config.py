@@ -51,6 +51,8 @@ class PipelineConfig:
     pr_before: str | None = None
     go_n_runs: int = 3  # number of validation runs for Go flake quarantine
     go_validation_timeout: int = 300  # seconds per test run phase in Docker
+    rust_n_runs: int = 3
+    rust_validation_timeout: int = 600
 
 
 @dataclass
@@ -88,6 +90,7 @@ class Config:
     filters: FilterConfig = field(default_factory=FilterConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     go_repos: list[str] = field(default_factory=list)
+    rust_repos: list[str] = field(default_factory=list)
     rh_jira_projects: list[str] = field(default_factory=lambda: ["STOR", "MGMT"])
     decontam_reference_paths: list[str] = field(default_factory=list)
 
@@ -160,6 +163,10 @@ def _build_pipeline_config(data: dict | None) -> PipelineConfig:
         go_n_runs=data.get("go_n_runs", PipelineConfig.go_n_runs),
         go_validation_timeout=data.get(
             "go_validation_timeout", PipelineConfig.go_validation_timeout
+        ),
+        rust_n_runs=data.get("rust_n_runs", PipelineConfig.rust_n_runs),
+        rust_validation_timeout=data.get(
+            "rust_validation_timeout", PipelineConfig.rust_validation_timeout
         ),
     )
 
@@ -255,6 +262,7 @@ def load_config(path: str) -> Config:
         filters=_build_filter_config(raw.get("filters")),
         output=_build_output_config(raw.get("output")),
         go_repos=raw.get("go_repos", []) or [],
+        rust_repos=raw.get("rust_repos", []) or [],
         rh_jira_projects=raw.get("rh_jira_projects", ["STOR", "MGMT"]) or ["STOR", "MGMT"],
         decontam_reference_paths=raw.get("decontam_reference_paths", []) or [],
     )
