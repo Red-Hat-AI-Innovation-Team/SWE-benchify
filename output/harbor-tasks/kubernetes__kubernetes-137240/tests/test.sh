@@ -404,57 +404,9 @@ def parse_pytest_verbose(text):
             results[test_id] = status
     return results
 
-def parse_junit_xml(text):
-    # Minimal XML parser for JUnit format (no lxml dependency)
-    results = {}
-    for m in re.finditer(r'<testcase[^>]*name="([^"]*)"[^>]*classname="([^"]*)"[^>]*(/?>)', text):
-        name, classname, close = m.groups()
-        test_id = f"{classname}.{name}"
-        # Check for failure/error child elements
-        if close == "/>":
-            results[test_id] = "passed"
-        else:
-            # Find the matching </testcase> and check contents
-            start = m.end()
-            end = text.find("</testcase>", start)
-            block = text[start:end] if end != -1 else ""
-            if "<failure" in block or "<error" in block:
-                results[test_id] = "failed"
-            elif "<skipped" in block:
-                results[test_id] = "skipped"
-            else:
-                results[test_id] = "passed"
-    return results
-
-def parse_cargo_test(text):
-    results = {}
-    for line in text.splitlines():
-        m = re.match(r"test (\S+) \.\.\. (ok|FAILED|ignored)", line)
-        if m:
-            test_id = m.group(1)
-            status = {"ok": "passed", "FAILED": "failed", "ignored": "skipped"}[m.group(2)]
-            results[test_id] = status
-    return results
-
-def parse_tap(text):
-    results = {}
-    for line in text.splitlines():
-        m = re.match(r"(ok|not ok)\s+\d+\s*-?\s*(.*)", line)
-        if m:
-            status = "passed" if m.group(1) == "ok" else "failed"
-            desc = m.group(2).strip()
-            if "# SKIP" in desc:
-                status = "skipped"
-                desc = desc.split("# SKIP")[0].strip()
-            results[desc] = status
-    return results
-
 PARSERS = {
     "go-json": parse_go_json,
     "pytest-verbose": parse_pytest_verbose,
-    "junit-xml": parse_junit_xml,
-    "cargo-test": parse_cargo_test,
-    "tap": parse_tap,
 }
 
 with open("/tmp/test_output.txt") as f:

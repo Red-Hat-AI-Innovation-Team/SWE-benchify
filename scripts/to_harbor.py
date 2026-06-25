@@ -34,8 +34,6 @@ from textwrap import dedent
 _DEFAULT_BASE_IMAGES: dict[str, str] = {
     "go": "golang:{version}",
     "python": "python:{version}-slim",
-    "rust": "rust:{version}",
-    "java": "eclipse-temurin:{version}",
 }
 
 # Packages that are always installed (git, patch needed for every language).
@@ -45,16 +43,12 @@ _CORE_SYSTEM_DEPS = ["git", "patch"]
 _DEFAULT_TEST_CMDS: dict[str, str] = {
     "go": "go test -json -count=1 {test_scope}",
     "python": "python -m pytest -xvs {test_scope}",
-    "rust": "cargo test {test_scope}",
-    "java": "mvn test",
 }
 
 # Test output format implied by language (used by the embedded F2P checker).
 _DEFAULT_TEST_OUTPUT_FORMATS: dict[str, str] = {
     "go": "go-json",
     "python": "pytest-verbose",
-    "rust": "cargo-test",
-    "java": "junit-xml",
 }
 
 
@@ -77,101 +71,81 @@ class EnvironmentConfig:
     install_cmd: str = ""  # e.g. "pip install -e ." or ""
     extra_packages: list[str] = field(default_factory=list)  # pip packages, etc.
     test_cmd: str = ""  # e.g. "go test -json -count=1 ./..."
-    test_output_format: str = ""  # "go-json", "pytest-verbose", "junit-xml", etc.
+    test_output_format: str = ""  # "go-json", "pytest-verbose"
     build_cmd: str = ""  # optional pre-test build step
+
+
+def _spec_val(spec: dict | None, *keys: str, default=""):
+    """Return the first truthy value from *spec* for the given keys, or *default*."""
+    if not spec:
+        return default
+    for k in keys:
+        v = spec.get(k)
+        if v:
+            return v
+    return default
+
+
+def _spec_list(spec: dict | None, *keys: str) -> list:
+    """Return the first non-empty list from *spec* for the given keys."""
+    if not spec:
+        return []
+    for k in keys:
+        v = spec.get(k)
+        if v:
+            return list(v)
+    return []
 
 
 def build_env_config(
     inst: dict,
     spec: dict | None,
 ) -> EnvironmentConfig:
-    """Build an EnvironmentConfig from an env spec file and instance metadata.
-
-    Resolution order for each field:
-      1. Explicit value in the env spec file
-      2. Derived from instance metadata
-      3. Language default
-    """
+    """Build an EnvironmentConfig from an env spec file and instance metadata."""
     lang = inst.get("repo_language", "python").lower()
 
-    # -- language version --
-    if spec:
-        # Go specs use "go_version"; generic specs use "language_version"
-        lang_ver = spec.get("language_version") or spec.get("go_version", "")
-    else:
-        lang_ver = ""
-
+    # Language version: spec → instance metadata → hardcoded default
+    lang_ver = _spec_val(spec, "language_version", "go_version")
     if not lang_ver:
-        # Derive from instance version field.  For Go, the version string
-        # encodes the toolchain version (e.g. "1.26-7295ef7d").  For other
-        # languages, the version field is the *project* version (e.g.
-        # ansible "2.11"), NOT the runtime version — do not use it.
         raw_ver = inst.get("version", "")
         if lang == "go" and raw_ver:
             lang_ver = raw_ver.split("-")[0]
         else:
-            lang_ver = {"go": "1.22", "python": "3.11", "rust": "1.78", "java": "21"}.get(lang, "latest")
+            lang_ver = {"go": "1.22", "python": "3.11"}.get(lang, "latest")
 
-    # -- base image --
-    if spec and spec.get("base_image"):
-        base_image = spec["base_image"]
-    else:
+    # Base image
+    base_image = _spec_val(spec, "base_image")
+    if not base_image:
         pattern = _DEFAULT_BASE_IMAGES.get(lang, f"{lang}:{'{version}'}")
         base_image = pattern.format(version=lang_ver)
 
-    # -- system dependencies --
-    sys_deps = list(spec.get("system_dependencies", [])) if spec else []
-
-    # -- env vars (subsumes goflags) --
+    # Env vars (subsumes goflags)
     env_vars: dict[str, str] = dict(spec.get("env_vars", {})) if spec else {}
     if spec and spec.get("goflags") and "GOFLAGS" not in env_vars:
         env_vars["GOFLAGS"] = spec["goflags"]
 
-    # -- pre_install --
-    pre_install = list(spec.get("pre_install", [])) if spec else []
-
-    # -- install_cmd --
-    if spec and spec.get("install_cmd"):
-        install_cmd = spec["install_cmd"]
-    elif lang == "python":
+    # Install command
+    install_cmd = _spec_val(spec, "install_cmd")
+    if not install_cmd and lang == "python":
         install_cmd = "pip install -e . 2>/dev/null || pip install . 2>/dev/null || true"
-    else:
-        install_cmd = ""
 
-    # -- extra_packages (pip packages, etc.) --
-    extra_packages = list(spec.get("extra_packages", spec.get("pip_packages", []))) if spec else []
+    # Extra packages
+    extra_packages = _spec_list(spec, "extra_packages", "pip_packages")
     if lang == "python" and "pytest" not in " ".join(extra_packages):
         extra_packages = ["pytest"] + extra_packages
-
-    # -- test output format --
-    test_output_format = ""
-    if spec and spec.get("test_output_format"):
-        test_output_format = spec["test_output_format"]
-    if not test_output_format:
-        test_output_format = _DEFAULT_TEST_OUTPUT_FORMATS.get(lang, "pytest-verbose")
-
-    # -- test_cmd --
-    test_cmd = ""
-    if spec and spec.get("test_cmd"):
-        test_cmd = spec["test_cmd"]
-    if not test_cmd:
-        test_cmd = _DEFAULT_TEST_CMDS.get(lang, "")
-
-    # -- build_cmd --
-    build_cmd = spec.get("build_cmd", "") if spec else ""
 
     return EnvironmentConfig(
         language=lang,
         language_version=lang_ver,
         base_image=base_image,
-        system_dependencies=sys_deps,
+        system_dependencies=_spec_list(spec, "system_dependencies"),
         env_vars=env_vars,
-        pre_install=pre_install,
+        pre_install=_spec_list(spec, "pre_install"),
         install_cmd=install_cmd,
         extra_packages=extra_packages,
-        test_cmd=test_cmd,
-        test_output_format=test_output_format,
-        build_cmd=build_cmd,
+        test_cmd=_spec_val(spec, "test_cmd") or _DEFAULT_TEST_CMDS.get(lang, ""),
+        test_output_format=_spec_val(spec, "test_output_format") or _DEFAULT_TEST_OUTPUT_FORMATS.get(lang, "pytest-verbose"),
+        build_cmd=_spec_val(spec, "build_cmd"),
     )
 
 
@@ -396,7 +370,7 @@ def gen_test_sh(inst: dict, env: EnvironmentConfig) -> str:
 
     Works for any language.  The test command and output format come from
     the EnvironmentConfig; the embedded Python F2P checker handles
-    go-json, pytest-verbose, junit-xml, cargo-test, and tap formats.
+    go-json and pytest-verbose formats.
     """
     test_patch = inst.get("test_patch", "")
     f2p = decode_f2p(inst.get("FAIL_TO_PASS", "[]"))
@@ -465,57 +439,9 @@ def parse_pytest_verbose(text):
             results[test_id] = status
     return results
 
-def parse_junit_xml(text):
-    # Minimal XML parser for JUnit format (no lxml dependency)
-    results = {{}}
-    for m in re.finditer(r'<testcase[^>]*name="([^"]*)"[^>]*classname="([^"]*)"[^>]*(/?>)', text):
-        name, classname, close = m.groups()
-        test_id = f"{{classname}}.{{name}}"
-        # Check for failure/error child elements
-        if close == "/>":
-            results[test_id] = "passed"
-        else:
-            # Find the matching </testcase> and check contents
-            start = m.end()
-            end = text.find("</testcase>", start)
-            block = text[start:end] if end != -1 else ""
-            if "<failure" in block or "<error" in block:
-                results[test_id] = "failed"
-            elif "<skipped" in block:
-                results[test_id] = "skipped"
-            else:
-                results[test_id] = "passed"
-    return results
-
-def parse_cargo_test(text):
-    results = {{}}
-    for line in text.splitlines():
-        m = re.match(r"test (\\S+) \\.\\.\\. (ok|FAILED|ignored)", line)
-        if m:
-            test_id = m.group(1)
-            status = {{"ok": "passed", "FAILED": "failed", "ignored": "skipped"}}[m.group(2)]
-            results[test_id] = status
-    return results
-
-def parse_tap(text):
-    results = {{}}
-    for line in text.splitlines():
-        m = re.match(r"(ok|not ok)\\s+\\d+\\s*-?\\s*(.*)", line)
-        if m:
-            status = "passed" if m.group(1) == "ok" else "failed"
-            desc = m.group(2).strip()
-            if "# SKIP" in desc:
-                status = "skipped"
-                desc = desc.split("# SKIP")[0].strip()
-            results[desc] = status
-    return results
-
 PARSERS = {{
     "go-json": parse_go_json,
     "pytest-verbose": parse_pytest_verbose,
-    "junit-xml": parse_junit_xml,
-    "cargo-test": parse_cargo_test,
-    "tap": parse_tap,
 }}
 
 with open("/tmp/test_output.txt") as f:
