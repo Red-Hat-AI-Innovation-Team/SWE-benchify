@@ -17,7 +17,9 @@ from dataclasses import asdict
 from pathlib import Path
 
 from swebenchify.models import (
+    AnyEnvironmentSpec,
     CandidateInstance,
+    EnvironmentSpec,
     GoEnvironmentSpec,
     TaskInstance,
     ValidationResult,
@@ -35,7 +37,7 @@ MAX_POLL_DURATION = 7200
 
 def export_manifest(
     candidates: list[CandidateInstance],
-    env_spec: GoEnvironmentSpec | None,
+    env_spec: AnyEnvironmentSpec | None,
     output_path: Path,
 ) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -50,6 +52,7 @@ def export_manifest(
                 "base_commit": c.base_commit,
                 "test_patch": c.test_patch,
                 "gold_patch": c.patch,
+                "language": env_spec.language if env_spec else None,
                 "env_spec": asdict(env_spec) if env_spec else None,
             }
             f.write(json.dumps(entry) + "\n")
@@ -249,7 +252,7 @@ def cleanup(batch_id: str) -> None:
 
 def _split_batches(
     candidates: list[CandidateInstance],
-    env_spec: GoEnvironmentSpec | None,
+    env_spec: AnyEnvironmentSpec | None,
 ) -> list[list[CandidateInstance]]:
     """Split candidates into batches that fit under GitHub's 100MB file limit."""
     max_bytes = MAX_MANIFEST_MB * 1024 * 1024
@@ -281,7 +284,7 @@ def _split_batches(
 
 def remote_validate(
     candidates: list[CandidateInstance],
-    env_spec: GoEnvironmentSpec | None,
+    env_spec: AnyEnvironmentSpec | None,
     *,
     n_runs: int = 1,
     timeout: int = 300,
@@ -340,7 +343,7 @@ def remote_validate(
 def build_task_instances(
     candidates: list[CandidateInstance],
     results: dict[str, ValidationResult],
-    env_spec: GoEnvironmentSpec | None,
+    env_spec: AnyEnvironmentSpec | None,
 ) -> list[TaskInstance]:
     """Build TaskInstance objects from validated candidates.
 
@@ -354,13 +357,15 @@ def build_task_instances(
     except ImportError:
         PatchSet = None
 
-    spec_hash = env_spec.env_spec_hash if isinstance(env_spec, GoEnvironmentSpec) else None
+    spec_hash = (env_spec.env_spec_hash or None) if env_spec else None
     repo_language = env_spec.language if env_spec else None
 
+    lang_ver = None
     if isinstance(env_spec, GoEnvironmentSpec) and env_spec.go_version:
-        version = f"{env_spec.go_version}-{spec_hash[:8]}" if spec_hash else env_spec.go_version
-    else:
-        version = "unknown"
+        lang_ver = env_spec.go_version
+    elif isinstance(env_spec, EnvironmentSpec) and env_spec.language_version:
+        lang_ver = env_spec.language_version
+    version = f"{lang_ver}-{spec_hash[:8]}" if lang_ver and spec_hash else (lang_ver or "unknown")
 
     instances: list[TaskInstance] = []
     for candidate in candidates:

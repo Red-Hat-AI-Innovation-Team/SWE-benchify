@@ -51,6 +51,8 @@ class PipelineConfig:
     pr_before: str | None = None
     go_n_runs: int = 3  # number of validation runs for Go flake quarantine
     go_validation_timeout: int = 300  # seconds per test run phase in Docker
+    python_n_runs: int = 1  # number of validation runs for Python flake quarantine
+    python_validation_timeout: int = 600  # seconds per test run phase for Python Docker
 
 
 @dataclass
@@ -77,6 +79,14 @@ class OutputConfig:
 
 
 @dataclass
+class DockerConfig:
+    """Configuration for Docker image registry publishing."""
+
+    registry: str = ""
+    push_images: bool = False
+
+
+@dataclass
 class Config:
     """Top-level configuration for SWE-benchify."""
 
@@ -87,6 +97,7 @@ class Config:
     agent: AgentConfig = field(default_factory=AgentConfig)
     filters: FilterConfig = field(default_factory=FilterConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
+    docker: DockerConfig = field(default_factory=DockerConfig)
     go_repos: list[str] = field(default_factory=list)
     rh_jira_projects: list[str] = field(default_factory=lambda: ["STOR", "MGMT"])
     decontam_reference_paths: list[str] = field(default_factory=list)
@@ -161,6 +172,10 @@ def _build_pipeline_config(data: dict | None) -> PipelineConfig:
         go_validation_timeout=data.get(
             "go_validation_timeout", PipelineConfig.go_validation_timeout
         ),
+        python_n_runs=data.get("python_n_runs", PipelineConfig.python_n_runs),
+        python_validation_timeout=data.get(
+            "python_validation_timeout", PipelineConfig.python_validation_timeout
+        ),
     )
 
 
@@ -203,6 +218,15 @@ def _build_output_config(data: dict | None) -> OutputConfig:
         dir=data.get("dir", OutputConfig.dir),
         upload_to_hf=data.get("upload_to_hf", OutputConfig.upload_to_hf),
         hf_repo=data.get("hf_repo"),
+    )
+
+
+def _build_docker_config(data: dict | None) -> DockerConfig:
+    if data is None:
+        return DockerConfig()
+    return DockerConfig(
+        registry=data.get("registry", DockerConfig.registry),
+        push_images=data.get("push_images", DockerConfig.push_images),
     )
 
 
@@ -254,6 +278,7 @@ def load_config(path: str) -> Config:
         agent=_build_agent_config(raw.get("agent")),
         filters=_build_filter_config(raw.get("filters")),
         output=_build_output_config(raw.get("output")),
+        docker=_build_docker_config(raw.get("docker")),
         go_repos=raw.get("go_repos", []) or [],
         rh_jira_projects=raw.get("rh_jira_projects", ["STOR", "MGMT"]) or ["STOR", "MGMT"],
         decontam_reference_paths=raw.get("decontam_reference_paths", []) or [],

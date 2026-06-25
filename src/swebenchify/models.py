@@ -82,6 +82,7 @@ class EnvironmentSpec:
     pre_install: list[str] = field(default_factory=list)
     pip_packages: list[str] = field(default_factory=list)
     system_dependencies: list[str] = field(default_factory=list)
+    env_spec_hash: str = ""        # populated by compute_python_env_spec_hash()
 
 
 @dataclass
@@ -124,8 +125,40 @@ def compute_env_spec_hash(spec: GoEnvironmentSpec) -> str:
     return hashlib.sha256(serialised.encode()).hexdigest()
 
 
+def compute_python_env_spec_hash(spec: EnvironmentSpec) -> str:
+    """Return a stable SHA-256 hex digest of an EnvironmentSpec."""
+    payload = {
+        "language": spec.language,
+        "language_version": spec.language_version,
+        "package_manager": spec.package_manager,
+        "install_cmd": spec.install_cmd,
+        "test_cmd": spec.test_cmd,
+        "pre_install": sorted(spec.pre_install),
+        "pip_packages": sorted(spec.pip_packages),
+        "system_dependencies": sorted(spec.system_dependencies),
+    }
+    serialised = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialised.encode()).hexdigest()
+
+
 # Type alias used by pipeline code that accepts either language's spec.
 AnyEnvironmentSpec = EnvironmentSpec | GoEnvironmentSpec
+
+
+def deserialize_env_spec(data: dict) -> AnyEnvironmentSpec:
+    """Reconstruct an EnvironmentSpec or GoEnvironmentSpec from a dict.
+
+    Routes on the ``language`` field to pick the correct dataclass.
+    Unknown fields are silently dropped; missing required fields default
+    to empty strings.
+    """
+    language = data.get("language", "")
+    if language == "go" or not language:
+        valid = {k: v for k, v in data.items() if k in GoEnvironmentSpec.__dataclass_fields__}
+        return GoEnvironmentSpec(**valid)
+    required_defaults = {k: "" for k in ("language", "language_version", "package_manager", "install_cmd", "test_cmd")}
+    valid = {**required_defaults, **{k: v for k, v in data.items() if k in EnvironmentSpec.__dataclass_fields__}}
+    return EnvironmentSpec(**valid)
 
 
 @dataclass

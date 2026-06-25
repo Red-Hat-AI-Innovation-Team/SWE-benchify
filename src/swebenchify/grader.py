@@ -29,7 +29,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from swebenchify.models import GoEnvironmentSpec, ValidationResult
+from swebenchify.backends import get_backend
+from swebenchify.models import AnyEnvironmentSpec, EnvironmentSpec, GoEnvironmentSpec, ValidationResult
 from swebenchify.parsers import GoJSONParser, normalize_go_f2p, normalize_go_test_id
 
 __version__ = "1.0.0"
@@ -333,42 +334,13 @@ def _compute_f2p_p2p(
     return fail_to_pass, pass_to_pass
 
 
-def _make_f2p_dockerfile(
-    go_image: str,
-    repo: str,
-    base_commit: str,
-    env_spec: GoEnvironmentSpec | None = None,
+def _make_f2p_run_script_generic(
+    test_cmd: str,
+    test_scope: str,
+    failure_grep: str,
+    n_runs: int = 1,
 ) -> str:
-    """Build a Dockerfile for two-phase F2P computation."""
-    if env_spec and env_spec.go_version:
-        base = f"golang:{env_spec.go_version}"
-    else:
-        base = go_image
-
-    lines = [
-        f"FROM {base}",
-        f"RUN git clone https://github.com/{repo}.git /repo && "
-        f"cd /repo && git checkout {base_commit}",
-    ]
-
-    if env_spec and env_spec.system_dependencies:
-        pkgs = " ".join(env_spec.system_dependencies)
-        lines.append(
-            "RUN apt-get update -qq && "
-            f"apt-get install -y --no-install-recommends {pkgs} && "
-            "rm -rf /var/lib/apt/lists/*"
-        )
-
-    if env_spec and env_spec.goflags:
-        lines.append(f'ENV GOFLAGS="{env_spec.goflags}"')
-
-    lines.append("COPY test.patch /patches/test.patch")
-    lines.append("COPY gold.patch /patches/gold.patch")
-    return "\n".join(lines) + "\n"
-
-
-def _make_f2p_run_script(pkg_scope: str, n_runs: int = 1) -> str:
-    """Generate a shell script that runs pre-fix and post-fix tests."""
+    """Generate a two-phase run script parameterized by language."""
     parts = ["set -e", "cd /repo"]
 
     for i in range(1, n_runs + 1):
@@ -378,9 +350,9 @@ def _make_f2p_run_script(pkg_scope: str, n_runs: int = 1) -> str:
             "2>&1 || { echo PATCH_APPLY_FAILED; exit 0; }"
         )
         parts.append(f"echo '{_F2P_PHASE_SEPARATOR}_RUN_{i}_PRE'")
-        parts.append(f"go test -json -count=1 {pkg_scope} 2>&1 | tee /tmp/pre_out.txt || true")
+        parts.append(f"{test_cmd} {test_scope} 2>&1 | tee /tmp/pre_out.txt || true")
         parts.append(
-            'grep -q \'"Action":"fail"\' /tmp/pre_out.txt || '
+            f'grep -q \'{failure_grep}\' /tmp/pre_out.txt || '
             "{ echo NO_FAILING_TESTS; exit 0; }"
         )
         parts.append(
@@ -388,13 +360,15 @@ def _make_f2p_run_script(pkg_scope: str, n_runs: int = 1) -> str:
             "2>&1 || { echo PATCH_APPLY_FAILED; exit 0; }"
         )
         parts.append(f"echo '{_F2P_PHASE_SEPARATOR}_RUN_{i}_POST'")
-        parts.append(f"go test -json -count=1 {pkg_scope} 2>&1 || true")
+        parts.append(f"{test_cmd} {test_scope} 2>&1 || true")
 
     return "\n".join(parts) + "\n"
 
 
-def _parse_f2p_output(
+def _parse_f2p_output_generic(
     raw_output: str,
+    parser: Any,
+    normalize: Any,
     n_runs: int = 1,
 ) -> ValidationResult:
     """Parse two-phase Docker output into a ValidationResult."""
@@ -410,7 +384,6 @@ def _parse_f2p_output(
             error_message="No tests failed in pre-fix run",
         )
 
-    parser = GoJSONParser()
     per_run_f2p: list[set[str]] = []
     per_run_p2p: list[set[str]] = []
     first_compiled = True
@@ -420,7 +393,6 @@ def _parse_f2p_output(
         post_marker = f"{_F2P_PHASE_SEPARATOR}_RUN_{i}_POST"
 
         pre_section = _extract_section(raw_output, pre_marker, post_marker)
-        # Post section ends at next run's reset or end of output
         next_pre = f"{_F2P_PHASE_SEPARATOR}_RUN_{i + 1}_PRE"
         post_section = _extract_section(raw_output, post_marker, next_pre)
 
@@ -434,8 +406,8 @@ def _parse_f2p_output(
             pre_result["tests"], post_result["tests"]
         )
 
-        per_run_f2p.append(set(normalize_go_f2p(f2p_raw)))
-        per_run_p2p.append(set(normalize_go_f2p(p2p_raw)))
+        per_run_f2p.append(set(normalize(f2p_raw)))
+        per_run_p2p.append(set(normalize(p2p_raw)))
 
     if n_runs == 1:
         f2p = sorted(per_run_f2p[0])
@@ -503,33 +475,69 @@ def _extract_section(text: str, start_marker: str, end_marker: str) -> str:
     return text[start:end]
 
 
+# ---------------------------------------------------------------------------
+# Go-specific wrappers (backward compat for tests and grade() path)
+# ---------------------------------------------------------------------------
+
+def _make_f2p_run_script(pkg_scope: str, n_runs: int = 1) -> str:
+    """Go-specific F2P run script — delegates to generic version."""
+    return _make_f2p_run_script_generic(
+        test_cmd="go test -json -count=1",
+        test_scope=pkg_scope,
+        failure_grep='"Action":"fail"',
+        n_runs=n_runs,
+    )
+
+
+def _parse_f2p_output(raw_output: str, n_runs: int = 1) -> ValidationResult:
+    """Go-specific F2P output parser — delegates to generic version."""
+    return _parse_f2p_output_generic(
+        raw_output=raw_output,
+        parser=GoJSONParser(),
+        normalize=normalize_go_f2p,
+        n_runs=n_runs,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Generic compute_f2p — dispatches via backend registry
+# ---------------------------------------------------------------------------
+
 def compute_f2p(
     repo: str,
     base_commit: str,
     test_patch: str,
     gold_patch: str,
     *,
-    env_spec: GoEnvironmentSpec | None = None,
+    env_spec: AnyEnvironmentSpec | None = None,
     docker_image: str = _DEFAULT_IMAGE,
-    timeout: int = _DEFAULT_TIMEOUT,
+    timeout: int | None = None,
     n_runs: int = 1,
 ) -> ValidationResult:
-    """Compute FAIL_TO_PASS and PASS_TO_PASS for a Go instance.
+    """Compute FAIL_TO_PASS and PASS_TO_PASS via Docker-based validation.
 
-    Runs ``go test -json`` twice in a single Docker container — once
-    with only the test patch applied (pre-fix), once with both the test
-    and gold patches applied (post-fix) — then diffs the results.
+    Builds a Docker container, runs tests twice (pre-fix and post-fix),
+    and diffs the results. Language-specific behavior is dispatched
+    through the backend registry.
 
-    When ``n_runs > 1``, repeats the two-phase test execution N times
-    within the same container and quarantines flaky tests.
-
-    No Anthropic API key is required.
+    When ``env_spec`` is ``None``, defaults to Go for backward compatibility.
     """
     if not _docker_available():
         raise RuntimeError("Docker is not available — cannot run compute_f2p()")
 
+    language = env_spec.language if env_spec else "go"
+    backend = get_backend(language)
+    if not backend:
+        return ValidationResult(
+            status="error",
+            error_message=f"No backend registered for language: {language}",
+        )
+
+    if timeout is None:
+        timeout = backend.default_timeout
+
     has_test_file = any(
-        "_test.go" in line
+        backend.test_file_pattern in line
         for line in test_patch.splitlines()
         if line.startswith("diff --git")
     )
@@ -540,23 +548,25 @@ def compute_f2p(
         )
         return ValidationResult(
             status="invalid",
-            error_message="test_patch contains no _test.go files",
+            error_message=f"test_patch contains no {backend.test_file_pattern} files",
         )
 
     t0 = time.monotonic()
+    fallback_spec = env_spec or GoEnvironmentSpec()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         (tmp / "test.patch").write_text(test_patch)
         (tmp / "gold.patch").write_text(gold_patch)
 
-        pkg_scope = " ".join(_affected_packages(test_patch)) or "./..."
+        test_scope = backend.test_scope(test_patch)
+        test_cmd = backend.make_test_cmd(fallback_spec)
         build_tag = f"swebenchify-f2p-{_short_hash(repo + base_commit)}"
 
         build_rc, build_log = _docker_build(
             tag=build_tag,
             context_dir=str(tmp),
-            dockerfile=_make_f2p_dockerfile(docker_image, repo, base_commit, env_spec),
+            dockerfile=backend.make_dockerfile(repo, base_commit, fallback_spec),
         )
 
         if build_rc != 0:
@@ -569,7 +579,12 @@ def compute_f2p(
         scaled_timeout = timeout * n_runs * 2
         run_rc, raw_output = _docker_run(
             image=build_tag,
-            script=_make_f2p_run_script(pkg_scope, n_runs),
+            script=_make_f2p_run_script_generic(
+                test_cmd=test_cmd,
+                test_scope=test_scope,
+                failure_grep=backend.failure_grep,
+                n_runs=n_runs,
+            ),
             timeout=scaled_timeout,
         )
 
@@ -583,7 +598,12 @@ def compute_f2p(
             error_message=f"Docker run timed out after {scaled_timeout}s",
         )
 
-    result = _parse_f2p_output(raw_output, n_runs)
+    result = _parse_f2p_output_generic(
+        raw_output=raw_output,
+        parser=backend.parser,
+        normalize=backend.normalize_f2p,
+        n_runs=n_runs,
+    )
     logger.info(
         "compute_f2p finished: repo=%s status=%s f2p=%d p2p=%d elapsed=%.1fs",
         repo, result.status, len(result.FAIL_TO_PASS),
@@ -624,3 +644,25 @@ def _affected_packages(test_patch: str) -> list[str]:
             for pkg in pkgs:
                 cmds.append(f"./{root}/{pkg.lstrip('./')}")
     return cmds or ["./..."]
+
+
+def compute_f2p_python(
+    repo: str,
+    base_commit: str,
+    test_patch: str,
+    gold_patch: str,
+    *,
+    env_spec: EnvironmentSpec,
+    timeout: int = 600,
+    n_runs: int = 1,
+) -> ValidationResult:
+    """Backward-compatible alias — delegates to generic compute_f2p()."""
+    return compute_f2p(
+        repo=repo,
+        base_commit=base_commit,
+        test_patch=test_patch,
+        gold_patch=gold_patch,
+        env_spec=env_spec,
+        timeout=timeout,
+        n_runs=n_runs,
+    )

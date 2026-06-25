@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import json
-import textwrap
-
-import pytest
 
 from swebenchify.parsers import (
     GoJSONParser,
     ParseResult,
-    PythonPassthroughParser,
+    PytestVerboseParser,
     get_parser,
     register,
 )
@@ -256,10 +253,10 @@ class TestRegistry:
         assert parser is not None
         assert isinstance(parser, GoJSONParser)
 
-    def test_get_parser_python_returns_python_passthrough(self) -> None:
+    def test_get_parser_python_returns_pytest_verbose_parser(self) -> None:
         parser = get_parser("python")
         assert parser is not None
-        assert isinstance(parser, PythonPassthroughParser)
+        assert isinstance(parser, PytestVerboseParser)
 
     def test_get_parser_unknown_returns_none(self) -> None:
         assert get_parser("cobol") is None
@@ -287,17 +284,118 @@ class TestRegistry:
 
 
 # ---------------------------------------------------------------------------
-# PythonPassthroughParser
+# PytestVerboseParser
 # ---------------------------------------------------------------------------
 
-class TestPythonPassthroughParser:
-    def test_returns_empty_tests(self) -> None:
-        result = PythonPassthroughParser().parse("any output")
+class TestPytestVerboseParser:
+    def test_single_passing_test(self) -> None:
+        output = "tests/test_foo.py::test_bar PASSED\n"
+        result = PytestVerboseParser().parse(output)
+        assert result["tests"]["tests/test_foo.py::test_bar"] == "passed"
+        assert result["compiled"] is True
+
+    def test_single_failing_test(self) -> None:
+        output = "tests/test_foo.py::test_bar FAILED\n"
+        result = PytestVerboseParser().parse(output)
+        assert result["tests"]["tests/test_foo.py::test_bar"] == "failed"
+        assert result["compiled"] is True
+
+    def test_mixed_pass_fail(self) -> None:
+        output = (
+            "tests/test_foo.py::test_bar PASSED\n"
+            "tests/test_foo.py::test_baz FAILED\n"
+        )
+        result = PytestVerboseParser().parse(output)
+        assert result["tests"]["tests/test_foo.py::test_bar"] == "passed"
+        assert result["tests"]["tests/test_foo.py::test_baz"] == "failed"
+
+    def test_class_based_test(self) -> None:
+        output = "tests/test_app.py::TestApp::test_login PASSED\n"
+        result = PytestVerboseParser().parse(output)
+        assert result["tests"]["tests/test_app.py::TestApp::test_login"] == "passed"
+
+    def test_parametrized_tests(self) -> None:
+        output = (
+            "tests/test_foo.py::test_bar[param1] PASSED\n"
+            "tests/test_foo.py::test_bar[param2] FAILED\n"
+        )
+        result = PytestVerboseParser().parse(output)
+        assert result["tests"]["tests/test_foo.py::test_bar[param1]"] == "passed"
+        assert result["tests"]["tests/test_foo.py::test_bar[param2]"] == "failed"
+
+    def test_skipped_test(self) -> None:
+        output = "tests/test_foo.py::test_skip SKIPPED\n"
+        result = PytestVerboseParser().parse(output)
+        assert result["tests"]["tests/test_foo.py::test_skip"] == "skipped"
+
+    def test_xfail_is_failed(self) -> None:
+        output = "tests/test_foo.py::test_expected XFAIL\n"
+        result = PytestVerboseParser().parse(output)
+        assert result["tests"]["tests/test_foo.py::test_expected"] == "failed"
+
+    def test_xpass_is_passed(self) -> None:
+        output = "tests/test_foo.py::test_surprise XPASS\n"
+        result = PytestVerboseParser().parse(output)
+        assert result["tests"]["tests/test_foo.py::test_surprise"] == "passed"
+
+    def test_error_is_failed(self) -> None:
+        output = "tests/test_foo.py::test_broken ERROR\n"
+        result = PytestVerboseParser().parse(output)
+        assert result["tests"]["tests/test_foo.py::test_broken"] == "failed"
+
+    def test_collection_error_is_compile_false(self) -> None:
+        output = "ERROR collecting tests/test_foo.py\nModuleNotFoundError: No module named 'foo'\n"
+        result = PytestVerboseParser().parse(output)
+        assert result["compiled"] is False
         assert result["tests"] == {}
 
-    def test_compiled_true(self) -> None:
-        result = PythonPassthroughParser().parse("")
+    def test_import_error_is_compile_false(self) -> None:
+        output = "ImportError: cannot import name 'bar' from 'foo'\n"
+        result = PytestVerboseParser().parse(output)
+        assert result["compiled"] is False
+
+    def test_syntax_error_is_compile_false(self) -> None:
+        output = "SyntaxError: invalid syntax\n"
+        result = PytestVerboseParser().parse(output)
+        assert result["compiled"] is False
+
+    def test_empty_output(self) -> None:
+        result = PytestVerboseParser().parse("")
+        assert result["compiled"] is False
+        assert result["tests"] == {}
+
+    def test_non_test_lines_ignored(self) -> None:
+        output = (
+            "============================= test session starts ==============================\n"
+            "platform linux -- Python 3.11, pytest-7.4.0\n"
+            "tests/test_foo.py::test_bar PASSED\n"
+            "============================== 1 passed in 0.01s ==============================\n"
+        )
+        result = PytestVerboseParser().parse(output)
+        assert len(result["tests"]) == 1
+        assert result["tests"]["tests/test_foo.py::test_bar"] == "passed"
+
+    def test_with_percentage_indicator(self) -> None:
+        output = "tests/test_foo.py::test_bar PASSED                              [ 50%]\n"
+        result = PytestVerboseParser().parse(output)
+        assert result["tests"]["tests/test_foo.py::test_bar"] == "passed"
+
+    def test_failed_priority_on_duplicate(self) -> None:
+        output = (
+            "tests/test_foo.py::test_bar PASSED\n"
+            "tests/test_foo.py::test_bar FAILED\n"
+        )
+        result = PytestVerboseParser().parse(output)
+        assert result["tests"]["tests/test_foo.py::test_bar"] == "failed"
+
+    def test_compiled_true_when_tests_present_despite_collection_keyword(self) -> None:
+        output = (
+            "tests/test_foo.py::test_bar PASSED\n"
+            "Some unrelated line with ERROR collecting mention\n"
+        )
+        result = PytestVerboseParser().parse(output)
         assert result["compiled"] is True
+        assert len(result["tests"]) == 1
 
 
 # ---------------------------------------------------------------------------

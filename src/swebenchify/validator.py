@@ -1,10 +1,11 @@
 """Stage 4: Instance validation.
 
-Dispatches a coding agent to validate each candidate instance by running
-tests before and after applying the gold patch. See SPEC.md Section 5.5.
+Dispatches validation for each candidate instance by running tests before
+and after applying the gold patch. See SPEC.md Section 5.5.
 
-Go repos use deterministic Docker-based validation via grader.compute_f2p().
-Python repos use the original agent-based approach.
+Languages with a registered backend use deterministic Docker-based
+validation via grader.compute_f2p(). Others fall back to agent-based
+validation.
 """
 
 from __future__ import annotations
@@ -15,11 +16,11 @@ import logging
 from pathlib import Path
 
 from swebenchify.dispatcher import AgentResult, CostTracker, run_agent_with_retry
+from swebenchify.backends import get_backend
 from swebenchify.grader import compute_f2p
 from swebenchify.models import (
     AnyEnvironmentSpec,
     CandidateInstance,
-    GoEnvironmentSpec,
     Repository,
     ValidationResult,
 )
@@ -75,13 +76,13 @@ Status values:
 VALIDATION_TOOLS = ["Bash", "Read", "Write"]
 
 
-async def _validate_go_docker(
+async def _validate_docker(
     candidate: CandidateInstance,
-    env_spec: GoEnvironmentSpec,
+    env_spec: AnyEnvironmentSpec,
     timeout: int = 300,
     n_runs: int = 1,
 ) -> ValidationResult:
-    """Validate a Go instance using deterministic Docker execution."""
+    """Validate an instance using deterministic Docker execution."""
     return await asyncio.to_thread(
         compute_f2p,
         repo=candidate.repo,
@@ -132,21 +133,28 @@ async def validate_instance(
 ) -> ValidationResult:
     """Validate a single candidate instance.
 
-    Go repos use deterministic Docker-based validation (no agent needed).
-    Python repos use the original agent-based approach.
+    Languages with a registered backend use deterministic Docker-based
+    validation. Others fall back to agent-based validation.
     """
-    is_go = isinstance(env_spec, GoEnvironmentSpec)
+    # Docker path: use if a backend is registered for this language
+    backend = get_backend(env_spec.language) if env_spec else None
+    if backend:
+        try:
+            from swebenchify.grader import _docker_available
+            if _docker_available():
+                return await _validate_docker(
+                    candidate=candidate,
+                    env_spec=env_spec,
+                    timeout=timeout,
+                    n_runs=n_runs,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Docker validation failed for %s, falling back to agent: %s",
+                candidate.instance_id, exc,
+            )
 
-    # Go: deterministic Docker path (handles quarantine internally)
-    if is_go:
-        return await _validate_go_docker(
-            candidate=candidate,
-            env_spec=env_spec,
-            timeout=timeout,
-            n_runs=n_runs,
-        )
-
-    # Python: agent-based path with optional multi-run quarantine
+    # Agent-based path with optional multi-run quarantine
     if n_runs > 1:
         return await _validate_with_quarantine(
             candidate=candidate,

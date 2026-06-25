@@ -12,8 +12,7 @@ Public surface
 - ``register()``       — Register a parser for a language string.
 - ``get_parser()``     — Retrieve a registered parser (or ``None``).
 - ``GoJSONParser``     — Parses ``go test -json`` NDJSON event streams.
-- ``PythonPassthroughParser`` — Placeholder; returns empty results (Python
-  validation still uses agent-based interpretation).
+- ``PytestVerboseParser`` — Parses ``pytest -v`` output for test outcomes.
 """
 
 from __future__ import annotations
@@ -228,20 +227,54 @@ class GoJSONParser:
 
 
 # ---------------------------------------------------------------------------
-# PythonPassthroughParser
+# PytestVerboseParser
 # ---------------------------------------------------------------------------
 
-class PythonPassthroughParser:
-    """Placeholder parser for Python instances.
+# Matches pytest -v output lines: "path/test.py::Class::method STATUS"
+# Also handles parametrized tests (test[param]) and percentage (PASSED [50%])
+_PYTEST_LINE_RE = re.compile(
+    r"^(\S*::(?:\S+))\s+(PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)",
+    re.MULTILINE,
+)
 
-    Python validation still uses agent-based interpretation (the agent
-    writes a ``validation_result.json`` directly).  This parser satisfies
-    the ``TestLogParser`` protocol but always returns empty results — it
-    should never be called in the normal Python validation path.
+_COLLECT_ERROR_RE = re.compile(
+    r"(?:ERROR collecting|ModuleNotFoundError|ImportError|SyntaxError)"
+)
+
+
+class PytestVerboseParser:
+    """Parse ``pytest -v`` output into structured test results.
+
+    Handles standard verbose output (one line per test), parametrized
+    tests, and detects collection/import errors as compile failures.
     """
 
     def parse(self, raw_output: str) -> ParseResult:
-        return ParseResult(tests={}, compiled=True)
+        if not raw_output or not raw_output.strip():
+            return ParseResult(tests={}, compiled=False)
+
+        test_status: dict[str, str] = {}
+
+        for match in _PYTEST_LINE_RE.finditer(raw_output):
+            test_id = match.group(1)
+            status_word = match.group(2)
+            if status_word in ("PASSED", "XPASS"):
+                status = "passed"
+            elif status_word in ("FAILED", "ERROR", "XFAIL"):
+                status = "failed"
+            elif status_word == "SKIPPED":
+                status = "skipped"
+            else:
+                status = "failed"
+            # For duplicate test IDs (subtests), "failed" takes priority
+            if test_id not in test_status or status == "failed":
+                test_status[test_id] = status
+
+        compiled = True
+        if not test_status and _COLLECT_ERROR_RE.search(raw_output):
+            compiled = False
+
+        return ParseResult(tests=test_status, compiled=compiled)
 
 
 # ---------------------------------------------------------------------------
@@ -249,4 +282,4 @@ class PythonPassthroughParser:
 # ---------------------------------------------------------------------------
 
 register("go", GoJSONParser())
-register("python", PythonPassthroughParser())
+register("python", PytestVerboseParser())

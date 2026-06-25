@@ -22,7 +22,6 @@ from swebenchify.grader import (
     _extract_section,
     _F2P_PHASE_SEPARATOR,
     _make_dockerfile,
-    _make_f2p_dockerfile,
     _make_f2p_run_script,
     _make_run_script,
     _parse_f2p_output,
@@ -418,36 +417,44 @@ class TestComputeF2PP2P:
 
 class TestMakeF2PDockerfile:
     def test_contains_base_image(self) -> None:
-        df = _make_f2p_dockerfile("golang:1.23", "etcd-io/etcd", "abc123")
+        from swebenchify.backends import _go_make_dockerfile
+        from swebenchify.models import GoEnvironmentSpec
+        spec = GoEnvironmentSpec(go_version="1.23", test_cmd="go test ./...")
+        df = _go_make_dockerfile("etcd-io/etcd", "abc123", spec)
         assert "golang:1.23" in df
 
     def test_copies_gold_patch(self) -> None:
-        df = _make_f2p_dockerfile("golang:latest", "etcd-io/etcd", "abc123")
+        from swebenchify.backends import _go_make_dockerfile
+        from swebenchify.models import GoEnvironmentSpec
+        df = _go_make_dockerfile("etcd-io/etcd", "abc123", GoEnvironmentSpec())
         assert "gold.patch" in df
         assert "candidate.patch" not in df
 
     def test_uses_env_spec_go_version(self) -> None:
+        from swebenchify.backends import _go_make_dockerfile
         from swebenchify.models import GoEnvironmentSpec
         spec = GoEnvironmentSpec(go_version="1.22", test_cmd="go test ./...")
-        df = _make_f2p_dockerfile("golang:latest", "etcd-io/etcd", "abc123", spec)
+        df = _go_make_dockerfile("etcd-io/etcd", "abc123", spec)
         assert "golang:1.22" in df
 
     def test_includes_system_deps(self) -> None:
+        from swebenchify.backends import _go_make_dockerfile
         from swebenchify.models import GoEnvironmentSpec
         spec = GoEnvironmentSpec(
             go_version="1.22", test_cmd="go test ./...",
             system_dependencies=["git", "make"],
         )
-        df = _make_f2p_dockerfile("golang:latest", "etcd-io/etcd", "abc123", spec)
+        df = _go_make_dockerfile("etcd-io/etcd", "abc123", spec)
         assert "git make" in df
 
     def test_includes_goflags(self) -> None:
+        from swebenchify.backends import _go_make_dockerfile
         from swebenchify.models import GoEnvironmentSpec
         spec = GoEnvironmentSpec(
             go_version="1.22", test_cmd="go test ./...",
             goflags="-mod=vendor",
         )
-        df = _make_f2p_dockerfile("golang:latest", "etcd-io/etcd", "abc123", spec)
+        df = _go_make_dockerfile("etcd-io/etcd", "abc123", spec)
         assert "-mod=vendor" in df
 
 

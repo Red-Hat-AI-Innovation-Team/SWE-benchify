@@ -23,7 +23,7 @@ import traceback
 from dataclasses import asdict
 
 from swebenchify.grader import compute_f2p
-from swebenchify.models import GoEnvironmentSpec, ValidationResult
+from swebenchify.models import ValidationResult, deserialize_env_spec
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -46,9 +46,8 @@ def main(argv: list[str] | None = None) -> int:
     instance_id = entry["instance_id"]
     print(f"Validating {instance_id} ...")
 
-    env_spec = None
-    if entry.get("env_spec"):
-        env_spec = GoEnvironmentSpec(**entry["env_spec"])
+    env_spec_data = entry.get("env_spec") or {}
+    env_spec = deserialize_env_spec(env_spec_data) if env_spec_data else None
 
     try:
         result = compute_f2p(
