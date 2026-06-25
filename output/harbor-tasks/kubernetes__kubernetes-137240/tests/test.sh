@@ -366,7 +366,7 @@ index 480476948e63a..ea89918261913 100644
 git apply /tmp/test_patch.diff 2>/dev/null || patch --fuzz=5 -p1 -i /tmp/test_patch.diff
 
 # Run tests and capture output
-make test 2>&1 | tee /tmp/test_output.txt || true
+go test -json -count=1 ./staging/src/k8s.io/dynamic-resource-allocation/api/... ./staging/src/k8s.io/dynamic-resource-allocation/api/internal/test/... ./staging/src/k8s.io/dynamic-resource-allocation/api/v1beta1/... ./staging/src/k8s.io/dynamic-resource-allocation/api/v1beta2/... 2>&1 | tee /tmp/test_output.txt || true
 
 # ── Embedded F2P checker (multi-format) ──────────────────────
 cat > /tmp/check_f2p.py << 'PYEOF'

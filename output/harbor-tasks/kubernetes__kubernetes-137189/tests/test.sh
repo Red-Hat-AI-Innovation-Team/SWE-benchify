@@ -101,7 +101,7 @@ index 03bf42a9cfdc1..15a4fe473ae13 100644
 git apply /tmp/test_patch.diff 2>/dev/null || patch --fuzz=5 -p1 -i /tmp/test_patch.diff
 
 # Run tests and capture output
-make test 2>&1 | tee /tmp/test_output.txt || true
+go test -json -count=1 ./staging/src/k8s.io/client-go/kubernetes/typed/core/v1/fake/... 2>&1 | tee /tmp/test_output.txt || true
 
 # ── Embedded F2P checker (multi-format) ──────────────────────
 cat > /tmp/check_f2p.py << 'PYEOF'

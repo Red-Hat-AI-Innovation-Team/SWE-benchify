@@ -159,7 +159,7 @@ index 7c0ecf4df957..dda883f71bc9 100644
 git apply /tmp/test_patch.diff 2>/dev/null || patch --fuzz=5 -p1 -i /tmp/test_patch.diff
 
 # Run tests and capture output
-go test -cpu 1,4 -timeout 7m google.golang.org/grpc/... 2>&1 | tee /tmp/test_output.txt || true
+go test -json -count=1 ./stats/opentelemetry/... 2>&1 | tee /tmp/test_output.txt || true
 
 # ── Embedded F2P checker (multi-format) ──────────────────────
 cat > /tmp/check_f2p.py << 'PYEOF'

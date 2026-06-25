@@ -69,7 +69,7 @@ index 93f68beb83915..e3d30c93646cd 100644
 git apply /tmp/test_patch.diff 2>/dev/null || patch --fuzz=5 -p1 -i /tmp/test_patch.diff
 
 # Run tests and capture output
-go test ./... 2>&1 | tee /tmp/test_output.txt || true
+go test -json -count=1 ./util/healthz/... 2>&1 | tee /tmp/test_output.txt || true
 
 # ── Embedded F2P checker (multi-format) ──────────────────────
 cat > /tmp/check_f2p.py << 'PYEOF'

@@ -174,7 +174,7 @@ index deafa30ef5c12..1b7aa1585585e 100644
 git apply /tmp/test_patch.diff 2>/dev/null || patch --fuzz=5 -p1 -i /tmp/test_patch.diff
 
 # Run tests and capture output
-make test 2>&1 | tee /tmp/test_output.txt || true
+go test -json -count=1 ./pkg/apis/batch/validation/... ./pkg/registry/batch/job/... 2>&1 | tee /tmp/test_output.txt || true
 
 # ── Embedded F2P checker (multi-format) ──────────────────────
 cat > /tmp/check_f2p.py << 'PYEOF'

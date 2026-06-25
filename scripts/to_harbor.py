@@ -395,11 +395,14 @@ def gen_test_sh(inst: dict, env: EnvironmentConfig) -> str:
     f2p_json = json.dumps(f2p)
     test_scope = compute_test_scope(inst, env)
 
-    # Resolve {test_scope} placeholder in test_cmd
-    test_cmd = env.test_cmd.replace("{test_scope}", test_scope)
-    # If test_cmd has no placeholder and we have a scope, append it
-    # (for Go default "go test -json -count=1 {test_scope}")
-    # The placeholder was already resolved above; nothing more to do.
+    # For Go, always use `go test -json` for verification — it's scoped
+    # to affected packages and produces parseable output.  The spec's
+    # test_cmd (e.g. "make test") is for the agent/builder, not the
+    # verifier — it may run the full suite and lack -json output.
+    if env.language == "go":
+        test_cmd = f"go test -json -count=1 {test_scope}"
+    else:
+        test_cmd = env.test_cmd.replace("{test_scope}", test_scope)
 
     # Build the install section
     install_lines = ""

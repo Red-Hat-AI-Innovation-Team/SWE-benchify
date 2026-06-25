@@ -755,7 +755,7 @@ index 09470056c7c69..e6da5c7c427e3 100644
 git apply /tmp/test_patch.diff 2>/dev/null || patch --fuzz=5 -p1 -i /tmp/test_patch.diff
 
 # Run tests and capture output
-make test 2>&1 | tee /tmp/test_output.txt || true
+go test -json -count=1 ./pkg/controller/volume/selinuxwarning/... ./test/e2e/storage/csimock/... 2>&1 | tee /tmp/test_output.txt || true
 
 # ── Embedded F2P checker (multi-format) ──────────────────────
 cat > /tmp/check_f2p.py << 'PYEOF'

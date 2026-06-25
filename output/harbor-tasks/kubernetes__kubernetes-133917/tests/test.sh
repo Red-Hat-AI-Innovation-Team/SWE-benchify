@@ -179,7 +179,7 @@ index 4872eadf3d217..baa406f4e459c 100644
 git apply /tmp/test_patch.diff 2>/dev/null || patch --fuzz=5 -p1 -i /tmp/test_patch.diff
 
 # Run tests and capture output
-make test 2>&1 | tee /tmp/test_output.txt || true
+go test -json -count=1 ./staging/src/k8s.io/client-go/tools/clientcmd/... 2>&1 | tee /tmp/test_output.txt || true
 
 # ── Embedded F2P checker (multi-format) ──────────────────────
 cat > /tmp/check_f2p.py << 'PYEOF'
