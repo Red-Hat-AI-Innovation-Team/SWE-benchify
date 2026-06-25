@@ -364,11 +364,13 @@ def gen_dockerfile(inst: dict, env: EnvironmentConfig) -> str:
     lines.append(f"    git branch -f main {base_commit}")
     lines.append("")
     lines.append("WORKDIR /testbed")
-    # Create log dirs and make everything writable so Harbor's agent
-    # (which may run as a non-root user under podman keep-id) can
-    # write session transcripts and trajectory files.
+    # Make everything writable and mark /testbed as a safe git directory
+    # so Harbor's agent (which may run as a non-root user under podman
+    # keep-id) can write session transcripts, trajectory files, and
+    # create git worktrees without "dubious ownership" errors.
     lines.append("RUN mkdir -p /logs/verifier /logs/agent")
     lines.append("RUN chmod -R 777 /testbed /logs")
+    lines.append("RUN git config --system --add safe.directory /testbed")
 
     return "\n".join(lines) + "\n"
 

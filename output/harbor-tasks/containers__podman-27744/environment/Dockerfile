@@ -12,3 +12,4 @@ RUN git clone https://github.com/containers/podman.git /testbed && \
 WORKDIR /testbed
 RUN mkdir -p /logs/verifier /logs/agent
 RUN chmod -R 777 /testbed /logs
+RUN git config --system --add safe.directory /testbed
