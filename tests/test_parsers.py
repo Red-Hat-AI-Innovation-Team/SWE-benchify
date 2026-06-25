@@ -11,7 +11,10 @@ from swebenchify.parsers import (
     GoJSONParser,
     ParseResult,
     PythonPassthroughParser,
+    RustTestParser,
     get_parser,
+    normalize_rust_f2p,
+    normalize_rust_test_id,
     register,
 )
 
@@ -264,7 +267,7 @@ class TestRegistry:
     def test_get_parser_unknown_returns_none(self) -> None:
         assert get_parser("cobol") is None
         assert get_parser("") is None
-        assert get_parser("rust") is None
+        assert get_parser("fortran") is None
 
     def test_register_custom_parser(self) -> None:
         class FakeParser:
@@ -415,3 +418,138 @@ class TestNormalizeGoF2p:
         assert "TestLearnerReadyCheck" in result
         # Subtest collapsed into parent — no duplicates
         assert result.count("TestHTTPSubPath") == 1
+
+
+# ---------------------------------------------------------------------------
+# Rust test fixtures
+# ---------------------------------------------------------------------------
+
+RUST_PASSING_OUTPUT = '''
+running 3 tests
+test utils::tests::test_parse_url ... ok
+test config::tests::test_default_config ... ok
+test config::tests::test_custom_config ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+'''
+
+RUST_FAILING_OUTPUT = '''
+running 2 tests
+test utils::tests::test_parse_url ... FAILED
+test config::tests::test_default_config ... ok
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+'''
+
+RUST_COMPILE_ERROR_OUTPUT = '''
+error[E0425]: cannot find value `foo` in this scope
+  --> src/lib.rs:10:5
+   |
+10 |     foo
+   |     ^^^ not found in this scope
+'''
+
+RUST_WORKSPACE_OUTPUT = '''
+   Compiling pingora-core v0.1.0
+   Compiling pingora-proxy v0.1.0
+running 2 tests
+test core::tests::test_server ... ok
+test core::tests::test_connection ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+running 1 test
+test proxy::tests::test_upstream ... FAILED
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+'''
+
+RUST_IGNORED_OUTPUT = '''
+running 2 tests
+test slow_test ... ignored
+test fast_test ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+'''
+
+
+# ---------------------------------------------------------------------------
+# RustTestParser
+# ---------------------------------------------------------------------------
+
+class TestRustTestParserPassing:
+    def test_all_three_pass(self) -> None:
+        result = RustTestParser().parse(RUST_PASSING_OUTPUT)
+        assert result["compiled"] is True
+        assert len(result["tests"]) == 3
+        assert result["tests"]["utils::tests::test_parse_url"] == "passed"
+        assert result["tests"]["config::tests::test_default_config"] == "passed"
+        assert result["tests"]["config::tests::test_custom_config"] == "passed"
+
+
+class TestRustTestParserFailing:
+    def test_mixed_pass_and_fail(self) -> None:
+        result = RustTestParser().parse(RUST_FAILING_OUTPUT)
+        assert result["compiled"] is True
+        assert result["tests"]["utils::tests::test_parse_url"] == "failed"
+        assert result["tests"]["config::tests::test_default_config"] == "passed"
+
+
+class TestRustTestParserCompileError:
+    def test_compile_error(self) -> None:
+        result = RustTestParser().parse(RUST_COMPILE_ERROR_OUTPUT)
+        assert result["compiled"] is False
+        assert result["tests"] == {}
+
+
+class TestRustTestParserWorkspace:
+    def test_workspace_multiple_crates(self) -> None:
+        result = RustTestParser().parse(RUST_WORKSPACE_OUTPUT)
+        assert result["compiled"] is True
+        assert result["tests"]["core::tests::test_server"] == "passed"
+        assert result["tests"]["core::tests::test_connection"] == "passed"
+        assert result["tests"]["proxy::tests::test_upstream"] == "failed"
+
+
+class TestRustTestParserIgnored:
+    def test_ignored_mapped_to_skipped(self) -> None:
+        result = RustTestParser().parse(RUST_IGNORED_OUTPUT)
+        assert result["compiled"] is True
+        assert result["tests"]["slow_test"] == "skipped"
+        assert result["tests"]["fast_test"] == "passed"
+
+
+class TestRustTestParserEmpty:
+    def test_empty_string(self) -> None:
+        result = RustTestParser().parse("")
+        assert result["compiled"] is False
+        assert result["tests"] == {}
+
+
+class TestRustParserRegistry:
+    def test_get_parser_rust(self) -> None:
+        parser = get_parser("rust")
+        assert parser is not None
+        assert isinstance(parser, RustTestParser)
+
+
+class TestNormalizeRustTestId:
+    def test_bare_name_unchanged(self) -> None:
+        assert normalize_rust_test_id("test_foo") == "test_foo"
+
+    def test_module_path_preserved(self) -> None:
+        assert normalize_rust_test_id("utils::tests::test_parse_url") == "utils::tests::test_parse_url"
+
+
+class TestNormalizeRustF2p:
+    def test_normalise_dedup_sort(self) -> None:
+        raw = [
+            "config::tests::test_b",
+            "config::tests::test_a",
+            "config::tests::test_b",
+        ]
+        result = normalize_rust_f2p(raw)
+        assert result == ["config::tests::test_a", "config::tests::test_b"]
+
+    def test_empty_input(self) -> None:
+        assert normalize_rust_f2p([]) == []

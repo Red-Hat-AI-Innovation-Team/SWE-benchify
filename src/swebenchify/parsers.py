@@ -245,8 +245,78 @@ class PythonPassthroughParser:
 
 
 # ---------------------------------------------------------------------------
+# Rust test output parsing
+# ---------------------------------------------------------------------------
+
+_RUST_TEST_RE = re.compile(r'^test\s+(\S+)\s+\.\.\.\s+(ok|FAILED|ignored)')
+_RUST_COMPILE_ERROR_RE = re.compile(r'^error\[E\d{4}\]')
+
+
+class RustTestParser:
+    """Parse cargo test plain text output.
+
+    Cargo test output format:
+        test module::test_name ... ok
+        test module::test_name ... FAILED
+        test module::test_name ... ignored
+
+    Compile errors are detected by 'error[EXXXX]' lines.
+    """
+
+    def parse(self, raw_output: str) -> ParseResult:
+        if not raw_output or not raw_output.strip():
+            return ParseResult(tests={}, compiled=False)
+
+        tests: dict[str, str] = {}
+        compiled = True
+
+        for line in raw_output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+
+            if _RUST_COMPILE_ERROR_RE.match(line):
+                compiled = False
+                continue
+
+            m = _RUST_TEST_RE.match(line)
+            if m:
+                test_name = m.group(1)
+                outcome = m.group(2)
+                if outcome == 'ok':
+                    tests[test_name] = 'passed'
+                elif outcome == 'FAILED':
+                    tests[test_name] = 'failed'
+                elif outcome == 'ignored':
+                    tests[test_name] = 'skipped'
+
+        if not compiled:
+            return ParseResult(tests={}, compiled=False)
+
+        return ParseResult(tests=tests, compiled=compiled)
+
+
+def normalize_rust_test_id(test_id: str) -> str:
+    """Normalise a Rust test ID. Rust IDs are module::test_name."""
+    return test_id
+
+
+def normalize_rust_f2p(test_ids: list[str]) -> list[str]:
+    """Normalise, deduplicate, and sort a list of Rust test IDs."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for tid in test_ids:
+        normalised = normalize_rust_test_id(tid)
+        if normalised not in seen:
+            seen.add(normalised)
+            result.append(normalised)
+    return sorted(result)
+
+
+# ---------------------------------------------------------------------------
 # Auto-register built-in parsers on import
 # ---------------------------------------------------------------------------
 
 register("go", GoJSONParser())
 register("python", PythonPassthroughParser())
+register("rust", RustTestParser())
