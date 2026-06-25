@@ -279,11 +279,11 @@ def gen_task_toml(inst: dict) -> str:
 
         [verifier]
         network_mode = "public"
-        timeout_sec = 3000
+        timeout_sec = 28800
 
         [agent]
         network_mode = "public"
-        timeout_sec = 3000
+        timeout_sec = 28800
 
         [environment]
         build_timeout_sec = 1800.0
