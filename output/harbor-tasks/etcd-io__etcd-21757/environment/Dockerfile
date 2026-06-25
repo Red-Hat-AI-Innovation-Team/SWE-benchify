@@ -5,7 +5,7 @@ RUN apt-get update -qq && \
     rm -rf /var/lib/apt/lists/*
 
 RUN git clone https://github.com/etcd-io/etcd.git /testbed && \
-    cd /testbed && git checkout -b main 315e04328c6a19c107081870e5cdadaa6044d45d
+    cd /testbed && git checkout -B main 315e04328c6a19c107081870e5cdadaa6044d45d
 
 WORKDIR /testbed
 RUN mkdir -p /logs/verifier /logs/agent

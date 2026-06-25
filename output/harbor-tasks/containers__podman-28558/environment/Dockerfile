@@ -6,7 +6,7 @@ RUN apt-get update -qq && \
 ENV GOFLAGS="-mod=vendor"
 
 RUN git clone https://github.com/containers/podman.git /testbed && \
-    cd /testbed && git checkout -b main 9ac300c6af5192c4ecd9cc1fcb2399f321575858
+    cd /testbed && git checkout -B main 9ac300c6af5192c4ecd9cc1fcb2399f321575858
 
 WORKDIR /testbed
 RUN mkdir -p /logs/verifier /logs/agent

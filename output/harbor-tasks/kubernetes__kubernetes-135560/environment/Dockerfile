@@ -6,7 +6,7 @@ RUN apt-get update -qq && \
 ENV GOFLAGS="-mod=vendor"
 
 RUN git clone https://github.com/kubernetes/kubernetes.git /testbed && \
-    cd /testbed && git checkout -b main 3025b0a7b4b9fba6110759e905346ead5c9c0720
+    cd /testbed && git checkout -B main 3025b0a7b4b9fba6110759e905346ead5c9c0720
 
 WORKDIR /testbed
 RUN mkdir -p /logs/verifier /logs/agent
