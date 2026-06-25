@@ -10,6 +10,7 @@ RUN git clone https://github.com/kubernetes/kubernetes.git /testbed && \
     git branch -f main 101ee1bc9c6c276090c9708abfd5db52eaea2657
 
 WORKDIR /testbed
+RUN make all
 RUN mkdir -p /logs/verifier /logs/agent
 RUN chmod -R 777 /testbed /logs
 RUN git config --system --add safe.directory /testbed

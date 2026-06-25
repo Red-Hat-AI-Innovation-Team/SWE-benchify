@@ -11,6 +11,7 @@ RUN git clone https://github.com/ansible/ansible.git /testbed && \
     git branch -f main 3518d48146b3ecda6f8cfc6c33922aa9d492ad4f
 
 WORKDIR /testbed
+RUN pip install -e . 2>/dev/null || pip install . 2>/dev/null || true
 RUN mkdir -p /logs/verifier /logs/agent
 RUN chmod -R 777 /testbed /logs
 RUN git config --system --add safe.directory /testbed

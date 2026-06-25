@@ -364,6 +364,14 @@ def gen_dockerfile(inst: dict, env: EnvironmentConfig) -> str:
     lines.append(f"    git branch -f main {base_commit}")
     lines.append("")
     lines.append("WORKDIR /testbed")
+
+    # Install project and build test toolchain so the verifier can run
+    # tests without the agent having to set up the environment first.
+    if env.install_cmd:
+        lines.append(f"RUN {env.install_cmd}")
+    if env.build_cmd:
+        lines.append(f"RUN {env.build_cmd}")
+
     # Make everything writable and mark /testbed as a safe git directory
     # so Harbor's agent (which may run as a non-root user under podman
     # keep-id) can write session transcripts, trajectory files, and

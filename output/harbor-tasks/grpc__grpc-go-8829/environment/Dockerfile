@@ -9,6 +9,7 @@ RUN git clone https://github.com/grpc/grpc-go.git /testbed && \
     git branch -f main 6601041bab5b34e51cbb5d58666659e0b17bf6b0
 
 WORKDIR /testbed
+RUN go build google.golang.org/grpc/...
 RUN mkdir -p /logs/verifier /logs/agent
 RUN chmod -R 777 /testbed /logs
 RUN git config --system --add safe.directory /testbed

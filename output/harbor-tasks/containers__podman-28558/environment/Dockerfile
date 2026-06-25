@@ -10,6 +10,7 @@ RUN git clone https://github.com/containers/podman.git /testbed && \
     git branch -f main 9ac300c6af5192c4ecd9cc1fcb2399f321575858
 
 WORKDIR /testbed
+RUN make podman
 RUN mkdir -p /logs/verifier /logs/agent
 RUN chmod -R 777 /testbed /logs
 RUN git config --system --add safe.directory /testbed

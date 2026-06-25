@@ -11,6 +11,7 @@ RUN git clone https://github.com/ansible/ansible-lint.git /testbed && \
     git branch -f main f07c652e32a102c0286680dc50d247cb2c9e00fb
 
 WORKDIR /testbed
+RUN pip install -e . 2>/dev/null || pip install . 2>/dev/null || true
 RUN mkdir -p /logs/verifier /logs/agent
 RUN chmod -R 777 /testbed /logs
 RUN git config --system --add safe.directory /testbed

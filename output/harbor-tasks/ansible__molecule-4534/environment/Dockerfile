@@ -11,6 +11,7 @@ RUN git clone https://github.com/ansible/molecule.git /testbed && \
     git branch -f main e5e165a6c94d58433d76282dee7df25a118b922f
 
 WORKDIR /testbed
+RUN pip install -e . 2>/dev/null || pip install . 2>/dev/null || true
 RUN mkdir -p /logs/verifier /logs/agent
 RUN chmod -R 777 /testbed /logs
 RUN git config --system --add safe.directory /testbed
