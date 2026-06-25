@@ -9,4 +9,5 @@ RUN git clone https://github.com/containers/podman.git /testbed && \
     cd /testbed && git checkout a51012b99e64f4f5a4efd4e438b7485f156cfffe
 
 WORKDIR /testbed
-RUN mkdir -p /logs/verifier
+RUN mkdir -p /logs/verifier /logs/agent
+RUN chmod -R 777 /testbed /logs

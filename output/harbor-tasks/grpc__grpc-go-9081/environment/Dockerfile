@@ -8,4 +8,5 @@ RUN git clone https://github.com/grpc/grpc-go.git /testbed && \
     cd /testbed && git checkout a481b8f755bccf5c0308f1530e785bb58a770150
 
 WORKDIR /testbed
-RUN mkdir -p /logs/verifier
+RUN mkdir -p /logs/verifier /logs/agent
+RUN chmod -R 777 /testbed /logs

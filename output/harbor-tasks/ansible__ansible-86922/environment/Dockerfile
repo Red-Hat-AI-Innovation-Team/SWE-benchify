@@ -10,4 +10,5 @@ RUN git clone https://github.com/ansible/ansible.git /testbed && \
     cd /testbed && git checkout 883360fa0068bfc65b35906909fa1f6388153a17
 
 WORKDIR /testbed
-RUN mkdir -p /logs/verifier
+RUN mkdir -p /logs/verifier /logs/agent
+RUN chmod -R 777 /testbed /logs

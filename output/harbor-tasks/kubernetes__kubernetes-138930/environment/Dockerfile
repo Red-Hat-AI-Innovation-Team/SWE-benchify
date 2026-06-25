@@ -9,4 +9,5 @@ RUN git clone https://github.com/kubernetes/kubernetes.git /testbed && \
     cd /testbed && git checkout a3242d59f46ce91c7a8a6f012e2f30640ae0a467
 
 WORKDIR /testbed
-RUN mkdir -p /logs/verifier
+RUN mkdir -p /logs/verifier /logs/agent
+RUN chmod -R 777 /testbed /logs

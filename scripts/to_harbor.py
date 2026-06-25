@@ -360,7 +360,11 @@ def gen_dockerfile(inst: dict, env: EnvironmentConfig) -> str:
     lines.append(f"    cd /testbed && git checkout {base_commit}")
     lines.append("")
     lines.append("WORKDIR /testbed")
-    lines.append("RUN mkdir -p /logs/verifier")
+    # Create log dirs and make everything writable so Harbor's agent
+    # (which may run as a non-root user under podman keep-id) can
+    # write session transcripts and trajectory files.
+    lines.append("RUN mkdir -p /logs/verifier /logs/agent")
+    lines.append("RUN chmod -R 777 /testbed /logs")
 
     return "\n".join(lines) + "\n"
 

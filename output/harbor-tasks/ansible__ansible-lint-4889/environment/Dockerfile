@@ -10,4 +10,5 @@ RUN git clone https://github.com/ansible/ansible-lint.git /testbed && \
     cd /testbed && git checkout cfd927fe8a92d28082d3b10234a28968074cec27
 
 WORKDIR /testbed
-RUN mkdir -p /logs/verifier
+RUN mkdir -p /logs/verifier /logs/agent
+RUN chmod -R 777 /testbed /logs

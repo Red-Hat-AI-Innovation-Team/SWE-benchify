@@ -8,4 +8,5 @@ RUN git clone https://github.com/etcd-io/etcd.git /testbed && \
     cd /testbed && git checkout 315e04328c6a19c107081870e5cdadaa6044d45d
 
 WORKDIR /testbed
-RUN mkdir -p /logs/verifier
+RUN mkdir -p /logs/verifier /logs/agent
+RUN chmod -R 777 /testbed /logs

@@ -10,4 +10,5 @@ RUN git clone https://github.com/ansible/molecule.git /testbed && \
     cd /testbed && git checkout 1cbba7713710239734d6889358e603f4a02acf32
 
 WORKDIR /testbed
-RUN mkdir -p /logs/verifier
+RUN mkdir -p /logs/verifier /logs/agent
+RUN chmod -R 777 /testbed /logs
