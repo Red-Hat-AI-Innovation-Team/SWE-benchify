@@ -411,7 +411,6 @@ async def discover_go_environment(
     if not result.is_error and spec_path.exists() and version_path.exists():
         try:
             spec_data = json.loads(spec_path.read_text())
-            ver_data = json.loads(version_path.read_text())
 
             spec = GoEnvironmentSpec(
                 **{
@@ -484,7 +483,6 @@ async def discover_rust_environment(
     if not result.is_error and spec_path.exists() and version_path.exists():
         try:
             spec_data = json.loads(spec_path.read_text())
-            ver_data = json.loads(version_path.read_text())
 
             spec = RustEnvironmentSpec(
                 **{

@@ -157,11 +157,8 @@ async def validate_instance(
     Go repos use deterministic Docker-based validation (no agent needed).
     Python repos use the original agent-based approach.
     """
-    is_go = isinstance(env_spec, GoEnvironmentSpec)
-    is_rust = isinstance(env_spec, RustEnvironmentSpec)
-
     # Go: deterministic Docker path (handles quarantine internally)
-    if is_go:
+    if isinstance(env_spec, GoEnvironmentSpec):
         return await _validate_go_docker(
             candidate=candidate,
             env_spec=env_spec,
@@ -170,7 +167,7 @@ async def validate_instance(
         )
 
     # Rust: deterministic Docker path (handles quarantine internally)
-    if is_rust:
+    if isinstance(env_spec, RustEnvironmentSpec):
         return await _validate_rust_docker(
             candidate=candidate,
             env_spec=env_spec,

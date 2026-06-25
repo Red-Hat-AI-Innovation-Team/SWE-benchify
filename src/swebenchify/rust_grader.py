@@ -26,7 +26,6 @@ from pathlib import Path
 
 from swebenchify.models import RustEnvironmentSpec, ValidationResult
 from swebenchify.parsers import RustTestParser, normalize_rust_f2p
-from swebenchify.sandbox import RustDockerfile, RustImageCache
 
 __version__ = "1.0.0"
 
