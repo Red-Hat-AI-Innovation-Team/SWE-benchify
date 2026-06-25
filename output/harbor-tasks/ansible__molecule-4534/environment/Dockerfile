@@ -7,7 +7,8 @@ RUN apt-get update -qq && \
 RUN pip install --no-cache-dir pytest
 
 RUN git clone https://github.com/ansible/molecule.git /testbed && \
-    cd /testbed && git checkout -B main e5e165a6c94d58433d76282dee7df25a118b922f
+    cd /testbed && git checkout e5e165a6c94d58433d76282dee7df25a118b922f && \
+    git branch -f main e5e165a6c94d58433d76282dee7df25a118b922f
 
 WORKDIR /testbed
 RUN mkdir -p /logs/verifier /logs/agent

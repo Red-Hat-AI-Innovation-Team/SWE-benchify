@@ -354,14 +354,14 @@ def gen_dockerfile(inst: dict, env: EnvironmentConfig) -> str:
         # For other languages, extra_packages can be handled by
         # language-specific install commands in the env spec.
 
-    # Clone repo and ensure a local "main" branch exists at base_commit.
-    # Agents using git worktrees (e.g. re:factory) need a local branch —
-    # a detached HEAD breaks `git worktree add ... -b <new> main`.
-    # Use `git checkout -B main` (-B = force-create) so it works whether
-    # or not the repo already has a branch named "main".
+    # Clone repo at base_commit.  Ensure a local "main" branch ref exists
+    # so worktree-based agents (e.g. re:factory) can use it as a base for
+    # `git worktree add -b factory/run-XXX main`.  We leave HEAD detached
+    # so the worktree creation doesn't conflict with the current branch.
     lines.append("")
     lines.append(f"RUN git clone https://github.com/{repo}.git /testbed && \\")
-    lines.append(f"    cd /testbed && git checkout -B main {base_commit}")
+    lines.append(f"    cd /testbed && git checkout {base_commit} && \\")
+    lines.append(f"    git branch -f main {base_commit}")
     lines.append("")
     lines.append("WORKDIR /testbed")
     # Create log dirs and make everything writable so Harbor's agent

@@ -7,7 +7,8 @@ RUN apt-get update -qq && \
 RUN pip install --no-cache-dir pytest
 
 RUN git clone https://github.com/ansible/ansible.git /testbed && \
-    cd /testbed && git checkout -B main f2a58fd3b24541778c5f9d0780a0a6a42d609a71
+    cd /testbed && git checkout f2a58fd3b24541778c5f9d0780a0a6a42d609a71 && \
+    git branch -f main f2a58fd3b24541778c5f9d0780a0a6a42d609a71
 
 WORKDIR /testbed
 RUN mkdir -p /logs/verifier /logs/agent
