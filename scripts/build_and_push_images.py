@@ -32,8 +32,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from swebenchify.models import GoEnvironmentSpec, compute_env_spec_hash
@@ -88,6 +92,40 @@ def _build_image(spec: GoEnvironmentSpec, image_name: str) -> bool:
         print(f"FAIL: docker build {image_name}:\n{result.stderr}", file=sys.stderr)
         return False
     return True
+
+
+def _make_package_public(registry: str, package_name: str) -> bool:
+    """Set a GHCR package's visibility to public via the GitHub API."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        print("  WARNING: GITHUB_TOKEN not set, cannot set package visibility",
+              file=sys.stderr)
+        return False
+
+    # Extract org from registry prefix like "ghcr.io/red-hat-ai-innovation-team"
+    parts = registry.rstrip("/").split("/")
+    if len(parts) < 2 or parts[0] != "ghcr.io":
+        print(f"  WARNING: cannot parse org from registry {registry!r}, "
+              "skipping visibility update", file=sys.stderr)
+        return False
+    org = parts[1]
+
+    url = (f"https://api.github.com/orgs/{org}/packages"
+           f"/container/{urllib.parse.quote(package_name, safe='')}")
+    data = json.dumps({"visibility": "public"}).encode()
+    req = urllib.request.Request(url, data=data, method="PATCH", headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github.v3+json",
+        "Content-Type": "application/json",
+    })
+    try:
+        urllib.request.urlopen(req)
+        return True
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode(errors="replace")
+        print(f"  WARNING: failed to set visibility for {package_name}: "
+              f"{exc.code} {body}", file=sys.stderr)
+        return False
 
 
 def _push_image(local_name: str, remote_name: str) -> bool:
@@ -209,6 +247,8 @@ def main(argv: list[str] | None = None) -> int:
         if not _push_image(local_name, remote_name):
             return 1
         print(f"  Pushed: {remote_name}")
+        if _make_package_public(args.registry, local_name):
+            print("  Visibility: public")
         built[h] = remote_name
 
     # Summary
