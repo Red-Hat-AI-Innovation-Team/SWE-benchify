@@ -1,8 +1,9 @@
-"""Tests for RustEnvironmentSpec and compute_rust_env_spec_hash."""
+"""Tests for RustEnvironmentSpec, compute_rust_env_spec_hash, and RustSpecRegistry."""
 
 from __future__ import annotations
 
 from swebenchify.models import RustEnvironmentSpec, compute_rust_env_spec_hash
+from swebenchify.rust_registry import RustSpecRegistry
 
 
 # ---------------------------------------------------------------------------
@@ -122,3 +123,76 @@ class TestComputeRustEnvSpecHash:
         spec = _make_spec()
         hashes = {compute_rust_env_spec_hash(spec) for _ in range(10)}
         assert len(hashes) == 1
+
+
+# ---------------------------------------------------------------------------
+# TestRustSpecRegistry
+# ---------------------------------------------------------------------------
+
+class TestRustSpecRegistry:
+    def test_register_returns_version_string(self, tmp_path) -> None:
+        reg = RustSpecRegistry(tmp_path)
+        spec = _make_spec(rust_version="1.84")
+        version = reg.register("owner/repo", "abc123", spec)
+        assert version.startswith("1.84-")
+
+    def test_register_idempotent(self, tmp_path) -> None:
+        reg = RustSpecRegistry(tmp_path)
+        spec = _make_spec()
+        v1 = reg.register("owner/repo", "abc123", spec)
+        v2 = reg.register("owner/repo", "abc123", spec)
+        assert v1 == v2
+
+    def test_get_version_registered(self, tmp_path) -> None:
+        reg = RustSpecRegistry(tmp_path)
+        spec = _make_spec()
+        expected = reg.register("owner/repo", "abc123", spec)
+        spec_hash = compute_rust_env_spec_hash(spec)
+        assert reg.get_version(spec_hash) == expected
+
+    def test_get_version_unknown(self, tmp_path) -> None:
+        reg = RustSpecRegistry(tmp_path)
+        assert reg.get_version("nonexistent_hash") is None
+
+    def test_get_era_commit_registered(self, tmp_path) -> None:
+        reg = RustSpecRegistry(tmp_path)
+        spec = _make_spec()
+        reg.register("owner/repo", "abc123def", spec)
+        spec_hash = compute_rust_env_spec_hash(spec)
+        assert reg.get_era_commit(spec_hash) == "abc123def"
+
+    def test_get_era_commit_unknown(self, tmp_path) -> None:
+        reg = RustSpecRegistry(tmp_path)
+        assert reg.get_era_commit("nonexistent_hash") is None
+
+    def test_persistence_survives_reload(self, tmp_path) -> None:
+        spec = _make_spec()
+        reg1 = RustSpecRegistry(tmp_path)
+        version = reg1.register("owner/repo", "abc123", spec)
+
+        reg2 = RustSpecRegistry(tmp_path)
+        spec_hash = compute_rust_env_spec_hash(spec)
+        assert reg2.get_version(spec_hash) == version
+        assert reg2.get_era_commit(spec_hash) == "abc123"
+
+    def test_different_specs_different_versions(self, tmp_path) -> None:
+        reg = RustSpecRegistry(tmp_path)
+        spec_a = _make_spec(rust_version="1.84")
+        spec_b = _make_spec(rust_version="1.80")
+        v_a = reg.register("owner/repo", "aaa", spec_a)
+        v_b = reg.register("owner/repo", "bbb", spec_b)
+        assert v_a != v_b
+
+    def test_registry_file_created(self, tmp_path) -> None:
+        reg = RustSpecRegistry(tmp_path)
+        spec = _make_spec()
+        reg.register("owner/repo", "abc123", spec)
+        assert (tmp_path / "rust-spec-registry.json").exists()
+
+    def test_no_rust_version_falls_back_to_hash(self, tmp_path) -> None:
+        reg = RustSpecRegistry(tmp_path)
+        spec = _make_spec(rust_version="")
+        version = reg.register("owner/repo", "abc123", spec)
+        spec_hash = compute_rust_env_spec_hash(spec)
+        assert version == spec_hash[:12]
+        assert "-" not in version
