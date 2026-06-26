@@ -209,17 +209,22 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Found {sum(len(v) for v in needed.values())} instance(s) across "
           f"{len(needed)} unique image(s) to build")
 
-    # Check spec availability
+    # Check spec availability — warn and skip missing specs
     missing_specs = [h for h in needed if h not in specs]
     if missing_specs:
         for h in missing_specs:
             sample = needed[h][0]
             print(
-                f"ERROR: no spec for hash {h[:12]} "
-                f"(repo={sample['repo']}, {len(needed[h])} instances)",
+                f"WARNING: no spec for hash {h[:12]} "
+                f"(repo={sample['repo']}, {len(needed[h])} instances) — skipping",
                 file=sys.stderr,
             )
-        return 1
+        for h in missing_specs:
+            del needed[h]
+
+    if not needed:
+        print("No buildable Go instances remain after skipping missing specs.")
+        return 0
 
     # Build and push
     built: dict[str, str] = {}  # env_spec_hash -> remote image name

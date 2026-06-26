@@ -230,7 +230,7 @@ class TestMain:
         ])
         assert rc == 0
 
-    def test_missing_spec_fails(self, tmp_path: Path) -> None:
+    def test_missing_spec_skips(self, tmp_path: Path) -> None:
         specs_dir = tmp_path / "specs"
         specs_dir.mkdir()
         instances_path = tmp_path / "instances.jsonl"
@@ -242,7 +242,7 @@ class TestMain:
             "--specs-dir", str(specs_dir),
             "--dry-run",
         ])
-        assert rc == 1
+        assert rc == 0
 
     def test_skips_python_instances(self, tmp_path: Path) -> None:
         specs_dir = tmp_path / "specs"

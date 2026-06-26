@@ -225,8 +225,14 @@ def main(argv: list[str] | None = None) -> int:
     missing_specs = [k for k in needed if k[2] not in specs]
     if missing_specs:
         for repo, commit, h in missing_specs:
-            print(f"ERROR: no spec for hash {h[:12]} (repo={repo})", file=sys.stderr)
-        return 1
+            print(f"WARNING: no spec for hash {h[:12]} (repo={repo}) — skipping",
+                  file=sys.stderr)
+        for k in missing_specs:
+            del needed[k]
+
+    if not needed:
+        print("No buildable Python instances remain after skipping missing specs.")
+        return 0
 
     built: dict[tuple[str, str, str], str] = {}
     for (repo, commit, h), insts in needed.items():
