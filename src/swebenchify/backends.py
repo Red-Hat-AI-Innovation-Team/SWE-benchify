@@ -62,8 +62,10 @@ def _go_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmentSpe
     else:
         base = "golang:latest"
 
+    source_url = "https://github.com/Red-Hat-AI-Innovation-Team/SWE-benchify"
     lines = [
         f"FROM {base}",
+        f"LABEL org.opencontainers.image.source={source_url}",
         f"RUN git clone https://github.com/{repo}.git /repo && "
         f"cd /repo && git checkout {base_commit}",
     ]
@@ -125,8 +127,10 @@ def _python_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmen
     spec = env_spec if isinstance(env_spec, EnvironmentSpec) else None
     version = (spec.language_version if spec else None) or "3.11"
 
+    source_url = "https://github.com/Red-Hat-AI-Innovation-Team/SWE-benchify"
     lines = [
         f"FROM python:{version}-slim",
+        f"LABEL org.opencontainers.image.source={source_url}",
         "RUN apt-get update -qq && "
         "apt-get install -y --no-install-recommends git",
     ]

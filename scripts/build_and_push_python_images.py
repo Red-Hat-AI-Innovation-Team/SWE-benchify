@@ -74,8 +74,10 @@ def _make_dockerfile(
 ) -> str:
     """Generate a Dockerfile for a Python instance (no patches)."""
     version = spec.language_version or "3.11"
+    source_url = "https://github.com/Red-Hat-AI-Innovation-Team/SWE-benchify"
     lines = [
         f"FROM python:{version}-slim",
+        f"LABEL org.opencontainers.image.source={source_url}",
         "RUN apt-get update -qq && "
         "apt-get install -y --no-install-recommends git",
     ]

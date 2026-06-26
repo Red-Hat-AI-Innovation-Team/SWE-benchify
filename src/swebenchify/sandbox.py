@@ -17,6 +17,10 @@ import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from swebenchify.models import GoEnvironmentSpec
 
 logger = logging.getLogger(__name__)
 
@@ -143,8 +147,10 @@ class GoDockerfile:
             A multi-line Dockerfile string.
         """
         go_version = spec.go_version or "1.21"
+        source_url = "https://github.com/Red-Hat-AI-Innovation-Team/SWE-benchify"
         lines = [
             f"FROM golang:{go_version}",
+            f"LABEL org.opencontainers.image.source={source_url}",
             "WORKDIR /repo",
         ]
 
@@ -280,6 +286,35 @@ class GoImageCache:
         if self.build(repo_path, spec, name):
             return name
         return None
+
+    def push_to_registry(self, local_name: str, registry: str) -> str:
+        """Tag and push a local image to a remote registry.
+
+        Returns the registry-qualified image name on success.
+        Raises ``RuntimeError`` on failure.
+        """
+        remote_name = f"{registry}/{local_name}"
+        try:
+            tag = subprocess.run(
+                ["docker", "tag", local_name, remote_name],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if tag.returncode != 0:
+                raise RuntimeError(f"docker tag failed: {tag.stderr}")
+            push = subprocess.run(
+                ["docker", "push", remote_name],
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            if push.returncode != 0:
+                raise RuntimeError(f"docker push failed: {push.stderr}")
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"docker push timed out: {exc}") from exc
+        logger.info("Pushed Go image: %s", remote_name)
+        return remote_name
 
 
 def is_docker_available() -> bool:
