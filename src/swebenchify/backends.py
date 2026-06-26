@@ -174,7 +174,11 @@ def _python_make_test_cmd(env_spec: AnyEnvironmentSpec) -> str:
 
 
 def _python_test_scope(test_patch: str) -> str:
-    """Return space-separated .py file paths from diff headers."""
+    """Return space-separated test .py file paths from diff headers.
+
+    Only includes files matching pytest's default discovery pattern
+    (test_*.py or *_test.py) to avoid collecting non-test modules.
+    """
     files: list[str] = []
     for line in test_patch.splitlines():
         if not line.startswith("diff --git"):
@@ -184,7 +188,10 @@ def _python_test_scope(test_patch: str) -> str:
             continue
         b_path = parts[3]
         path = b_path[2:] if b_path.startswith("b/") else b_path
-        if path.endswith(".py"):
+        if not path.endswith(".py"):
+            continue
+        basename = Path(path).name
+        if basename.startswith("test_") or basename.endswith("_test.py"):
             files.append(path)
     return " ".join(files)
 

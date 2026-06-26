@@ -339,12 +339,15 @@ def _make_f2p_run_script_generic(
     test_scope: str,
     failure_grep: str,
     n_runs: int = 1,
+    reinstall_cmd: str | None = None,
 ) -> str:
     """Generate a two-phase run script parameterized by language."""
     parts = ["set -e", "cd /repo"]
 
     for i in range(1, n_runs + 1):
         parts.append("git checkout -- . && git clean -fd -q")
+        if reinstall_cmd:
+            parts.append(f"{reinstall_cmd} 2>&1 || true")
         parts.append(
             "git apply /patches/test.patch "
             "2>&1 || { echo PATCH_APPLY_FAILED; exit 0; }"
@@ -576,6 +579,10 @@ def compute_f2p(
                 error_message=f"Docker build failed (rc={build_rc}): {build_log[-500:]}",
             )
 
+        reinstall_cmd = None
+        if isinstance(fallback_spec, EnvironmentSpec) and fallback_spec.install_cmd:
+            reinstall_cmd = fallback_spec.install_cmd
+
         scaled_timeout = timeout * n_runs * 2
         run_rc, raw_output = _docker_run(
             image=build_tag,
@@ -584,6 +591,7 @@ def compute_f2p(
                 test_scope=test_scope,
                 failure_grep=backend.failure_grep,
                 n_runs=n_runs,
+                reinstall_cmd=reinstall_cmd,
             ),
             timeout=scaled_timeout,
         )

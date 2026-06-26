@@ -1,0 +1,25 @@
+# SWE-benchify — Ansible (Python) PR mining
+repos:
+  - ansible/ansible
+
+github:
+  token: $GITHUB_TOKEN
+
+pipeline:
+  max_concurrent_repos: 1
+  max_concurrent_validations: 4
+  pr_date_range:
+    after: "2025-01-01T00:00:00Z"
+    before: "2026-06-25T00:00:00Z"
+
+filters:
+  min_problem_statement_words: 20
+  min_patch_lines: 3
+  max_patch_lines: 500
+  min_fail_to_pass: 1
+  no_new_symbol_tests: true
+  no_shas_in_problem: false
+  no_urls_in_problem: false
+
+output:
+  dir: ./output/ansible
