@@ -1,0 +1,49 @@
+name: Build Python Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      instances_jsonl:
+        description: "Path to instances JSONL file (relative to repo root)"
+        required: true
+        type: string
+      registry:
+        description: "Container registry prefix"
+        required: false
+        default: "ghcr.io/red-hat-ai-innovation-team"
+        type: string
+      dry_run:
+        description: "Dry-run (verify specs only, no build/push)"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install swebenchify
+        run: pip install -e .
+
+      - name: Log in to GHCR
+        if: ${{ !inputs.dry_run }}
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build and push images
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/build_and_push_python_images.py \
+            --instances "${{ inputs.instances_jsonl }}" \
+            --specs-dir data/python-specs \
+            --registry "${{ inputs.registry }}" \
+            ${{ inputs.dry_run && '--dry-run' || '' }}
