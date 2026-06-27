@@ -82,6 +82,8 @@ class EnvironmentSpec:
     pre_install: list[str] = field(default_factory=list)
     pip_packages: list[str] = field(default_factory=list)
     system_dependencies: list[str] = field(default_factory=list)
+    base_image: str = ""           # custom Docker base image (default: python:{version}-slim)
+    run_preamble: str = ""         # shell commands to run before tests (e.g. start services)
     env_spec_hash: str = ""        # populated by compute_python_env_spec_hash()
 
 
@@ -136,6 +138,7 @@ def compute_python_env_spec_hash(spec: EnvironmentSpec) -> str:
         "pre_install": sorted(spec.pre_install),
         "pip_packages": sorted(spec.pip_packages),
         "system_dependencies": sorted(spec.system_dependencies),
+        "base_image": spec.base_image,
     }
     serialised = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialised.encode()).hexdigest()

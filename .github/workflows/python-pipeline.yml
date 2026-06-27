@@ -23,6 +23,14 @@ on:
         description: "Semicolon-separated pre-install commands"
         required: false
         type: string
+      base_image:
+        description: "Custom Docker base image (default: python:{version}-slim)"
+        required: false
+        type: string
+      run_preamble:
+        description: "Shell commands to run before tests (e.g. start services)"
+        required: false
+        type: string
       max_prs:
         description: "Max PRs to scan"
         required: false
@@ -62,7 +70,9 @@ jobs:
             ${{ inputs.python_version && format('--python-version {0}', inputs.python_version) || '' }} \
             ${{ inputs.install_cmd && format('--install-cmd "{0}"', inputs.install_cmd) || '' }} \
             ${{ inputs.test_cmd && format('--test-cmd {0}', inputs.test_cmd) || '' }} \
-            ${{ inputs.pre_install && format('--pre-install "{0}"', inputs.pre_install) || '' }}
+            ${{ inputs.pre_install && format('--pre-install "{0}"', inputs.pre_install) || '' }} \
+            ${{ inputs.base_image && format('--base-image "{0}"', inputs.base_image) || '' }} \
+            ${{ inputs.run_preamble && format('--run-preamble "{0}"', inputs.run_preamble) || '' }}
 
       - name: Set artifact name
         if: always()

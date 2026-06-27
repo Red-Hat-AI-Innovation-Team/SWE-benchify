@@ -482,9 +482,15 @@ def _make_f2p_run_script_generic(
     failure_grep: str,
     n_runs: int = 1,
     reinstall_cmd: str | None = None,
+    run_preamble: str = "",
 ) -> str:
     """Generate a two-phase run script parameterized by language."""
-    parts = ["set -e", "cd /repo"]
+    parts = ["set -e"]
+
+    if run_preamble:
+        parts.append(run_preamble)
+
+    parts.append("cd /repo")
 
     for i in range(1, n_runs + 1):
         parts.append("git checkout -- . && git clean -fd -q")
@@ -725,6 +731,10 @@ def compute_f2p(
         if isinstance(fallback_spec, EnvironmentSpec) and fallback_spec.install_cmd:
             reinstall_cmd = fallback_spec.install_cmd
 
+        run_preamble = ""
+        if isinstance(fallback_spec, EnvironmentSpec):
+            run_preamble = fallback_spec.run_preamble
+
         scaled_timeout = timeout * n_runs * 2
         run_rc, raw_output = _docker_run(
             image=build_tag,
@@ -734,6 +744,7 @@ def compute_f2p(
                 failure_grep=backend.failure_grep,
                 n_runs=n_runs,
                 reinstall_cmd=reinstall_cmd,
+                run_preamble=run_preamble,
             ),
             timeout=scaled_timeout,
         )

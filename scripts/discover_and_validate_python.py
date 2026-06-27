@@ -148,6 +148,8 @@ def build_env_spec(args: argparse.Namespace, repo: str, token: str | None) -> En
         pre_install=pre_install,
         pip_packages=[],
         system_dependencies=[],
+        base_image=args.base_image or "",
+        run_preamble=args.run_preamble or "",
     )
     spec.env_spec_hash = compute_python_env_spec_hash(spec)
     return spec
@@ -182,6 +184,10 @@ def main(argv: list[str] | None = None) -> int:
                            help="Test command (default: pytest)")
     env_group.add_argument("--pre-install", default=None,
                            help="Semicolon-separated pre-install commands")
+    env_group.add_argument("--base-image", default=None,
+                           help="Custom Docker base image (default: python:{version}-slim)")
+    env_group.add_argument("--run-preamble", default=None,
+                           help="Shell commands to run before tests (e.g. start services)")
     env_group.add_argument("--skip-detection", action="store_true",
                            help="Skip auto-detection, use defaults + overrides only")
 
@@ -311,6 +317,8 @@ def main(argv: list[str] | None = None) -> int:
         "pre_install": env_spec.pre_install,
         "pip_packages": env_spec.pip_packages,
         "system_dependencies": env_spec.system_dependencies,
+        "base_image": env_spec.base_image,
+        "run_preamble": env_spec.run_preamble,
     }
     spec_path.write_text(json.dumps(spec_dict, indent=2) + "\n")
     logger.info("Saved env spec to %s (hash=%s)", spec_path, env_spec.env_spec_hash)

@@ -126,15 +126,24 @@ def _go_test_scope(test_patch: str) -> str:
 
 def _python_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmentSpec) -> str:
     spec = env_spec if isinstance(env_spec, EnvironmentSpec) else None
-    version = (spec.language_version if spec else None) or "3.11"
+
+    if spec and spec.base_image:
+        base = spec.base_image
+    else:
+        version = (spec.language_version if spec else None) or "3.11"
+        base = f"python:{version}-slim"
 
     source_url = "https://github.com/Red-Hat-AI-Innovation-Team/SWE-benchify"
     lines = [
-        f"FROM python:{version}-slim",
+        f"FROM {base}",
         f"LABEL org.opencontainers.image.source={source_url}",
-        "RUN apt-get update -qq && "
-        "apt-get install -y --no-install-recommends git",
     ]
+
+    if not (spec and spec.base_image):
+        lines.append(
+            "RUN apt-get update -qq && "
+            "apt-get install -y --no-install-recommends git"
+        )
 
     if spec and spec.system_dependencies:
         pkgs = " ".join(spec.system_dependencies)
