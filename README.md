@@ -235,6 +235,138 @@ output:
   dir: ./output
   upload_to_hf: false
   hf_repo: null
+
+docker:
+  registry: ghcr.io/red-hat-ai-innovation-team  # GHCR org prefix
+  push_images: true                              # push after build
+```
+
+## Python Pipeline
+
+For Python repositories, a standalone pipeline script handles discovery and
+validation without the full agentic flow:
+
+```bash
+python scripts/discover_and_validate_python.py \
+    --repo containers/podman-compose \
+    --max-prs 300 \
+    --timeout 600
+```
+
+The script auto-detects environment settings from `pyproject.toml` and
+`requirements.txt`, or accepts explicit overrides:
+
+```bash
+python scripts/discover_and_validate_python.py \
+    --repo pallets/flask \
+    --python-version 3.11 \
+    --install-cmd "pip install -e '.[async,dotenv]'" \
+    --test-cmd "pytest tests/" \
+    --pre-install "pip install -r requirements/tests.txt"
+```
+
+### Custom base images
+
+Repos that need infrastructure beyond `python:slim` (e.g. PostgreSQL, Redis)
+can specify a custom Docker base image:
+
+```bash
+python scripts/discover_and_validate_python.py \
+    --repo pulp/pulp_ansible \
+    --base-image ghcr.io/pulp/pulp-ci-centos9 \
+    --install-cmd "pip install -e ." \
+    --test-cmd "pytest -v --pyargs pulp_ansible.tests.unit" \
+    --pre-install "pip install mock pytest-django"
+```
+
+The `--run-preamble` flag injects shell commands before the test phase,
+useful for starting services:
+
+```bash
+--run-preamble "/init & sleep 5; curl -sf http://localhost/pulp/api/v3/status/"
+```
+
+### GitHub Actions workflow
+
+The `Python Pipeline` workflow (`.github/workflows/python-pipeline.yml`)
+runs the pipeline in CI:
+
+```bash
+gh workflow run python-pipeline.yml \
+    -f repo="containers/podman-compose" \
+    -f max_prs=300
+```
+
+All environment overrides (`python_version`, `install_cmd`, `test_cmd`,
+`pre_install`, `base_image`, `run_preamble`) are available as workflow inputs.
+
+## Docker Images
+
+### Go images
+
+Go instances are validated inside Docker containers built from a per-repo
+`GoEnvironmentSpec`. Each spec produces a deterministic image tag:
+
+```
+swebenchify-go-{owner}__{repo}-{env_spec_hash[:12]}
+```
+
+When `docker.push_images` is `true` in the config, the pipeline automatically
+pushes images to the configured registry after building them locally. The
+registry-qualified name (e.g. `ghcr.io/red-hat-ai-innovation-team/swebenchify-go-kubernetes__kubernetes-ff85eb477eda`)
+is written to each emitted `TaskInstance.image_name`, making instances
+self-contained for downstream consumers.
+
+Specs are also persisted to `data/go-specs/{env_spec_hash}.json` during
+pipeline runs so the standalone build script stays in sync.
+
+The `Build Go Images` workflow (`.github/workflows/build-images.yml`) can
+build and push images from a CI environment without running the full pipeline:
+
+```bash
+gh workflow run build-images.yml \
+  -f instances_jsonl=output/instances.jsonl \
+  -f registry=ghcr.io/red-hat-ai-innovation-team
+```
+
+### Python images
+
+Python validation images are built on the fly during pipeline runs. The base
+image defaults to `python:{version}-slim` but can be overridden via
+`--base-image` for repos with special infrastructure requirements.
+
+The `EnvironmentSpec` controls the Dockerfile:
+
+```json
+{
+  "language": "python",
+  "language_version": "3.11",
+  "package_manager": "pip",
+  "install_cmd": "pip install -e .",
+  "test_cmd": "pytest",
+  "pre_install": ["pip install -r requirements.txt"],
+  "base_image": "",
+  "run_preamble": ""
+}
+```
+
+### Standalone build script
+
+When images are missing from the registry, use the standalone script:
+
+```bash
+python scripts/build_and_push_images.py \
+  --instances output/instances.jsonl \
+  --specs-dir data/go-specs \
+  --registry ghcr.io/red-hat-ai-innovation-team \
+  --update-jsonl
+```
+
+**Prerequisite:** GHCR authentication. Fine-grained GitHub PATs do not support
+GHCR — you need a classic PAT with `write:packages` scope:
+
+```bash
+echo "$PAT" | docker login ghcr.io -u USERNAME --password-stdin
 ```
 
 ## Output Format
