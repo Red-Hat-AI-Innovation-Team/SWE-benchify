@@ -257,9 +257,15 @@ def main(argv: list[str] | None = None) -> int:
             logger.error("  %s failed: %s", c.instance_id, exc)
             result = ValidationResult(status="error", error_message=str(exc))
         results[c.instance_id] = result
-        logger.info("  %s -> %s (f2p=%d, p2p=%d)",
-                    c.instance_id, result.status,
-                    len(result.FAIL_TO_PASS), len(result.PASS_TO_PASS))
+        if result.error_message:
+            logger.info("  %s -> %s (f2p=%d, p2p=%d) error=%s",
+                        c.instance_id, result.status,
+                        len(result.FAIL_TO_PASS), len(result.PASS_TO_PASS),
+                        result.error_message[:200])
+        else:
+            logger.info("  %s -> %s (f2p=%d, p2p=%d)",
+                        c.instance_id, result.status,
+                        len(result.FAIL_TO_PASS), len(result.PASS_TO_PASS))
 
     valid = sum(1 for v in results.values() if v.status == "valid")
     invalid = sum(1 for v in results.values() if v.status == "invalid")
