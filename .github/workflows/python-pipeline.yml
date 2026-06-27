@@ -64,10 +64,17 @@ jobs:
             ${{ inputs.test_cmd && format('--test-cmd {0}', inputs.test_cmd) || '' }} \
             ${{ inputs.pre_install && format('--pre-install "{0}"', inputs.pre_install) || '' }}
 
+      - name: Set artifact name
+        if: always()
+        id: artifact
+        run: echo "name=pipeline-${REPO//\//__}" >> "$GITHUB_OUTPUT"
+        env:
+          REPO: ${{ inputs.repo }}
+
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pipeline-${{ inputs.repo && replace(inputs.repo, '/', '__') || 'unknown' }}
+          name: ${{ steps.artifact.outputs.name }}
           path: output/
           retention-days: 30
