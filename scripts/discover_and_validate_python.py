@@ -111,6 +111,18 @@ def _detect_env_spec(repo: str, token: str | None) -> dict[str, str | list[str]]
     return detected
 
 
+def _clamp_python_version(version: str) -> str:
+    """Ensure detected Python version is at least 3.9 (older slim images don't exist)."""
+    try:
+        parts = version.split(".")
+        major, minor = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+        if major < 3 or (major == 3 and minor < 9):
+            return "3.11"
+    except (ValueError, IndexError):
+        return "3.11"
+    return version
+
+
 def build_env_spec(args: argparse.Namespace, repo: str, token: str | None) -> EnvironmentSpec:
     """Build EnvironmentSpec from CLI args + auto-detection."""
     auto = _detect_env_spec(repo, token) if not args.skip_detection else {}
@@ -121,9 +133,15 @@ def build_env_spec(args: argparse.Namespace, repo: str, token: str | None) -> En
     elif "pre_install" in auto:
         pre_install = auto["pre_install"]  # type: ignore[assignment]
 
+    detected_version = args.python_version or auto.get("python_version", "3.11")
+    python_version = _clamp_python_version(detected_version)  # type: ignore[arg-type]
+    if python_version != detected_version:
+        logger.warning("Clamped Python version %s -> %s (old images unavailable)",
+                       detected_version, python_version)
+
     spec = EnvironmentSpec(
         language="python",
-        language_version=args.python_version or auto.get("python_version", "3.11"),  # type: ignore[arg-type]
+        language_version=python_version,
         package_manager="pip",
         install_cmd=args.install_cmd or "pip install -e .",
         test_cmd=args.test_cmd or "pytest",
@@ -261,7 +279,7 @@ def main(argv: list[str] | None = None) -> int:
             logger.info("  %s -> %s (f2p=%d, p2p=%d) error=%s",
                         c.instance_id, result.status,
                         len(result.FAIL_TO_PASS), len(result.PASS_TO_PASS),
-                        result.error_message[:200])
+                        result.error_message[:500])
         else:
             logger.info("  %s -> %s (f2p=%d, p2p=%d)",
                         c.instance_id, result.status,
