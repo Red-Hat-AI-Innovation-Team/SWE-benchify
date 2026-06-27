@@ -1,4 +1,4 @@
-"""Agent-free Go instance grader — importable grade() API.
+"""Language-aware instance grader — importable grade() API.
 
 Consumed by the RH-org evaluator (swe-routing-eval). Requires only
 Docker; no Anthropic API key.
@@ -85,13 +85,16 @@ def grade(
     *,
     docker_image: str = _DEFAULT_IMAGE,
     timeout: int = _DEFAULT_TIMEOUT,
+    env_spec: EnvironmentSpec | None = None,
 ) -> GradeResult:
-    """Grade a candidate patch against a Go benchmark instance.
+    """Grade a candidate patch against a benchmark instance.
 
     Applies *candidate_patch* alongside the instance's canonical
-    ``test_patch`` at ``base_commit``, runs ``go test -json``, and
-    checks whether every recorded FAIL_TO_PASS test now passes and every
-    PASS_TO_PASS test still passes.
+    ``test_patch`` at ``base_commit``, runs the language-appropriate
+    test command, and checks whether every recorded FAIL_TO_PASS test
+    now passes and every PASS_TO_PASS test still passes.
+
+    Language is detected from ``instance["repo_language"]`` (default: Go).
 
     No Anthropic API key is required — the function runs Docker directly.
 
@@ -106,7 +109,7 @@ def grade(
             - ``PASS_TO_PASS`` — JSON-encoded or plain list of test IDs
 
         candidate_patch: Unified diff of the model's proposed fix.
-        docker_image: Go Docker image (default: ``golang:latest``).
+        docker_image: Docker image override (default: language-specific).
         timeout: Seconds to allow for the test run (default: 300).
 
     Returns:
@@ -115,7 +118,6 @@ def grade(
     Raises:
         RuntimeError: If Docker is not available or the repo cannot be cloned.
     """
-    # Normalise instance to dict regardless of whether it's a dataclass
     if not isinstance(instance, dict):
         try:
             from dataclasses import asdict
@@ -125,12 +127,31 @@ def grade(
     else:
         inst = instance
 
+    language = inst.get("repo_language", "go")
+    backend = get_backend(language)
+
+    if backend and language != "go":
+        return _grade_generic(inst, candidate_patch, backend,
+                              docker_image=docker_image, timeout=timeout,
+                              env_spec=env_spec)
+
+    return _grade_go(inst, candidate_patch,
+                     docker_image=docker_image, timeout=timeout)
+
+
+def _grade_go(
+    inst: dict,
+    candidate_patch: str,
+    *,
+    docker_image: str = _DEFAULT_IMAGE,
+    timeout: int = _DEFAULT_TIMEOUT,
+) -> GradeResult:
+    """Go-specific grading path (original implementation)."""
     repo = inst["repo"]
     base_commit = inst["base_commit"]
     test_patch = inst.get("test_patch") or ""
     candidate_patch = candidate_patch or ""
 
-    # Decode recorded F2P/P2P (may be JSON-encoded strings or plain lists)
     recorded_f2p: list[str] = _decode_list(inst.get("FAIL_TO_PASS", "[]"))
     recorded_p2p: list[str] = _decode_list(inst.get("PASS_TO_PASS", "[]"))
 
@@ -144,13 +165,9 @@ def grade(
         (tmp / "test.patch").write_text(test_patch)
         (tmp / "candidate.patch").write_text(candidate_patch)
 
-        # Identify which packages the test_patch touches so we can scope
-        # the test run (running ./... on kubernetes/kubernetes takes hours)
         pkg_scope = " ".join(_affected_packages(test_patch)) or "./..."
-
         build_tag = f"swebenchify-grade-{_short_hash(repo + base_commit)}"
 
-        # --- Build Docker image (clone + checkout baked in) ---
         build_start = time.monotonic()
         build_rc, build_log = _docker_build(
             tag=build_tag,
@@ -173,7 +190,6 @@ def grade(
                 },
             )
 
-        # --- Run: apply test_patch + candidate_patch, then go test -json ---
         run_start = time.monotonic()
         run_rc, raw_output = _docker_run(
             image=build_tag,
@@ -182,27 +198,21 @@ def grade(
         )
         run_elapsed = time.monotonic() - run_start
 
-        # Clean up image
         subprocess.run([_DOCKER, "rmi", build_tag], capture_output=True)
 
     total_elapsed = time.monotonic() - t0
 
-    # --- Parse output ---
     parser = GoJSONParser()
     parse_result = parser.parse(raw_output)
     compiled = parse_result["compiled"]
-    actual_tests = parse_result["tests"]  # test_id -> status (full qualified)
+    actual_tests = parse_result["tests"]
 
-    # Build a lookup: normalised bare name -> actual status
-    # (handles package-prefix and subtest suffix differences)
     normalised_lookup: dict[str, str] = {}
     for full_id, status in actual_tests.items():
         bare = normalize_go_test_id(full_id)
-        # In case of collisions (subtests), "failed" takes priority
         if bare not in normalised_lookup or status == "failed":
             normalised_lookup[bare] = status
 
-    # --- Evaluate F2P and P2P ---
     f2p_results: list[GoTestResult] = []
     for test_id in recorded_f2p:
         bare = normalize_go_test_id(test_id)
@@ -215,7 +225,6 @@ def grade(
         actual = normalised_lookup.get(bare, "missing")
         p2p_results.append(GoTestResult(test_id=test_id, status=actual))
 
-    # Resolved iff: compiled AND all F2P now pass AND all P2P still pass
     f2p_all_pass = all(r.status == "passed" for r in f2p_results)
     p2p_all_pass = all(r.status == "passed" for r in p2p_results)
     resolved = compiled and f2p_all_pass and p2p_all_pass
@@ -233,6 +242,127 @@ def grade(
             "run_rc": run_rc,
             "pkg_scope": pkg_scope,
             "docker_image": docker_image,
+            "raw_output_lines": raw_output.count("\n"),
+            "f2p_pass": f2p_all_pass,
+            "p2p_pass": p2p_all_pass,
+        },
+    )
+
+
+def _grade_generic(
+    inst: dict,
+    candidate_patch: str,
+    backend: Any,
+    *,
+    docker_image: str = "",
+    timeout: int = _DEFAULT_TIMEOUT,
+    env_spec: EnvironmentSpec | None = None,
+) -> GradeResult:
+    """Language-generic grading via the backend registry."""
+    repo = inst["repo"]
+    base_commit = inst["base_commit"]
+    test_patch = inst.get("test_patch") or ""
+    candidate_patch = candidate_patch or ""
+
+    recorded_f2p: list[str] = _decode_list(inst.get("FAIL_TO_PASS", "[]"))
+    recorded_p2p: list[str] = _decode_list(inst.get("PASS_TO_PASS", "[]"))
+
+    if not _docker_available():
+        raise RuntimeError("Docker is not available — cannot run grade()")
+
+    if env_spec is None:
+        env_spec = EnvironmentSpec(
+            language=backend.name,
+            language_version="3.11",
+            package_manager="pip",
+            install_cmd="pip install -e .",
+            test_cmd="pytest",
+            pre_install=[],
+            pip_packages=[],
+            system_dependencies=[],
+        )
+
+    t0 = time.monotonic()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        (tmp / "test.patch").write_text(test_patch)
+        (tmp / "candidate.patch").write_text(candidate_patch)
+
+        test_scope = backend.test_scope(test_patch)
+        test_cmd = backend.make_test_cmd(env_spec)
+        build_tag = f"swebenchify-grade-{_short_hash(repo + base_commit)}"
+
+        build_start = time.monotonic()
+        dockerfile = backend.make_dockerfile(repo, base_commit, env_spec)
+        dockerfile = dockerfile.replace(
+            "COPY gold.patch /patches/gold.patch",
+            "COPY candidate.patch /patches/candidate.patch",
+        )
+        build_rc, build_log = _docker_build(
+            tag=build_tag,
+            context_dir=str(tmp),
+            dockerfile=dockerfile,
+        )
+        build_elapsed = time.monotonic() - build_start
+
+        if build_rc != 0:
+            elapsed = time.monotonic() - t0
+            return GradeResult(
+                resolved=False,
+                compiled=False,
+                telemetry={
+                    "grader_version": __version__,
+                    "elapsed_s": round(elapsed, 2),
+                    "build_rc": build_rc,
+                    "build_log": build_log[-2000:],
+                    "error": "docker build failed",
+                },
+            )
+
+        run_script = _make_grade_run_script(test_cmd, test_scope)
+        run_start = time.monotonic()
+        run_rc, raw_output = _docker_run(
+            image=build_tag,
+            script=run_script,
+            timeout=timeout,
+        )
+        run_elapsed = time.monotonic() - run_start
+
+        subprocess.run([_DOCKER, "rmi", build_tag], capture_output=True)
+
+    total_elapsed = time.monotonic() - t0
+
+    parse_result = backend.parser.parse(raw_output)
+    compiled = parse_result["compiled"]
+    actual_tests = parse_result["tests"]
+
+    f2p_results: list[GoTestResult] = []
+    for test_id in recorded_f2p:
+        actual = actual_tests.get(test_id, "missing")
+        f2p_results.append(GoTestResult(test_id=test_id, status=actual))
+
+    p2p_results: list[GoTestResult] = []
+    for test_id in recorded_p2p:
+        actual = actual_tests.get(test_id, "missing")
+        p2p_results.append(GoTestResult(test_id=test_id, status=actual))
+
+    f2p_all_pass = all(r.status == "passed" for r in f2p_results)
+    p2p_all_pass = all(r.status == "passed" for r in p2p_results)
+    resolved = compiled and f2p_all_pass and p2p_all_pass
+
+    return GradeResult(
+        resolved=resolved,
+        f2p=f2p_results,
+        p2p=p2p_results,
+        compiled=compiled,
+        telemetry={
+            "grader_version": __version__,
+            "elapsed_s": round(total_elapsed, 2),
+            "build_elapsed_s": round(build_elapsed, 2),
+            "run_elapsed_s": round(run_elapsed, 2),
+            "run_rc": run_rc,
+            "test_scope": test_scope,
             "raw_output_lines": raw_output.count("\n"),
             "f2p_pass": f2p_all_pass,
             "p2p_pass": p2p_all_pass,
@@ -311,6 +441,17 @@ def _make_run_script(pkg_scope: str) -> str:
         "git apply /patches/test.patch /patches/candidate.patch "
         "2>&1 || { echo PATCH_APPLY_FAILED; exit 0; }\n"
         f"go test -json -count=1 {pkg_scope} 2>&1 || true\n"
+    )
+
+
+def _make_grade_run_script(test_cmd: str, test_scope: str) -> str:
+    """Generate a run script for grading: apply candidate+test patches, run tests."""
+    return (
+        "set -e\n"
+        "cd /repo\n"
+        "git apply /patches/test.patch /patches/candidate.patch "
+        "2>&1 || { echo PATCH_APPLY_FAILED; exit 0; }\n"
+        f"{test_cmd} {test_scope} 2>&1 || true\n"
     )
 
 
