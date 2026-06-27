@@ -278,8 +278,65 @@ class PytestVerboseParser:
 
 
 # ---------------------------------------------------------------------------
+# MavenSurefireParser
+# ---------------------------------------------------------------------------
+
+# Matches per-class summary lines from Maven Surefire:
+#   [INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.5 s -- in com.pkg.Test
+#   [ERROR] Tests run: 3, Failures: 1, ... <<< FAILURE! -- in com.pkg.Test
+_MAVEN_CLASS_SUMMARY_RE = re.compile(
+    r"Tests run:\s*(\d+),\s*"
+    r"Failures:\s*(\d+),\s*"
+    r"Errors:\s*(\d+),\s*"
+    r"Skipped:\s*(\d+)"
+    r".*?--\s+in\s+([\w.$]+)",
+    re.MULTILINE,
+)
+
+_MAVEN_BUILD_FAILURE_RE = re.compile(
+    r"BUILD FAILURE|COMPILATION ERROR",
+)
+
+
+class MavenSurefireParser:
+    """Parse Maven Surefire text output into class-level test results.
+
+    Produces class-level test IDs (e.g. ``com.pkg.SomeTest``).
+    """
+
+    def parse(self, raw_output: str) -> ParseResult:
+        if not raw_output or not raw_output.strip():
+            return ParseResult(tests={}, compiled=False)
+
+        test_status: dict[str, str] = {}
+        for match in _MAVEN_CLASS_SUMMARY_RE.finditer(raw_output):
+            total = int(match.group(1))
+            failures = int(match.group(2))
+            errors = int(match.group(3))
+            skipped = int(match.group(4))
+            class_name = match.group(5)
+
+            if failures > 0 or errors > 0:
+                test_status[class_name] = "failed"
+            elif skipped == total:
+                test_status[class_name] = "skipped"
+            else:
+                test_status[class_name] = "passed"
+
+        compiled = True
+        if not test_status:
+            if _MAVEN_BUILD_FAILURE_RE.search(raw_output):
+                compiled = False
+            else:
+                compiled = False
+
+        return ParseResult(tests=test_status, compiled=compiled)
+
+
+# ---------------------------------------------------------------------------
 # Auto-register built-in parsers on import
 # ---------------------------------------------------------------------------
 
 register("go", GoJSONParser())
 register("python", PytestVerboseParser())
+register("java", MavenSurefireParser())

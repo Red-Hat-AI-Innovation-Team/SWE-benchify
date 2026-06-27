@@ -15,6 +15,7 @@ from typing import Callable
 from swebenchify.models import AnyEnvironmentSpec, EnvironmentSpec, GoEnvironmentSpec
 from swebenchify.parsers import (
     GoJSONParser,
+    MavenSurefireParser,
     PytestVerboseParser,
     TestLogParser,
     normalize_go_f2p,
@@ -212,6 +213,89 @@ def _python_test_scope(test_patch: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Java backend helpers
+# ---------------------------------------------------------------------------
+
+def _java_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmentSpec) -> str:
+    spec = env_spec if isinstance(env_spec, EnvironmentSpec) else None
+
+    java_version = (spec.language_version if spec else None) or "17"
+    base = f"maven:3-eclipse-temurin-{java_version}"
+
+    source_url = "https://github.com/Red-Hat-AI-Innovation-Team/SWE-benchify"
+    lines = [
+        f"FROM {base}",
+        f"LABEL org.opencontainers.image.source={source_url}",
+        f"RUN git clone https://github.com/{repo}.git /repo && "
+        f"cd /repo && (git checkout {base_commit} || "
+        f"(git fetch origin {base_commit} && git checkout {base_commit}))",
+    ]
+
+    if spec and spec.system_dependencies:
+        pkgs = " ".join(spec.system_dependencies)
+        lines.append(
+            "RUN apt-get update -qq && "
+            f"apt-get install -y --no-install-recommends {pkgs} && "
+            "rm -rf /var/lib/apt/lists/*"
+        )
+
+    if spec:
+        for cmd in spec.pre_install:
+            lines.append(f"RUN cd /repo && {cmd}")
+        if spec.install_cmd:
+            lines.append(f"RUN cd /repo && {spec.install_cmd}")
+
+    lines.append("COPY test.patch /patches/test.patch")
+    lines.append("COPY gold.patch /patches/gold.patch")
+    return "\n".join(lines) + "\n"
+
+
+def _java_make_test_cmd(env_spec: AnyEnvironmentSpec) -> str:
+    spec = env_spec if isinstance(env_spec, EnvironmentSpec) else None
+    raw_cmd = (spec.test_cmd if spec else None) or "mvn test -B"
+    if "-Dmaven.test.failure.ignore" not in raw_cmd:
+        raw_cmd += " -Dmaven.test.failure.ignore=true"
+    return raw_cmd
+
+
+def _java_test_scope(test_patch: str) -> str:
+    """Extract Maven test scope from diff headers.
+
+    Converts paths like ``src/test/java/com/example/SomethingTest.java``
+    to ``-Dtest=com.example.SomethingTest,...``.
+    """
+    classes: list[str] = []
+    for line in test_patch.splitlines():
+        if not line.startswith("diff --git"):
+            continue
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        b_path = parts[3]
+        path = b_path[2:] if b_path.startswith("b/") else b_path
+
+        if not path.endswith(".java"):
+            continue
+
+        idx = path.find("src/test/java/")
+        if idx == -1:
+            continue
+
+        class_path = path[idx + len("src/test/java/"):]
+        class_name = class_path.replace("/", ".").removesuffix(".java")
+        if class_name and class_name not in classes:
+            classes.append(class_name)
+
+    if not classes:
+        return ""
+    return "-Dtest=" + ",".join(classes)
+
+
+def _java_normalize_f2p(test_ids: list[str]) -> list[str]:
+    return sorted(set(test_ids))
+
+
+# ---------------------------------------------------------------------------
 # Register built-in backends
 # ---------------------------------------------------------------------------
 
@@ -237,4 +321,16 @@ register_backend(LanguageBackend(
     make_test_cmd=_python_make_test_cmd,
     test_scope=_python_test_scope,
     normalize_f2p=sorted,
+))
+
+register_backend(LanguageBackend(
+    name="java",
+    test_file_pattern="Test.java",
+    failure_grep="<<< FAILURE\\|<<< ERROR",
+    default_timeout=900,
+    parser=MavenSurefireParser(),
+    make_dockerfile=_java_make_dockerfile,
+    make_test_cmd=_java_make_test_cmd,
+    test_scope=_java_test_scope,
+    normalize_f2p=_java_normalize_f2p,
 ))

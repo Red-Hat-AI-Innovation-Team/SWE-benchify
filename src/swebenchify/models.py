@@ -144,6 +144,21 @@ def compute_python_env_spec_hash(spec: EnvironmentSpec) -> str:
     return hashlib.sha256(serialised.encode()).hexdigest()
 
 
+def compute_java_env_spec_hash(spec: EnvironmentSpec) -> str:
+    """Return a stable SHA-256 hex digest of a Java EnvironmentSpec."""
+    payload = {
+        "language": spec.language,
+        "language_version": spec.language_version,
+        "package_manager": spec.package_manager,
+        "install_cmd": spec.install_cmd,
+        "test_cmd": spec.test_cmd,
+        "pre_install": sorted(spec.pre_install),
+        "system_dependencies": sorted(spec.system_dependencies),
+    }
+    serialised = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialised.encode()).hexdigest()
+
+
 # Type alias used by pipeline code that accepts either language's spec.
 AnyEnvironmentSpec = EnvironmentSpec | GoEnvironmentSpec
 

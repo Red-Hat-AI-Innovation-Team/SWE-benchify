@@ -6,6 +6,7 @@ import json
 
 from swebenchify.parsers import (
     GoJSONParser,
+    MavenSurefireParser,
     ParseResult,
     PytestVerboseParser,
     get_parser,
@@ -513,3 +514,159 @@ class TestNormalizeGoF2p:
         assert "TestLearnerReadyCheck" in result
         # Subtest collapsed into parent — no duplicates
         assert result.count("TestHTTPSubPath") == 1
+
+
+# ---------------------------------------------------------------------------
+# MavenSurefireParser
+# ---------------------------------------------------------------------------
+
+class TestMavenSurefireParser:
+    def test_single_passing_class(self) -> None:
+        output = (
+            "[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0, "
+            "Time elapsed: 0.5 s -- in com.fasterxml.jackson.databind.SomeTest\n"
+        )
+        result = MavenSurefireParser().parse(output)
+        assert result["tests"]["com.fasterxml.jackson.databind.SomeTest"] == "passed"
+        assert result["compiled"] is True
+
+    def test_single_failing_class(self) -> None:
+        output = (
+            "[ERROR] Tests run: 3, Failures: 1, Errors: 0, Skipped: 0, "
+            "Time elapsed: 0.3 s <<< FAILURE! -- in com.pkg.OtherTest\n"
+        )
+        result = MavenSurefireParser().parse(output)
+        assert result["tests"]["com.pkg.OtherTest"] == "failed"
+        assert result["compiled"] is True
+
+    def test_class_with_errors(self) -> None:
+        output = (
+            "[ERROR] Tests run: 2, Failures: 0, Errors: 1, Skipped: 0, "
+            "Time elapsed: 0.1 s <<< ERROR! -- in com.pkg.ErrorTest\n"
+        )
+        result = MavenSurefireParser().parse(output)
+        assert result["tests"]["com.pkg.ErrorTest"] == "failed"
+
+    def test_mixed_pass_and_fail(self) -> None:
+        output = (
+            "[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0, "
+            "Time elapsed: 0.5 s -- in com.pkg.GoodTest\n"
+            "[ERROR] Tests run: 3, Failures: 1, Errors: 0, Skipped: 0, "
+            "Time elapsed: 0.3 s <<< FAILURE! -- in com.pkg.BadTest\n"
+        )
+        result = MavenSurefireParser().parse(output)
+        assert result["tests"]["com.pkg.GoodTest"] == "passed"
+        assert result["tests"]["com.pkg.BadTest"] == "failed"
+
+    def test_all_skipped_class(self) -> None:
+        output = (
+            "[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 3, "
+            "Time elapsed: 0.01 s -- in com.pkg.SkippedTest\n"
+        )
+        result = MavenSurefireParser().parse(output)
+        assert result["tests"]["com.pkg.SkippedTest"] == "skipped"
+
+    def test_partial_skip_is_passed(self) -> None:
+        output = (
+            "[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 2, "
+            "Time elapsed: 0.3 s -- in com.pkg.PartialTest\n"
+        )
+        result = MavenSurefireParser().parse(output)
+        assert result["tests"]["com.pkg.PartialTest"] == "passed"
+
+    def test_compile_failure(self) -> None:
+        output = (
+            "[ERROR] COMPILATION ERROR :\n"
+            "[ERROR] /repo/src/main/java/com/pkg/Foo.java:[10,5] "
+            "cannot find symbol\n"
+            "[INFO] BUILD FAILURE\n"
+        )
+        result = MavenSurefireParser().parse(output)
+        assert result["compiled"] is False
+        assert result["tests"] == {}
+
+    def test_build_failure_without_tests(self) -> None:
+        output = (
+            "[INFO] BUILD FAILURE\n"
+            "[ERROR] Failed to execute goal org.apache.maven.plugins:"
+            "maven-compiler-plugin:3.11.0:compile\n"
+        )
+        result = MavenSurefireParser().parse(output)
+        assert result["compiled"] is False
+        assert result["tests"] == {}
+
+    def test_build_failure_with_test_results_is_test_failure(self) -> None:
+        output = (
+            "[ERROR] Tests run: 3, Failures: 1, Errors: 0, Skipped: 0, "
+            "Time elapsed: 0.3 s <<< FAILURE! -- in com.pkg.FailTest\n"
+            "[INFO] \n"
+            "[INFO] BUILD FAILURE\n"
+        )
+        result = MavenSurefireParser().parse(output)
+        assert result["compiled"] is True
+        assert result["tests"]["com.pkg.FailTest"] == "failed"
+
+    def test_empty_output(self) -> None:
+        result = MavenSurefireParser().parse("")
+        assert result["compiled"] is False
+        assert result["tests"] == {}
+
+    def test_whitespace_only(self) -> None:
+        result = MavenSurefireParser().parse("   \n  \n")
+        assert result["compiled"] is False
+        assert result["tests"] == {}
+
+    def test_non_test_lines_ignored(self) -> None:
+        output = (
+            "[INFO] Scanning for projects...\n"
+            "[INFO] Building jackson-databind 2.16.0-SNAPSHOT\n"
+            "[INFO] --- maven-surefire-plugin:3.2.5:test (default-test) ---\n"
+            "[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0, "
+            "Time elapsed: 0.5 s -- in com.pkg.SomeTest\n"
+            "[INFO] Results:\n"
+            "[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0\n"
+        )
+        result = MavenSurefireParser().parse(output)
+        assert len(result["tests"]) == 1
+        assert result["tests"]["com.pkg.SomeTest"] == "passed"
+
+    def test_multiple_classes(self) -> None:
+        output = (
+            "[INFO] Tests run: 10, Failures: 0, Errors: 0, Skipped: 0, "
+            "Time elapsed: 1.2 s -- in com.pkg.AlphaTest\n"
+            "[INFO] Tests run: 8, Failures: 0, Errors: 0, Skipped: 1, "
+            "Time elapsed: 0.8 s -- in com.pkg.BetaTest\n"
+            "[ERROR] Tests run: 3, Failures: 2, Errors: 0, Skipped: 0, "
+            "Time elapsed: 0.3 s <<< FAILURE! -- in com.pkg.GammaTest\n"
+        )
+        result = MavenSurefireParser().parse(output)
+        assert len(result["tests"]) == 3
+        assert result["tests"]["com.pkg.AlphaTest"] == "passed"
+        assert result["tests"]["com.pkg.BetaTest"] == "passed"
+        assert result["tests"]["com.pkg.GammaTest"] == "failed"
+
+    def test_inner_class_name(self) -> None:
+        output = (
+            "[INFO] Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, "
+            "Time elapsed: 0.1 s -- in com.pkg.OuterTest$InnerTest\n"
+        )
+        result = MavenSurefireParser().parse(output)
+        assert result["tests"]["com.pkg.OuterTest$InnerTest"] == "passed"
+
+    def test_deterministic_across_repeated_calls(self) -> None:
+        output = (
+            "[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0, "
+            "Time elapsed: 0.5 s -- in com.pkg.SomeTest\n"
+            "[ERROR] Tests run: 3, Failures: 1, Errors: 0, Skipped: 0, "
+            "Time elapsed: 0.3 s <<< FAILURE! -- in com.pkg.OtherTest\n"
+        )
+        parser = MavenSurefireParser()
+        results = [parser.parse(output) for _ in range(5)]
+        first = results[0]
+        for r in results[1:]:
+            assert r == first
+
+    def test_registry_java_returns_maven_parser(self) -> None:
+        parser = get_parser("java")
+        assert parser is not None
+        assert isinstance(parser, MavenSurefireParser)
