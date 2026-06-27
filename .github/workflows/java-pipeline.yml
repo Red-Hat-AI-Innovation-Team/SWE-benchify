@@ -33,6 +33,11 @@ on:
         required: false
         default: "900"
         type: string
+      skip_valid:
+        description: "Skip already-validated candidates on rerun"
+        required: false
+        default: "false"
+        type: boolean
 
 jobs:
   pipeline:
@@ -62,7 +67,8 @@ jobs:
             ${{ inputs.java_version && format('--java-version {0}', inputs.java_version) || '' }} \
             ${{ inputs.test_cmd && format('--test-cmd "{0}"', inputs.test_cmd) || '' }} \
             ${{ inputs.pre_install && format('--pre-install "{0}"', inputs.pre_install) || '' }} \
-            ${{ inputs.jira_projects && format('--jira-projects "{0}"', inputs.jira_projects) || '' }}
+            ${{ inputs.jira_projects && format('--jira-projects "{0}"', inputs.jira_projects) || '' }} \
+            ${{ inputs.skip_valid && '--skip-valid' || '' }}
 
       - name: Set artifact name
         if: always()

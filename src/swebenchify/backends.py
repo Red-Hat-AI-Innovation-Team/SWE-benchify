@@ -53,6 +53,23 @@ def get_backend(language: str) -> LanguageBackend | None:
 
 
 # ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+def _git_clone_or_archive(repo: str, base_commit: str) -> str:
+    """RUN instruction that checks out *base_commit*, falling back to the
+    GitHub archive API when the commit is unreachable (e.g. GC'd merge SHA)."""
+    return (
+        f"RUN (git clone https://github.com/{repo}.git /repo && "
+        f"cd /repo && (git checkout {base_commit} || "
+        f"(git fetch origin {base_commit} && git checkout {base_commit}))) "
+        f"|| (rm -rf /repo && mkdir -p /repo && cd /repo && git init && "
+        f"curl -sL https://github.com/{repo}/archive/{base_commit}.tar.gz | "
+        f"tar xz --strip-components=1 && git add -A && git commit -q -m base)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Go backend helpers
 # ---------------------------------------------------------------------------
 
@@ -67,9 +84,7 @@ def _go_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmentSpe
     lines = [
         f"FROM {base}",
         f"LABEL org.opencontainers.image.source={source_url}",
-        f"RUN git clone https://github.com/{repo}.git /repo && "
-        f"cd /repo && (git checkout {base_commit} || "
-        f"(git fetch origin {base_commit} && git checkout {base_commit}))",
+        _git_clone_or_archive(repo, base_commit),
     ]
 
     if spec and spec.system_dependencies:
@@ -155,11 +170,7 @@ def _python_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmen
 
     lines.append("RUN rm -rf /var/lib/apt/lists/*")
 
-    lines.append(
-        f"RUN git clone https://github.com/{repo}.git /repo && "
-        f"cd /repo && (git checkout {base_commit} || "
-        f"(git fetch origin {base_commit} && git checkout {base_commit}))"
-    )
+    lines.append(_git_clone_or_archive(repo, base_commit))
 
     if spec:
         for cmd in spec.pre_install:
@@ -226,9 +237,7 @@ def _java_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmentS
     lines = [
         f"FROM {base}",
         f"LABEL org.opencontainers.image.source={source_url}",
-        f"RUN git clone https://github.com/{repo}.git /repo && "
-        f"cd /repo && (git checkout {base_commit} || "
-        f"(git fetch origin {base_commit} && git checkout {base_commit}))",
+        _git_clone_or_archive(repo, base_commit),
     ]
 
     if spec and spec.system_dependencies:

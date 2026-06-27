@@ -174,6 +174,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="Number of validation runs for flake detection")
     parser.add_argument("--dry-run", action="store_true",
                         help="Collect and extract only, skip validation")
+    parser.add_argument("--skip-valid", action="store_true",
+                        help="Skip candidates already in the task-instances output")
 
     env_group = parser.add_argument_group("environment spec overrides")
     env_group.add_argument("--python-version", default=None,
@@ -250,6 +252,19 @@ def main(argv: list[str] | None = None) -> int:
         logger.warning("No viable pytest candidates found for %s", args.repo)
         return 0
 
+    if args.skip_valid and instances_path.exists():
+        existing_ids: set[str] = set()
+        for line in instances_path.read_text().splitlines():
+            if line.strip():
+                existing_ids.add(json.loads(line)["instance_id"])
+        before = len(viable)
+        viable = [c for c in viable if c.instance_id not in existing_ids]
+        logger.info("  --skip-valid: skipping %d already-validated, %d remaining",
+                     before - len(viable), len(viable))
+        if not viable:
+            logger.info("All candidates already validated.")
+            return 0
+
     if args.dry_run:
         logger.info("Dry run — skipping validation. Would validate %d candidates.", len(viable))
         for c in viable[:10]:
@@ -301,10 +316,11 @@ def main(argv: list[str] | None = None) -> int:
     instances = build_task_instances(viable, results, env_spec)
     logger.info("Built %d task instances", len(instances))
 
-    with open(instances_path, "w") as f:
+    write_mode = "a" if args.skip_valid else "w"
+    with open(instances_path, write_mode) as f:
         for inst in instances:
             f.write(json.dumps(asdict(inst)) + "\n")
-    logger.info("Wrote %d instances to %s", len(instances), instances_path)
+    logger.info("Wrote %d instances to %s (mode=%s)", len(instances), instances_path, write_mode)
 
     # Also save the env spec for later image building
     spec_path = output_dir / "env_spec.json"
