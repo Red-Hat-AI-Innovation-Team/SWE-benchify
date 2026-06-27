@@ -428,7 +428,8 @@ def _make_dockerfile(go_image: str, repo: str, base_commit: str) -> str:
     return (
         f"FROM {go_image}\n"
         f"RUN git clone https://github.com/{repo}.git /repo && "
-        f"cd /repo && git checkout {base_commit}\n"
+        f"cd /repo && (git checkout {base_commit} || "
+        f"(git fetch origin {base_commit} && git checkout {base_commit}))\n"
         "COPY test.patch /patches/test.patch\n"
         "COPY candidate.patch /patches/candidate.patch\n"
     )

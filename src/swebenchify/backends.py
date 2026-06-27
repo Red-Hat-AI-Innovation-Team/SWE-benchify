@@ -67,7 +67,8 @@ def _go_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmentSpe
         f"FROM {base}",
         f"LABEL org.opencontainers.image.source={source_url}",
         f"RUN git clone https://github.com/{repo}.git /repo && "
-        f"cd /repo && git checkout {base_commit}",
+        f"cd /repo && (git checkout {base_commit} || "
+        f"(git fetch origin {base_commit} && git checkout {base_commit}))",
     ]
 
     if spec and spec.system_dependencies:
@@ -146,7 +147,8 @@ def _python_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmen
 
     lines.append(
         f"RUN git clone https://github.com/{repo}.git /repo && "
-        f"cd /repo && git checkout {base_commit}"
+        f"cd /repo && (git checkout {base_commit} || "
+        f"(git fetch origin {base_commit} && git checkout {base_commit}))"
     )
 
     if spec:
