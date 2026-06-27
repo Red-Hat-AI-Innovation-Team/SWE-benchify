@@ -68,6 +68,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pipeline-${{ inputs.repo && format('{0}', inputs.repo) || 'unknown' }}
+          name: pipeline-${{ inputs.repo && replace(inputs.repo, '/', '__') || 'unknown' }}
           path: output/
           retention-days: 30
