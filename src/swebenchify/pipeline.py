@@ -13,14 +13,13 @@ from pathlib import Path
 
 from swebenchify.collector import collect_prs, load_prs, save_prs
 from swebenchify.config import Config
-from swebenchify.discovery import discover_environment, discover_go_environment, discover_rust_environment
+from swebenchify.discovery import discover_environment, discover_go_environment
 from swebenchify.dispatcher import CostTracker
 from swebenchify.emitter import emit_dataset, load_product_map
 from swebenchify.extractor import extract_all, load_candidates, save_candidates
 from swebenchify.filters import apply_filters
 from swebenchify.go_registry import GoSpecRegistry
-from swebenchify.models import AnyEnvironmentSpec, GoEnvironmentSpec, RustEnvironmentSpec, QualityScore, Repository, TaskInstance
-from swebenchify.rust_registry import RustSpecRegistry
+from swebenchify.models import AnyEnvironmentSpec, GoEnvironmentSpec, QualityScore, Repository, TaskInstance
 from swebenchify.sandbox import GoImageCache, SandboxConfig, is_docker_available
 from swebenchify.validator import validate_instances
 from swebenchify.versioning import detect_version
@@ -139,7 +138,6 @@ async def run_repo_pipeline(
     bare_clone = workspace_mgr.bare_clone_path(repo)
 
     is_go_repo = repo.full_name in config.go_repos
-    is_rust_repo = repo.full_name in config.rust_repos
 
     instance_versions: dict[str, str] = {}
     version_commits: dict[str, str] = {}  # version -> representative commit
@@ -150,10 +148,6 @@ async def run_repo_pipeline(
         for c in viable:
             instance_versions[c.instance_id] = "go"
         version_commits["go"] = viable[0].base_commit
-    elif is_rust_repo:
-        for c in viable:
-            instance_versions[c.instance_id] = "rust"
-        version_commits["rust"] = viable[0].base_commit
     else:
         for c in viable:
             v = detect_version(str(bare_clone), c.base_commit) or "unknown"
@@ -167,7 +161,6 @@ async def run_repo_pipeline(
     env_specs: dict[str, AnyEnvironmentSpec] = {}
     go_registry: GoSpecRegistry | None = None
     go_image_name: str | None = None
-    rust_registry: RustSpecRegistry | None = None
 
     if is_go_repo:
         go_registry = GoSpecRegistry(workspace_mgr.root)
@@ -205,30 +198,6 @@ async def run_repo_pipeline(
                 logger.error("Go environment discovery failed for %s", repo.full_name)
         except Exception as exc:
             logger.warning("Go env discovery error for %s: %s", repo.full_name, exc)
-    elif is_rust_repo:
-        rust_registry = RustSpecRegistry(workspace_mgr.root)
-        commit = version_commits["rust"]
-        try:
-            rust_spec, repo_version = await discover_rust_environment(
-                repo=repo,
-                commit=commit,
-                workspace_mgr=workspace_mgr,
-                registry=rust_registry,
-                cost_tracker=cost_tracker,
-                max_attempts=config.agent.max_attempts,
-                max_turns=config.agent.env_discovery.max_turns,
-                budget_usd=config.agent.env_discovery.budget_usd,
-            )
-            if rust_spec:
-                env_specs["rust"] = rust_spec
-                logger.info(
-                    "  Rust env: rust%s, test=%s, mode=%s",
-                    rust_spec.rust_version, rust_spec.test_cmd, rust_spec.workspace_mode,
-                )
-            else:
-                logger.error("Rust environment discovery failed for %s", repo.full_name)
-        except Exception as exc:
-            logger.warning("Rust env discovery error for %s: %s", repo.full_name, exc)
     else:
         for version, commit in version_commits.items():
             try:
@@ -275,23 +244,14 @@ async def run_repo_pipeline(
         max_turns=config.agent.validation.max_turns,
         budget_usd=config.agent.validation.budget_usd,
         instance_versions=instance_versions,
-        timeout=(
-            config.pipeline.go_validation_timeout if is_go_repo
-            else config.pipeline.rust_validation_timeout if is_rust_repo
-            else config.pipeline.python_validation_timeout
-        ),
-        n_runs=(
-            config.pipeline.go_n_runs if is_go_repo
-            else config.pipeline.rust_n_runs if is_rust_repo
-            else config.pipeline.python_n_runs
-        ),
+        timeout=config.pipeline.go_validation_timeout,
+        n_runs=config.pipeline.go_n_runs if is_go_repo else 1,
     )
 
     # Build TaskInstances from validated candidates
     from io import StringIO
     from swebenchify.compat import snap_version, get_environment_setup_commit, get_go_version_string
     from swebenchify.go_registry import get_go_environment_setup_commit
-    from swebenchify.rust_registry import get_rust_environment_setup_commit
     from unidiff import PatchSet
 
     # Get environment_setup_commit from the bare clone
@@ -307,17 +267,9 @@ async def run_repo_pipeline(
             raw_version = instance_versions.get(candidate.instance_id, "unknown")
 
             if is_go_repo and go_registry is not None:
-                go_env = env_specs.get("go")
-                version = get_go_version_string(go_env, go_registry) if isinstance(go_env, GoEnvironmentSpec) else raw_version
-                env_commit = get_go_environment_setup_commit(str(bare_clone), go_env, go_registry) if isinstance(go_env, GoEnvironmentSpec) else None
-            elif is_rust_repo and rust_registry is not None:
-                rs_spec = env_specs.get("rust")
-                if isinstance(rs_spec, RustEnvironmentSpec):
-                    version = rust_registry.get_version(rs_spec.env_spec_hash) or raw_version
-                    env_commit = get_rust_environment_setup_commit(str(bare_clone), rs_spec, rust_registry)
-                else:
-                    version = raw_version
-                    env_commit = None
+                go_spec = env_specs.get("go")
+                version = get_go_version_string(go_spec, go_registry) if isinstance(go_spec, GoEnvironmentSpec) else raw_version
+                env_commit = get_go_environment_setup_commit(str(bare_clone), go_spec, go_registry) if isinstance(go_spec, GoEnvironmentSpec) else None
             else:
                 version = snap_version(repo.full_name, raw_version) or raw_version
                 if version != raw_version:
@@ -335,14 +287,13 @@ async def run_repo_pipeline(
 
             # env_spec for this candidate
             cand_version = instance_versions.get(candidate.instance_id, "unknown")
-            if is_go_repo:
-                cand_spec = env_specs.get("go")
-            elif is_rust_repo:
-                cand_spec = env_specs.get("rust")
-            else:
-                cand_spec = env_specs.get(cand_version)
-            spec_hash = getattr(cand_spec, "env_spec_hash", None) or None
-            repo_language = cand_spec.language if cand_spec else None
+            env_spec = env_specs.get(cand_version if not is_go_repo else "go")
+            spec_hash = (
+                env_spec.env_spec_hash
+                if isinstance(env_spec, GoEnvironmentSpec)
+                else None
+            )
+            repo_language = env_spec.language if env_spec else None
 
             task_instances.append(
                 TaskInstance(

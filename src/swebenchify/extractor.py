@@ -32,7 +32,6 @@ _TEST_DIR_NAMES = {"test", "tests", "e2e", "testing", "testdata"}
 _TEST_FILE_PATTERNS = [
     re.compile(r"^test_"),        # test_foo.py
     re.compile(r"_test\.go$"),    # foo_test.go  (Go in-package test files)
-    re.compile(r"_test\.rs$"),    # foo_test.rs  (Rust convention)
     re.compile(r"_test\."),       # foo_test.py / foo_test.ts (other languages)
     re.compile(r"\.test\."),      # foo.test.ts
     re.compile(r"_spec\."),       # foo_spec.ts

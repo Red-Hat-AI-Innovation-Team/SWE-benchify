@@ -12,15 +12,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from swebenchify.models import AnyEnvironmentSpec, EnvironmentSpec, GoEnvironmentSpec, RustEnvironmentSpec
+from swebenchify.models import AnyEnvironmentSpec, EnvironmentSpec, GoEnvironmentSpec
 from swebenchify.parsers import (
     GoJSONParser,
     MavenSurefireParser,
     PytestVerboseParser,
-    RustTestParser,
     TestLogParser,
     normalize_go_f2p,
-    normalize_rust_f2p,
 )
 
 
@@ -307,52 +305,6 @@ def _java_normalize_f2p(test_ids: list[str]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Rust backend helpers
-# ---------------------------------------------------------------------------
-
-def _rust_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmentSpec) -> str:
-    spec = env_spec if isinstance(env_spec, RustEnvironmentSpec) else None
-    if spec and spec.rust_version:
-        base = f"rust:{spec.rust_version}-slim"
-    else:
-        base = "rust:latest"
-
-    source_url = "https://github.com/Red-Hat-AI-Innovation-Team/SWE-benchify"
-    lines = [
-        f"FROM {base}",
-        f"LABEL org.opencontainers.image.source={source_url}",
-        "RUN apt-get update -qq && apt-get install -y --no-install-recommends "
-        "git ca-certificates && rm -rf /var/lib/apt/lists/*",
-        _git_clone_or_archive(repo, base_commit),
-    ]
-
-    if spec and spec.system_dependencies:
-        pkgs = " ".join(spec.system_dependencies)
-        lines.append(
-            "RUN apt-get update -qq && "
-            f"apt-get install -y --no-install-recommends {pkgs} && "
-            "rm -rf /var/lib/apt/lists/*"
-        )
-
-    if spec and spec.features:
-        lines.append(f'ENV CARGO_TEST_FLAGS="{spec.features}"')
-
-    lines.append("COPY test.patch /patches/test.patch")
-    lines.append("COPY gold.patch /patches/gold.patch")
-    return "\n".join(lines) + "\n"
-
-
-def _rust_make_test_cmd(env_spec: AnyEnvironmentSpec) -> str:
-    spec = env_spec if isinstance(env_spec, RustEnvironmentSpec) else None
-    return (spec.test_cmd if spec and spec.test_cmd else None) or "cargo test"
-
-
-def _rust_test_scope(test_patch: str) -> str:
-    """Rust tests are typically run workspace-wide; return empty scope."""
-    return ""
-
-
-# ---------------------------------------------------------------------------
 # Register built-in backends
 # ---------------------------------------------------------------------------
 
@@ -390,16 +342,4 @@ register_backend(LanguageBackend(
     make_test_cmd=_java_make_test_cmd,
     test_scope=_java_test_scope,
     normalize_f2p=_java_normalize_f2p,
-))
-
-register_backend(LanguageBackend(
-    name="rust",
-    test_file_pattern="_test.rs",
-    failure_grep="FAILED",
-    default_timeout=600,
-    parser=RustTestParser(),
-    make_dockerfile=_rust_make_dockerfile,
-    make_test_cmd=_rust_make_test_cmd,
-    test_scope=_rust_test_scope,
-    normalize_f2p=normalize_rust_f2p,
 ))
