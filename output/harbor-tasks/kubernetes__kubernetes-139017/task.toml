@@ -1,0 +1,27 @@
+schema_version = "1.0"
+
+[task]
+name = "swebenchify/kubernetes__kubernetes-139017"
+description = "Fix a bug in kubernetes/kubernetes (go)"
+authors = [
+    { name = "Red Hat AI Innovation Team" },
+]
+keywords = ["swe-bench", "debugging", "go"]
+
+[metadata]
+difficulty = "easy"
+category = "debugging"
+repo_language = "go"
+repo = "kubernetes/kubernetes"
+product = ""
+
+[verifier]
+network_mode = "public"
+timeout_sec = 28800
+
+[agent]
+network_mode = "public"
+timeout_sec = 28800
+
+[environment]
+build_timeout_sec = 1800.0

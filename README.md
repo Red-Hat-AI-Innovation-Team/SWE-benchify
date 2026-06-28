@@ -412,6 +412,41 @@ Every emitted instance has a non-null `environment_setup_commit`.
 }
 ```
 
+## Harbor Integration
+
+SWE-benchify datasets can be exported to the [Harbor framework](https://www.harborframework.com/) for agent evaluation.
+
+### Convert to Harbor tasks
+
+```bash
+uv run python scripts/to_harbor.py \
+    -i output/rh-v1/all-task-instances.jsonl \
+    -o output/harbor-tasks
+```
+
+This generates one Harbor task directory per instance with a Dockerfile, test verifier, and oracle solution.
+
+### Run with Harbor
+
+```bash
+# Single task with Claude Code
+harbor run \
+    -p output/harbor-tasks/argoproj__argo-cd-26039 \
+    -a claude-code \
+    -m claude-sonnet-4-6 \
+    -e docker
+
+# Full dataset
+harbor run \
+    -p output/harbor-tasks \
+    -a claude-code \
+    -m claude-sonnet-4-6 \
+    -e docker \
+    -n 4
+```
+
+Supports Docker and podman (via `DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock`).
+
 ## Development
 
 ```bash

@@ -1,0 +1,270 @@
+#!/bin/bash
+set -uo pipefail
+
+cd /testbed
+
+# Apply the test patch (restores test expectations)
+echo 'diff --git a/test/integration/targets/git/tasks/localmods.yml b/test/integration/targets/git/tasks/localmods.yml
+index 57e3071007f8de..a3e8ea625453ab 100644
+--- a/test/integration/targets/git/tasks/localmods.yml
++++ b/test/integration/targets/git/tasks/localmods.yml
+@@ -132,3 +132,160 @@
+ 
+ - name: LOCALMODS | clear checkout_dir
+   file: state=absent path={{ checkout_dir }}
++
++# Regression test for https://github.com/ansible/ansible/issues/83367
++- name: Check that commits aren'"'"'t overwritten
++  vars:
++    branch: "testbranch"
++  block:
++  - name: LOCALMODS | create branch on remote
++    shell: |
++      git checkout -b {{ branch }}
++      echo "remote" > c
++      git add c
++      git commit -m "remote branch"
++    args:
++      chdir: "{{ repo_dir }}/localmods"
++
++  - name: LOCALMODS | checkout repo with branch
++    git:
++      repo: '"'"'{{ repo_dir }}/localmods'"'"'
++      dest: '"'"'{{ checkout_dir }}'"'"'
++      version: '"'"'{{ branch }}'"'"'
++
++  - name: LOCALMODS | make local commit
++    shell: |
++      echo "local" > b
++      git add b
++      git commit -m "local"
++      git rev-parse HEAD
++    args:
++      chdir: "{{ checkout_dir }}"
++    register: local_commit
++
++  - name: LOCALMODS | rerun git module without force (should fail)
++    git:
++      repo: '"'"'{{ repo_dir }}/localmods'"'"'
++      dest: '"'"'{{ checkout_dir }}'"'"'
++      version: '"'"'{{ branch }}'"'"'
++    register: rerun_no_force
++    ignore_errors: yes
++
++  - name: LOCALMODS | assert task failed with local commits ahead
++    assert:
++      that:
++        - rerun_no_force is failed
++
++  - name: LOCALMODS | verify local commit still exists after failed run
++    shell: git rev-parse HEAD
++    args:
++      chdir: "{{ checkout_dir }}"
++    register: commit_after_fail
++
++  - name: LOCALMODS | assert local commit preserved after failure
++    assert:
++      that:
++        - local_commit.stdout_lines[-1] == commit_after_fail.stdout
++
++  - name: LOCALMODS | rerun git module with force (should succeed and reset)
++    git:
++      repo: '"'"'{{ repo_dir }}/localmods'"'"'
++      dest: '"'"'{{ checkout_dir }}'"'"'
++      version: '"'"'{{ branch }}'"'"'
++      force: yes
++    register: rerun_with_force
++
++  - name: LOCALMODS | get remote commit hash
++    shell: git rev-parse origin/{{ branch }}
++    args:
++      chdir: "{{ checkout_dir }}"
++    register: remote_commit
++
++  - name: LOCALMODS | verify local commit was reset
++    shell: git rev-parse HEAD
++    args:
++      chdir: "{{ checkout_dir }}"
++    register: commit_after_force
++
++  - name: LOCALMODS | assert force reset to remote
++    assert:
++      that:
++        - local_commit.stdout_lines[-1] != commit_after_force.stdout
++        - commit_after_force.stdout == remote_commit.stdout
++        - rerun_with_force is changed
++
++  - name: LOCALMODS | make remote commit to create diverged state
++    shell: |
++      echo "remote2" > d
++      git add d
++      git commit -m "remote commit 2"
++    args:
++      chdir: "{{ repo_dir }}/localmods"
++
++  - name: LOCALMODS | make local commit to complete diverged state
++    shell: |
++      echo "local2" > e
++      git add e
++      git commit -m "local commit 2"
++      git rev-parse HEAD
++    args:
++      chdir: "{{ checkout_dir }}"
++    register: diverged_local_commit
++
++  - name: LOCALMODS | rerun git module with diverged branches without force (should fail)
++    git:
++      repo: '"'"'{{ repo_dir }}/localmods'"'"'
++      dest: '"'"'{{ checkout_dir }}'"'"'
++      version: '"'"'{{ branch }}'"'"'
++    register: diverged_no_force
++    ignore_errors: yes
++
++  - name: LOCALMODS | assert task failed with diverged branches
++    assert:
++      that:
++        - diverged_no_force is failed
++        - "'"'"'local commits will be lost'"'"' in diverged_no_force.msg"
++
++  - name: LOCALMODS | verify local commit still exists after diverged failure
++    shell: git rev-parse HEAD
++    args:
++      chdir: "{{ checkout_dir }}"
++    register: commit_after_diverged_fail
++
++  - name: LOCALMODS | assert local commit preserved after diverged failure
++    assert:
++      that:
++        - diverged_local_commit.stdout_lines[-1] == commit_after_diverged_fail.stdout
++
++  - name: LOCALMODS | rerun git module with diverged branches with force (should succeed)
++    git:
++      repo: '"'"'{{ repo_dir }}/localmods'"'"'
++      dest: '"'"'{{ checkout_dir }}'"'"'
++      version: '"'"'{{ branch }}'"'"'
++      force: yes
++    register: diverged_with_force
++
++  - name: LOCALMODS | get remote commit after diverged force
++    shell: git rev-parse origin/{{ branch }}
++    args:
++      chdir: "{{ checkout_dir }}"
++    register: remote_after_diverged
++
++  - name: LOCALMODS | verify diverged branch was reset with force
++    shell: git rev-parse HEAD
++    args:
++      chdir: "{{ checkout_dir }}"
++    register: commit_after_diverged_force
++
++  - name: LOCALMODS | assert force reset diverged branch to remote
++    assert:
++      that:
++        - diverged_local_commit.stdout_lines[-1] != commit_after_diverged_force.stdout
++        - commit_after_diverged_force.stdout == remote_after_diverged.stdout
++        - diverged_with_force is changed
++
++  always:
++  - name: LOCALMODS | cleanup checkout_dir
++    file: 
++       state: absent
++       path: "{{ checkout_dir }}"
+' > /tmp/test_patch.diff
+git apply /tmp/test_patch.diff 2>/dev/null || patch --fuzz=5 -p1 -i /tmp/test_patch.diff
+
+# Install project
+pip install -e . 2>/dev/null || pip install . 2>/dev/null || true
+
+# Run tests and capture output
+python -m pytest -xvs test/integration/targets/git/tasks/localmods.yml 2>&1 | tee /tmp/test_output.txt || true
+
+# ── Embedded F2P checker (multi-format) ──────────────────────
+cat > /tmp/check_f2p.py << 'PYEOF'
+import json, re, sys, os
+
+OUTPUT_FORMAT = os.environ.get("TEST_OUTPUT_FORMAT", "pytest-verbose")
+f2p = ["test/units/modules/test_git.py::TestSwitchVersionLocalCommitsAhead::test_local_branch_ahead_without_force_should_fail", "test/units/modules/test_git.py::TestSwitchVersionLocalCommitsAhead::test_local_branch_ahead_with_force_should_reset", "test/units/modules/test_git.py::TestSwitchVersionLocalCommitsAhead::test_local_branch_diverged_without_force_should_fail", "test/units/modules/test_git.py::TestSwitchVersionLocalCommitsAhead::test_local_branch_up_to_date_without_force_should_succeed", "test/units/modules/test_git.py::TestSwitchVersionLocalCommitsAhead::test_switch_version_force_parameter_exists"]
+
+def parse_go_json(text):
+    results = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        test = event.get("Test")
+        action = event.get("Action", "")
+        if test and action in ("pass", "fail", "skip"):
+            status = {"pass": "passed", "fail": "failed", "skip": "skipped"}[action]
+            results[test] = status
+            # Also store bare name (no subtest suffix)
+            results[test.split("/")[0]] = status
+    return results
+
+def parse_pytest_verbose(text):
+    results = {}
+    for line in text.splitlines():
+        m = re.match(r"^(.+?)\s+(PASSED|FAILED|ERROR|SKIPPED)", line)
+        if m:
+            test_id = m.group(1).strip()
+            status = {"PASSED": "passed", "FAILED": "failed", "ERROR": "failed", "SKIPPED": "skipped"}[m.group(2)]
+            results[test_id] = status
+    return results
+
+PARSERS = {
+    "go-json": parse_go_json,
+    "pytest-verbose": parse_pytest_verbose,
+}
+
+with open("/tmp/test_output.txt") as f:
+    raw = f.read()
+
+parser_fn = PARSERS.get(OUTPUT_FORMAT)
+if not parser_fn:
+    print(f"Unknown test output format: {OUTPUT_FORMAT}")
+    sys.exit(1)
+
+passed = parser_fn(raw)
+
+def test_matches(expected, actual_results):
+    """Check if an expected test ID matches any result in the parsed output."""
+    if expected in actual_results and actual_results[expected] == "passed":
+        return True
+    # Try bare name match (strip subtest suffix for Go, method match for pytest)
+    bare = expected.split("/")[0]
+    if bare in actual_results and actual_results[bare] == "passed":
+        return True
+    # Suffix match: the last component of "::" or "/" delimited IDs
+    last = expected.split("::")[-1] if "::" in expected else expected.split("/")[-1]
+    for k, v in actual_results.items():
+        k_last = k.split("::")[-1] if "::" in k else k.split("/")[-1]
+        if k_last == last and v == "passed":
+            return True
+    return False
+
+all_pass = all(test_matches(t, passed) for t in f2p)
+
+if all_pass and f2p:
+    print("RESOLVED: all FAIL_TO_PASS tests now pass")
+    sys.exit(0)
+else:
+    missing = [t for t in f2p if not test_matches(t, passed)]
+    print(f"NOT RESOLVED: {len(missing)}/{len(f2p)} tests still failing: {missing}")
+    sys.exit(1)
+PYEOF
+
+TEST_OUTPUT_FORMAT="pytest-verbose" python3 /tmp/check_f2p.py
+exit_code=$?
+
+# Write reward for Harbor
+mkdir -p /logs/verifier
+if [ "${exit_code}" -eq 0 ]; then
+    echo 1 > /logs/verifier/reward.txt
+else
+    echo 0 > /logs/verifier/reward.txt
+fi
+
+exit "${exit_code}"
