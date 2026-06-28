@@ -1,0 +1,11 @@
+{
+  "language": "java",
+  "language_version": "8",
+  "package_manager": "maven",
+  "install_cmd": "",
+  "test_cmd": "mvn test -B",
+  "pre_install": [
+    "mvn dependency:resolve -q -B"
+  ],
+  "system_dependencies": []
+}

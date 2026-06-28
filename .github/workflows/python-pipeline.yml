@@ -74,6 +74,25 @@ jobs:
             ${{ inputs.base_image && format('--base-image "{0}"', inputs.base_image) || '' }} \
             ${{ inputs.run_preamble && format('--run-preamble "{0}"', inputs.run_preamble) || '' }}
 
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build and push images
+        if: success()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ inputs.repo }}
+        run: |
+          SLUG="${REPO//\//__}"
+          INSTANCES="output/${SLUG}/${SLUG}-task-instances.jsonl"
+          if [ -f "$INSTANCES" ]; then
+            python3 scripts/build_and_push_images_generic.py \
+              --instances "$INSTANCES" \
+              --update-jsonl
+          else
+            echo "No task instances file found, skipping image build"
+          fi
+
       - name: Set artifact name
         if: always()
         id: artifact
