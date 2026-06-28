@@ -724,7 +724,7 @@ def compute_f2p(
             return ValidationResult(
                 status="error",
                 compiled=False,
-                error_message=f"Docker build failed (rc={build_rc}): {build_log[-500:]}",
+                error_message=f"Docker build failed (rc={build_rc}): {build_log[-2000:]}",
             )
 
         reinstall_cmd = None
