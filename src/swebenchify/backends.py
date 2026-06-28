@@ -395,7 +395,7 @@ register_backend(LanguageBackend(
 register_backend(LanguageBackend(
     name="rust",
     test_file_pattern=".rs",
-    failure_grep="FAILED",
+    failure_grep="FAILED\\|error\\[E",
     default_timeout=600,
     parser=RustTestParser(),
     make_dockerfile=_rust_make_dockerfile,

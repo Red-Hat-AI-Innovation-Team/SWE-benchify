@@ -76,7 +76,8 @@ class TestRustBackendRegistered:
 
     def test_backend_failure_grep(self) -> None:
         backend = get_backend("rust")
-        assert backend.failure_grep == "FAILED"
+        assert "FAILED" in backend.failure_grep
+        assert "error\\[E" in backend.failure_grep
 
     def test_backend_normalize_f2p(self) -> None:
         backend = get_backend("rust")
