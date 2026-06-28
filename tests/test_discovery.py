@@ -236,3 +236,83 @@ class TestDiscoverEnvironmentSignature:
         assert params["max_attempts"].default == 3
         assert params["max_turns"].default == 80
         assert params["budget_usd"].default == 5.0
+
+
+class TestRustDiscoveryPrompt:
+    """Test that RUST_ENV_DISCOVERY_PROMPT formats correctly for Rust repos."""
+
+    def test_prompt_contains_output_files(self) -> None:
+        from swebenchify.discovery import RUST_ENV_DISCOVERY_PROMPT
+
+        assert "rust_env_spec.json" in RUST_ENV_DISCOVERY_PROMPT
+        assert "version.json" in RUST_ENV_DISCOVERY_PROMPT
+
+    def test_prompt_format_strings(self) -> None:
+        from swebenchify.discovery import RUST_ENV_DISCOVERY_PROMPT
+
+        formatted = RUST_ENV_DISCOVERY_PROMPT.format(repo="test/repo", commit="abc123")
+        assert "test/repo" in formatted
+        assert "abc123" in formatted
+
+    def test_prompt_mentions_toolchain_detection(self) -> None:
+        from swebenchify.discovery import RUST_ENV_DISCOVERY_PROMPT
+
+        assert "rust-toolchain.toml" in RUST_ENV_DISCOVERY_PROMPT
+        assert "Cargo.toml" in RUST_ENV_DISCOVERY_PROMPT
+
+    def test_prompt_mentions_workspace(self) -> None:
+        from swebenchify.discovery import RUST_ENV_DISCOVERY_PROMPT
+
+        assert "workspace" in RUST_ENV_DISCOVERY_PROMPT.lower()
+
+    def test_prompt_rules_no_install(self) -> None:
+        from swebenchify.discovery import RUST_ENV_DISCOVERY_PROMPT
+
+        assert "do not install" in RUST_ENV_DISCOVERY_PROMPT.lower()
+
+    def test_prompt_has_literal_braces_for_json_schema(self) -> None:
+        from swebenchify.discovery import RUST_ENV_DISCOVERY_PROMPT
+
+        result = RUST_ENV_DISCOVERY_PROMPT.format(
+            repo="nickel-org/nickel.rs", commit="abc123"
+        )
+        assert "{{" not in result
+        assert "}}" not in result
+        assert '"rust_version"' in result
+        assert '"test_cmd"' in result
+        assert '"workspace_mode"' in result
+
+    def test_prompt_mentions_edition(self) -> None:
+        from swebenchify.discovery import RUST_ENV_DISCOVERY_PROMPT
+
+        assert "edition" in RUST_ENV_DISCOVERY_PROMPT.lower()
+
+    def test_prompt_mentions_features(self) -> None:
+        from swebenchify.discovery import RUST_ENV_DISCOVERY_PROMPT
+
+        assert "--all-features" in RUST_ENV_DISCOVERY_PROMPT
+
+
+class TestDiscoverRustEnvironmentSignature:
+    """Test that discover_rust_environment has the expected signature."""
+
+    def test_importable(self) -> None:
+        from swebenchify.discovery import discover_rust_environment
+
+        assert callable(discover_rust_environment)
+
+    def test_is_coroutine_function(self) -> None:
+        from swebenchify.discovery import discover_rust_environment
+
+        assert inspect.iscoroutinefunction(discover_rust_environment)
+
+    def test_signature_parameters(self) -> None:
+        from swebenchify.discovery import discover_rust_environment
+
+        sig = inspect.signature(discover_rust_environment)
+        param_names = list(sig.parameters.keys())
+        assert "repo" in param_names
+        assert "commit" in param_names
+        assert "workspace_mgr" in param_names
+        assert "registry" in param_names
+        assert "cost_tracker" in param_names

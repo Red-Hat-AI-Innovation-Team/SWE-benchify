@@ -230,3 +230,83 @@ def test_output_dir_not_writable_raises(tmp_path: Path, monkeypatch: pytest.Monk
             load_config(str(config_file))
     finally:
         ro_dir.chmod(0o755)
+
+
+class TestRustConfig:
+    """Tests for Rust-specific configuration fields."""
+
+    def test_rust_repos_default_empty(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        config_file = tmp_path / "cfg.yaml"
+        config_file.write_text(
+            textwrap.dedent("""\
+                repos:
+                  - owner/repo
+                github:
+                  token: $GITHUB_TOKEN
+            """)
+        )
+        config = load_config(str(config_file))
+        assert config.rust_repos == []
+
+    def test_rust_repos_parsed_from_yaml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        config_file = tmp_path / "cfg.yaml"
+        config_file.write_text(
+            textwrap.dedent("""\
+                repos:
+                  - cloudflare/pingora
+                github:
+                  token: $GITHUB_TOKEN
+                rust_repos:
+                  - cloudflare/pingora
+            """)
+        )
+        config = load_config(str(config_file))
+        assert config.rust_repos == ["cloudflare/pingora"]
+
+    def test_rust_n_runs_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        config_file = tmp_path / "cfg.yaml"
+        config_file.write_text(
+            textwrap.dedent("""\
+                repos:
+                  - owner/repo
+                github:
+                  token: $GITHUB_TOKEN
+            """)
+        )
+        config = load_config(str(config_file))
+        assert config.pipeline.rust_n_runs == 3
+
+    def test_rust_validation_timeout_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        config_file = tmp_path / "cfg.yaml"
+        config_file.write_text(
+            textwrap.dedent("""\
+                repos:
+                  - owner/repo
+                github:
+                  token: $GITHUB_TOKEN
+            """)
+        )
+        config = load_config(str(config_file))
+        assert config.pipeline.rust_validation_timeout == 600
+
+    def test_rust_n_runs_parsed_from_yaml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        config_file = tmp_path / "cfg.yaml"
+        config_file.write_text(
+            textwrap.dedent("""\
+                repos:
+                  - owner/repo
+                github:
+                  token: $GITHUB_TOKEN
+                pipeline:
+                  rust_n_runs: 5
+                  rust_validation_timeout: 900
+            """)
+        )
+        config = load_config(str(config_file))
+        assert config.pipeline.rust_n_runs == 5
+        assert config.pipeline.rust_validation_timeout == 900
