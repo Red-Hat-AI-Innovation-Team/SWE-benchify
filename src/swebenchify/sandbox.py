@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from swebenchify.models import GoEnvironmentSpec, RustEnvironmentSpec
+    from swebenchify.models import GoEnvironmentSpec
 
 logger = logging.getLogger(__name__)
 
@@ -315,26 +315,6 @@ class GoImageCache:
             raise RuntimeError(f"docker push timed out: {exc}") from exc
         logger.info("Pushed Go image: %s", remote_name)
         return remote_name
-
-
-class RustDockerfile:
-    """Generates minimal Dockerfiles for Rust validation images."""
-
-    @staticmethod
-    def generate(spec: 'RustEnvironmentSpec') -> str:
-        rust_version = spec.rust_version or 'latest'
-        lines = [
-            f'FROM rust:{rust_version}-slim',
-            'RUN apt-get update -qq && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*',
-            'WORKDIR /repo',
-        ]
-        if spec.system_dependencies:
-            pkgs = ' '.join(spec.system_dependencies)
-            lines.append(f'RUN apt-get update -qq && apt-get install -y --no-install-recommends {pkgs} && rm -rf /var/lib/apt/lists/*')
-        if spec.features:
-            lines.append(f'ENV CARGO_TEST_FLAGS="{spec.features}"')
-        lines.append('CMD ["cargo", "test"]')
-        return '\n'.join(lines) + '\n'
 
 
 class RustImageCache:

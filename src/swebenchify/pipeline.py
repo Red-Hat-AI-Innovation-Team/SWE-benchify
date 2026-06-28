@@ -21,7 +21,7 @@ from swebenchify.filters import apply_filters
 from swebenchify.go_registry import GoSpecRegistry
 from swebenchify.models import AnyEnvironmentSpec, GoEnvironmentSpec, RustEnvironmentSpec, QualityScore, Repository, TaskInstance
 from swebenchify.rust_registry import RustSpecRegistry
-from swebenchify.sandbox import GoImageCache, RustImageCache, SandboxConfig, is_docker_available
+from swebenchify.sandbox import GoImageCache, SandboxConfig, is_docker_available
 from swebenchify.validator import validate_instances
 from swebenchify.versioning import detect_version
 from swebenchify.workspace import WorkspaceManager
@@ -168,7 +168,6 @@ async def run_repo_pipeline(
     go_registry: GoSpecRegistry | None = None
     go_image_name: str | None = None
     rust_registry: RustSpecRegistry | None = None
-    rust_image_name: str | None = None
 
     if is_go_repo:
         go_registry = GoSpecRegistry(workspace_mgr.root)
@@ -226,13 +225,6 @@ async def run_repo_pipeline(
                     "  Rust env: rust%s, test=%s, mode=%s",
                     rust_spec.rust_version, rust_spec.test_cmd, rust_spec.workspace_mode,
                 )
-                rust_image_cache = RustImageCache(workspace_mgr.root)
-                rust_image_name = rust_image_cache.image_name(
-                    repo=repo.full_name,
-                    era_commit=commit,
-                    env_spec_hash=rust_spec.env_spec_hash,
-                )
-                logger.info("  Rust image name: %s", rust_image_name)
             else:
                 logger.error("Rust environment discovery failed for %s", repo.full_name)
         except Exception as exc:
@@ -286,12 +278,12 @@ async def run_repo_pipeline(
         timeout=(
             config.pipeline.go_validation_timeout if is_go_repo
             else config.pipeline.rust_validation_timeout if is_rust_repo
-            else 300
+            else config.pipeline.python_validation_timeout
         ),
         n_runs=(
             config.pipeline.go_n_runs if is_go_repo
             else config.pipeline.rust_n_runs if is_rust_repo
-            else 1
+            else config.pipeline.python_n_runs
         ),
     )
 
@@ -349,11 +341,7 @@ async def run_repo_pipeline(
                 cand_spec = env_specs.get("rust")
             else:
                 cand_spec = env_specs.get(cand_version)
-            spec_hash = (
-                cand_spec.env_spec_hash
-                if isinstance(cand_spec, (GoEnvironmentSpec, RustEnvironmentSpec))
-                else None
-            )
+            spec_hash = getattr(cand_spec, "env_spec_hash", None) or None
             repo_language = cand_spec.language if cand_spec else None
 
             task_instances.append(
@@ -370,11 +358,7 @@ async def run_repo_pipeline(
                     FAIL_TO_PASS=json.dumps(vr.FAIL_TO_PASS),
                     PASS_TO_PASS=json.dumps(vr.PASS_TO_PASS),
                     environment_setup_commit=env_commit,
-                    image_name=(
-                        go_image_name if is_go_repo
-                        else rust_image_name if is_rust_repo
-                        else None
-                    ),
+                    image_name=go_image_name if is_go_repo else None,
                     fix_merge_date=candidate.merged_at or None,
                     provenance="public_upstream",
                     link_confidence=candidate.link_confidence,
