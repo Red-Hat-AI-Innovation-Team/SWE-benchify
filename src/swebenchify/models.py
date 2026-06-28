@@ -159,52 +159,8 @@ def compute_java_env_spec_hash(spec: EnvironmentSpec) -> str:
     return hashlib.sha256(serialised.encode()).hexdigest()
 
 
-@dataclass
-class RustEnvironmentSpec:
-    """Build and test configuration for a Rust repository version.
-
-    Discovered by the Rust branch of the Environment Discovery Agent.
-    The ``env_spec_hash`` field is a stable content hash computed from all
-    other fields — it acts as the cache key for per-``(repo, era)`` images
-    and the spec registry.
-    """
-
-    language: str = "rust"
-    rust_version: str = ""           # e.g. "1.84" from rust-toolchain.toml
-    build_cmd: str = ""              # e.g. "cargo build" or "make build"
-    test_cmd: str = ""               # e.g. "cargo test --workspace"
-    workspace_mode: str = "single"   # "workspace" | "single"
-    workspace_members: list[str] = field(default_factory=list)
-    edition: str = ""                # "2015" | "2018" | "2021" | "2024"
-    features: str = ""               # e.g. "--all-features" or ""
-    system_dependencies: list[str] = field(default_factory=list)
-    env_spec_hash: str = ""          # populated by compute_rust_env_spec_hash()
-
-
-def compute_rust_env_spec_hash(spec: RustEnvironmentSpec) -> str:
-    """Return a stable SHA-256 hex digest of a RustEnvironmentSpec.
-
-    All fields except ``env_spec_hash`` itself are included. The digest is
-    computed over a sorted JSON serialisation so field insertion order does
-    not affect the result.
-    """
-    payload = {
-        "language": spec.language,
-        "rust_version": spec.rust_version,
-        "build_cmd": spec.build_cmd,
-        "test_cmd": spec.test_cmd,
-        "workspace_mode": spec.workspace_mode,
-        "workspace_members": sorted(spec.workspace_members),
-        "edition": spec.edition,
-        "features": spec.features,
-        "system_dependencies": sorted(spec.system_dependencies),
-    }
-    serialised = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(serialised.encode()).hexdigest()
-
-
 # Type alias used by pipeline code that accepts either language's spec.
-AnyEnvironmentSpec = EnvironmentSpec | GoEnvironmentSpec | RustEnvironmentSpec
+AnyEnvironmentSpec = EnvironmentSpec | GoEnvironmentSpec
 
 
 def deserialize_env_spec(data: dict) -> AnyEnvironmentSpec:
@@ -218,9 +174,6 @@ def deserialize_env_spec(data: dict) -> AnyEnvironmentSpec:
     if language == "go" or not language:
         valid = {k: v for k, v in data.items() if k in GoEnvironmentSpec.__dataclass_fields__}
         return GoEnvironmentSpec(**valid)
-    if language == "rust":
-        valid = {k: v for k, v in data.items() if k in RustEnvironmentSpec.__dataclass_fields__}
-        return RustEnvironmentSpec(**valid)
     required_defaults = {k: "" for k in ("language", "language_version", "package_manager", "install_cmd", "test_cmd")}
     valid = {**required_defaults, **{k: v for k, v in data.items() if k in EnvironmentSpec.__dataclass_fields__}}
     return EnvironmentSpec(**valid)

@@ -138,31 +138,6 @@ class TestIsTestFileGo:
         assert "handler_test.go" in test
 
 
-class TestIsTestFileRust:
-    """Rust-specific test-file detection rules."""
-
-    def test_rust_integration_tests_dir(self) -> None:
-        assert is_test_file("tests/test_pool.rs") is True
-
-    def test_rust_test_suffix_file(self) -> None:
-        assert is_test_file("src/pool_test.rs") is True
-
-    def test_rust_regular_source(self) -> None:
-        assert is_test_file("src/pool.rs") is False
-
-    def test_rust_lib_with_inline_tests(self) -> None:
-        assert is_test_file("src/lib.rs") is False
-
-    def test_rust_main_source(self) -> None:
-        assert is_test_file("src/main.rs") is False
-
-    def test_rust_benches_dir(self) -> None:
-        assert is_test_file("benches/bench_pool.rs") is False
-
-    def test_rust_testdata(self) -> None:
-        assert is_test_file("testdata/fixture.toml") is True
-
-
 class TestSplitPatch:
     """Test splitting a unified diff into gold and test patches."""
 
