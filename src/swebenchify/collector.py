@@ -319,9 +319,14 @@ def collect_prs(
                 title, body, rh_jira_projects=rh_jira_projects,
             )
 
-            # Get the actual base commit (first parent of merge commit)
+            # Get the actual base commit (first parent of merge commit).
+            # Fall back to pr.base.sha (the base branch tip when the PR was
+            # opened) — merge_commit_sha can be a temporary test-merge SHA
+            # that GitHub garbage-collects, making both it and its parents
+            # unreachable.
             merge_commit_sha = pr.get("merge_commit_sha") or ""
-            base_sha = merge_commit_sha  # fallback
+            pr_base_sha = (pr.get("base") or {}).get("sha", "")
+            base_sha = pr_base_sha or merge_commit_sha  # fallback
             if merge_commit_sha:
                 commit_resp = _github_get(
                     f"{_GITHUB_API_BASE}/repos/{owner}/{name}/git/commits/{merge_commit_sha}",
