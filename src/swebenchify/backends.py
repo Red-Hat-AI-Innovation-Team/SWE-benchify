@@ -394,7 +394,7 @@ register_backend(LanguageBackend(
 
 register_backend(LanguageBackend(
     name="rust",
-    test_file_pattern="_test.rs",
+    test_file_pattern=".rs",
     failure_grep="FAILED",
     default_timeout=600,
     parser=RustTestParser(),

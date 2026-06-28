@@ -21,6 +21,7 @@ from swebenchify.models import (
     CandidateInstance,
     EnvironmentSpec,
     GoEnvironmentSpec,
+    RustEnvironmentSpec,
     TaskInstance,
     ValidationResult,
 )
@@ -363,6 +364,8 @@ def build_task_instances(
     lang_ver = None
     if isinstance(env_spec, GoEnvironmentSpec) and env_spec.go_version:
         lang_ver = env_spec.go_version
+    elif isinstance(env_spec, RustEnvironmentSpec) and env_spec.rust_version:
+        lang_ver = env_spec.rust_version
     elif isinstance(env_spec, EnvironmentSpec) and env_spec.language_version:
         lang_ver = env_spec.language_version
     version = f"{lang_ver}-{spec_hash[:8]}" if lang_ver and spec_hash else (lang_ver or "unknown")

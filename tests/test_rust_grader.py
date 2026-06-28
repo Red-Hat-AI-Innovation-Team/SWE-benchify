@@ -259,7 +259,7 @@ class TestComputeF2pRust:
         with patch("swebenchify.grader._docker_available", return_value=True):
             result = compute_f2p("owner/repo", "abc123", no_rs_patch, "gold", env_spec=spec)
         assert result.status == "invalid"
-        assert "_test.rs" in result.error_message
+        assert ".rs" in result.error_message
 
     def test_build_failure_returns_error(self) -> None:
         spec = RustEnvironmentSpec(rust_version="1.84")
