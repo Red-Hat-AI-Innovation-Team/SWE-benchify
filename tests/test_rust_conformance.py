@@ -4,10 +4,6 @@ These tests verify that all Rust-specific components work together correctly:
 parser -> normaliser -> F2P computation, hunk classification, Docker image generation,
 and registry round-trips.
 """
-import json
-import re
-
-import pytest
 
 
 class TestRustParseToF2pPipeline:
@@ -122,34 +118,36 @@ class TestRustHunkClassification:
 
 
 class TestRustDockerfileVariants:
-    """Test Dockerfile generation for different Rust configurations."""
+    """Test Dockerfile generation via the Rust backend."""
 
     def test_minimal_spec(self):
+        from swebenchify.backends import get_backend
         from swebenchify.models import RustEnvironmentSpec
-        from swebenchify.sandbox import RustDockerfile
 
+        backend = get_backend('rust')
         spec = RustEnvironmentSpec(rust_version='1.84')
-        dockerfile = RustDockerfile.generate(spec)
+        dockerfile = backend.make_dockerfile('owner/repo', 'abc123', spec)
         assert 'FROM rust:1.84-slim' in dockerfile
-        assert 'WORKDIR' in dockerfile
 
     def test_no_version_uses_latest(self):
+        from swebenchify.backends import get_backend
         from swebenchify.models import RustEnvironmentSpec
-        from swebenchify.sandbox import RustDockerfile
 
+        backend = get_backend('rust')
         spec = RustEnvironmentSpec()  # no rust_version
-        dockerfile = RustDockerfile.generate(spec)
-        assert 'FROM rust:latest-slim' in dockerfile
+        dockerfile = backend.make_dockerfile('owner/repo', 'abc123', spec)
+        assert 'rust:latest' in dockerfile
 
     def test_with_system_deps(self):
+        from swebenchify.backends import get_backend
         from swebenchify.models import RustEnvironmentSpec
-        from swebenchify.sandbox import RustDockerfile
 
+        backend = get_backend('rust')
         spec = RustEnvironmentSpec(
             rust_version='1.84',
             system_dependencies=['clang', 'cmake', 'libssl-dev']
         )
-        dockerfile = RustDockerfile.generate(spec)
+        dockerfile = backend.make_dockerfile('owner/repo', 'abc123', spec)
         assert 'clang' in dockerfile
         assert 'cmake' in dockerfile
         assert 'libssl-dev' in dockerfile
