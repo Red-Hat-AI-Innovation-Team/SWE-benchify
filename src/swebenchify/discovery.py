@@ -15,11 +15,14 @@ from swebenchify.dispatcher import AgentResult, CostTracker, run_agent_with_retr
 from swebenchify.go_registry import GoSpecRegistry, get_go_environment_setup_commit
 from swebenchify.models import (
     GoEnvironmentSpec,
+    RustEnvironmentSpec,
     EnvironmentSpec,
     RepoVersion,
     Repository,
     compute_env_spec_hash,
+    compute_rust_env_spec_hash,
 )
+from swebenchify.rust_registry import RustSpecRegistry
 from swebenchify.workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
@@ -179,6 +182,94 @@ Write two JSON files to the current directory:
 - If you cannot determine a field, use an empty string rather than null.
 """
 
+# ---------------------------------------------------------------------------
+# Rust environment discovery
+# ---------------------------------------------------------------------------
+
+RUST_ENV_DISCOVERY_PROMPT = """\
+You are setting up the build and test environment for the Rust repository \
+{repo} at commit {commit}.
+
+## Step 1: Detect the Rust toolchain version
+
+Read configuration files to find which Rust version the project targets:
+- rust-toolchain.toml: look for `channel` field under `[toolchain]` \
+  (e.g. "1.84.0" or "stable")
+- rust-toolchain (legacy format): plain text value (e.g. "1.84.0")
+- Cargo.toml: `rust-version` field (MSRV, e.g. "1.70")
+- Cargo.toml: `edition` field — use to infer minimum Rust version if no \
+  explicit version is found (2015 → 1.0, 2018 → 1.31, 2021 → 1.56, \
+  2024 → 1.85)
+- CI configs (.github/workflows/*.yml): look for Rust version matrix
+
+Report the version as a plain string (e.g. "1.84"). Prefer \
+rust-toolchain.toml > rust-toolchain > Cargo.toml rust-version > \
+CI matrix > edition inference.
+
+## Step 2: Detect workspace structure
+
+Check if the root Cargo.toml has a `[workspace]` section:
+- If yes: workspace_mode = "workspace". List the member crate names \
+  from the `members = [...]` array.
+- If no: workspace_mode = "single", workspace_members = [].
+
+## Step 3: Detect the test command
+
+Check in this priority order:
+1. `Makefile` — look for a `test:` target. Use it if it runs `cargo test`.
+2. Fall back to: `cargo test --workspace` for workspaces, \
+   `cargo test` for single crates.
+
+## Step 4: Detect the build command
+
+Check in this priority order:
+1. `Makefile` — look for a `build:` target.
+2. Fall back to: `cargo build`.
+
+## Step 5: Detect system dependencies
+
+Scan `.github/workflows/*.yml` and any `Dockerfile` for apt-get or yum \
+install commands. List the package names. Common Rust dependencies \
+include: clang, cmake, perl, pkg-config, libssl-dev, protobuf-compiler.
+
+## Step 6: Detect edition and feature flags
+
+Read the `edition` field from Cargo.toml (e.g. "2021").
+Check if CI uses `--all-features` or specific `--features` flags. \
+Report features as a string (e.g. "--all-features" or "").
+
+## Output
+
+Write two JSON files to the current directory:
+
+1. `rust_env_spec.json`:
+   {{
+     "language": "rust",
+     "rust_version": "<e.g. 1.84>",
+     "build_cmd": "<e.g. cargo build>",
+     "test_cmd": "<e.g. cargo test --workspace>",
+     "workspace_mode": "<workspace|single>",
+     "workspace_members": ["<crate1>", "<crate2>"],
+     "edition": "<e.g. 2021>",
+     "features": "<e.g. --all-features or empty string>",
+     "system_dependencies": ["<optional apt packages>"]
+   }}
+
+2. `version.json`:
+   {{
+     "repo": "{repo}",
+     "commit": "{commit}",
+     "version": "<rust_version from toolchain or Cargo.toml>"
+   }}
+
+## Rules
+- Do NOT install anything — only inspect configuration files.
+- Do NOT compile or build the project.
+- Do NOT modify the repository.
+- Do NOT include any text outside the JSON in the output files.
+- If you cannot determine a field, use an empty string rather than null.
+"""
+
 
 async def discover_environment(
     repo: Repository,
@@ -320,7 +411,6 @@ async def discover_go_environment(
     if not result.is_error and spec_path.exists() and version_path.exists():
         try:
             spec_data = json.loads(spec_path.read_text())
-            ver_data = json.loads(version_path.read_text())
 
             spec = GoEnvironmentSpec(
                 **{
@@ -348,4 +438,76 @@ async def discover_go_environment(
             return None, None
 
     logger.error("Go environment discovery failed for %s", repo.full_name)
+    return None, None
+
+
+async def discover_rust_environment(
+    repo: Repository,
+    commit: str,
+    workspace_mgr: WorkspaceManager,
+    registry: RustSpecRegistry,
+    cost_tracker: CostTracker | None = None,
+    max_attempts: int = 3,
+    max_turns: int = 40,
+    budget_usd: float = 2.0,
+) -> tuple[RustEnvironmentSpec | None, RepoVersion | None]:
+    """Discover the Rust build/test environment for a repo at a given commit.
+
+    Dispatches a lightweight read-only agent to inspect Cargo.toml and CI
+    configuration — no installation or compilation happens. Results are
+    registered in the ``RustSpecRegistry`` and cached per
+    ``(repo, env_spec_hash)``.
+
+    Returns ``(RustEnvironmentSpec, RepoVersion)`` on success, or
+    ``(None, None)`` on failure.
+    """
+    worktree = workspace_mgr.prepare_env_workspace(repo, commit, version="rust-discovery")
+
+    prompt = RUST_ENV_DISCOVERY_PROMPT.format(repo=repo.full_name, commit=commit)
+    result: AgentResult = await run_agent_with_retry(
+        prompt=prompt,
+        cwd=str(worktree),
+        output_files=["rust_env_spec.json", "version.json"],
+        tools=ENV_TOOLS,
+        max_turns=max_turns,
+        budget_usd=budget_usd,
+        max_attempts=max_attempts,
+    )
+
+    if cost_tracker:
+        cost_tracker.record("rust-env-discovery", repo.full_name, result)
+
+    spec_path = worktree / "rust_env_spec.json"
+    version_path = worktree / "version.json"
+
+    if not result.is_error and spec_path.exists() and version_path.exists():
+        try:
+            spec_data = json.loads(spec_path.read_text())
+
+            spec = RustEnvironmentSpec(
+                **{
+                    k: v
+                    for k, v in spec_data.items()
+                    if k in RustEnvironmentSpec.__dataclass_fields__ and k != "env_spec_hash"
+                }
+            )
+            spec.env_spec_hash = compute_rust_env_spec_hash(spec)
+
+            version_string = registry.register(repo.full_name, commit, spec)
+            repo_version = RepoVersion(
+                repo=repo.full_name,
+                commit=commit,
+                version=version_string,
+            )
+            logger.info(
+                "Rust env discovered for %s: rust%s, test=%s, mode=%s",
+                repo.full_name, spec.rust_version, spec.test_cmd, spec.workspace_mode,
+            )
+            return spec, repo_version
+
+        except (json.JSONDecodeError, TypeError, KeyError) as exc:
+            logger.error("Failed to parse Rust env agent output: %s", exc)
+            return None, None
+
+    logger.error("Rust environment discovery failed for %s", repo.full_name)
     return None, None

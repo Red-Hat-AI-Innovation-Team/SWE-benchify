@@ -317,6 +317,23 @@ class GoImageCache:
         return remote_name
 
 
+class RustImageCache:
+    """Per-``(repo, era, env_spec_hash)`` Docker image build and cache for Rust.
+
+    Images are named ``swebenchify-rust-{slug}-{hash_prefix}`` where
+    ``slug`` is the repo's ``owner__repo`` form and ``hash_prefix`` is
+    the first 12 characters of ``env_spec_hash``.
+    """
+
+    def __init__(self, workspace_root: str | Path) -> None:
+        self._cache_dir = Path(workspace_root) / 'rust-images'
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def image_name(self, repo: str, era_commit: str, env_spec_hash: str) -> str:
+        slug = repo.replace('/', '__').lower()
+        return f'swebenchify-rust-{slug}-{env_spec_hash[:12]}'
+
+
 def is_docker_available() -> bool:
     """Check whether Docker is available on the system.
 
