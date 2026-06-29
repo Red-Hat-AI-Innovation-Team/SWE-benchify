@@ -4,7 +4,7 @@
 
 A harness that dispatches [Claude Code](https://claude.ai/claude-code) agents to transform GitHub repositories into [SWE-bench](https://github.com/princeton-nlp/SWE-bench)-compatible benchmarks.
 
-Supports **Python** and **Go** repositories out of the box.
+Supports **Python**, **Go**, **Java** (Maven), and **Rust** (Cargo) repositories out of the box.
 
 Given a list of GitHub repos, SWE-benchify:
 
@@ -58,6 +58,47 @@ pipeline:
 output:
   dir: ./output
 ```
+
+**Java repo:**
+
+```yaml
+repos:
+  - apache/commons-lang
+
+github:
+  token: $GITHUB_TOKEN
+
+pipeline:
+  pr_after: "2022-01-01T00:00:00Z"
+  pr_before: "2024-01-01T00:00:00Z"
+
+output:
+  dir: ./output
+```
+
+**Rust repo:**
+
+```yaml
+repos:
+  - cloudflare/pingora
+
+github:
+  token: $GITHUB_TOKEN
+
+pipeline:
+  pr_after: "2024-01-01T00:00:00Z"
+  pr_before: "2025-06-01T00:00:00Z"
+
+output:
+  dir: ./output
+```
+
+### Environment variables
+
+| Variable | Required for | Description |
+|----------|-------------|-------------|
+| `GITHUB_TOKEN` | All stages | GitHub personal access token. Used to fetch PRs and issue metadata via the GitHub API. Public repos need no special scopes; private repos need `repo` scope. |
+| `ANTHROPIC_API_KEY` | Stages 3-4 | Anthropic API key. Used by the [Claude Code Agent SDK](https://pypi.org/project/claude-code-sdk/) to dispatch agents for environment discovery (stage 3) and instance validation (stage 4). Not needed for collection-only runs (`swebenchify collect`). |
 
 ### Run the full pipeline
 
@@ -176,17 +217,17 @@ User Config (repos, tokens)
   (Python)   (Claude Code)
       │      │
       ▼      ▼
-  ┌──────┐ ┌──────────┐
-  │St 1-2│ │ St 3: Env │── agent explores repo, writes env_spec.json
+  ┌───────┐ ┌──────────┐
+  │St 1-2 │ │ St 3: Env │── agent explores repo, writes env_spec.json
   │Collect│ │ Discovery │
   │Extract│ ├──────────┤
-  └──────┘ │ St 4: Val │── agent runs tests, writes validation_result.json
-           │ idation   │
-  ┌──────┐ └──────────┘
-  │St 5-6│
-  │Filter│
-  │ Emit │
-  └──────┘
+  └───────┘ │ St 4: Val │── agent runs tests, writes validation_result.json
+            │ idation   │
+  ┌───────┐ └──────────┘
+  │St 5-6 │
+  │Filter │
+  │Emit   │
+  └───────┘
 ```
 
 **Mechanical stages** (1, 2, 5, 6) are pure Python — GitHub API calls, diff parsing, quality filters, JSONL serialization.
@@ -300,6 +341,94 @@ gh workflow run python-pipeline.yml \
 All environment overrides (`python_version`, `install_cmd`, `test_cmd`,
 `pre_install`, `base_image`, `run_preamble`) are available as workflow inputs.
 
+## Java Pipeline
+
+For Maven-based Java repositories:
+
+```bash
+python scripts/discover_and_validate_java.py \
+    --repo apache/commons-lang \
+    --max-prs 300 \
+    --timeout 900
+```
+
+The script auto-detects the Java version from `pom.xml` (`maven.compiler.release`,
+`maven.compiler.source`, or `java.version` properties), defaulting to Java 8.
+Overrides are available:
+
+```bash
+python scripts/discover_and_validate_java.py \
+    --repo apache/commons-lang \
+    --java-version 17 \
+    --test-cmd "mvn test -B" \
+    --pre-install "mvn dependency:resolve -q -B"
+```
+
+For Red Hat repos with Jira-linked issues, use `--jira-projects` to match
+issue keys (e.g. `OCPBUGS`, `JBEAP`):
+
+```bash
+python scripts/discover_and_validate_java.py \
+    --repo wildfly/wildfly \
+    --jira-projects WFLY,WFCORE
+```
+
+### GitHub Actions workflow
+
+The `Java Pipeline` workflow (`.github/workflows/java-pipeline.yml`)
+runs the pipeline in CI:
+
+```bash
+gh workflow run java-pipeline.yml \
+    -f repo="apache/commons-lang" \
+    -f max_prs=300
+```
+
+All environment overrides (`java_version`, `test_cmd`, `pre_install`,
+`jira_projects`) are available as workflow inputs.
+
+## Rust Pipeline
+
+For Cargo-based Rust repositories:
+
+```bash
+python scripts/discover_and_validate_rust.py \
+    --repo cloudflare/pingora \
+    --max-prs 200 \
+    --timeout 600
+```
+
+The script auto-detects the Rust toolchain version from `rust-toolchain.toml`,
+`rust-toolchain`, or `Cargo.toml`, and detects workspace structure automatically.
+Overrides are available:
+
+```bash
+python scripts/discover_and_validate_rust.py \
+    --repo cloudflare/pingora \
+    --rust-version 1.84 \
+    --test-cmd "cargo test --workspace" \
+    --features "--all-features" \
+    --system-deps "libssl-dev,pkg-config"
+```
+
+Rust repos commonly define unit tests inline with `#[cfg(test)]` blocks.
+The pipeline automatically detects these hunks and moves them from the gold
+patch to the test patch so that validation works correctly.
+
+### GitHub Actions workflow
+
+The `Rust Pipeline` workflow (`.github/workflows/rust-pipeline.yml`)
+runs the pipeline in CI:
+
+```bash
+gh workflow run rust-pipeline.yml \
+    -f repo="cloudflare/pingora" \
+    -f max_prs=200
+```
+
+All environment overrides (`rust_version`, `test_cmd`, `features`,
+`system_deps`) are available as workflow inputs.
+
 ## Docker Images
 
 ### Go images
@@ -328,6 +457,19 @@ gh workflow run build-images.yml \
   -f instances_jsonl=output/instances.jsonl \
   -f registry=ghcr.io/red-hat-ai-innovation-team
 ```
+
+### Java images
+
+Java validation images use `maven:3-eclipse-temurin-{java_version}` as the
+base image (defaulting to Java 17). The image pre-resolves Maven dependencies
+so validation runs start quickly.
+
+### Rust images
+
+Rust validation images use `rust:{version}-slim` as the base image. Like Go,
+each spec produces a deterministic image tag based on the `env_spec_hash`.
+The `RustSpecRegistry` maps spec hashes to stable version strings of the
+form `{rust_version}-{hash[:8]}` (e.g. `1.84-ab3f1200`).
 
 ### Python images
 
