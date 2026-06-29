@@ -410,8 +410,74 @@ def _cmd_ground_truth(args: argparse.Namespace) -> None:
     if sub is None:
         print("Usage: swebenchify ground-truth {collect,extract,emit,run}", file=sys.stderr)
         sys.exit(1)
-    print(f"ground-truth {sub}: Not yet implemented", file=sys.stderr)
-    sys.exit(1)
+
+    if sub == "collect":
+        _cmd_ground_truth_collect(args)
+    else:
+        print(f"ground-truth {sub}: Not yet implemented", file=sys.stderr)
+        sys.exit(1)
+
+
+def _cmd_ground_truth_collect(args: argparse.Namespace) -> None:
+    """Run ground-truth collect: enumerate landed changes from PRs."""
+    import json
+    from dataclasses import asdict
+    from pathlib import Path
+
+    _setup_logging()
+    config = load_config(args.config)
+
+    from swebenchify.ground_truth.collector import (
+        collect_pr_ground_truth,
+        load_ground_truth_changes,
+        save_ground_truth_changes,
+    )
+    from swebenchify.models import Repository
+
+    output_dir = Path(config.output.dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    total_repos = len(config.repos)
+    for idx, repo_name in enumerate(config.repos, 1):
+        token = config.github_tokens.get(repo_name, config.github_token)
+        repo = Repository(full_name=repo_name, access_token=token)
+        out_file = output_dir / f"{repo.slug}-ground-truth.jsonl"
+
+        existing_ids: set[str] = set()
+        if getattr(args, "resume", False) and out_file.exists():
+            existing_changes = load_ground_truth_changes(str(out_file))
+            existing_ids = {c.change_id for c in existing_changes}
+            print(
+                f"[{idx}/{total_repos}] {repo.full_name}: resuming "
+                f"({len(existing_ids)} already collected)",
+                flush=True,
+            )
+        else:
+            print(f"[{idx}/{total_repos}] {repo.full_name}: collecting ...", flush=True)
+
+        mode = "a" if existing_ids else "w"
+        new_count = 0
+        with open(out_file, mode) as out_f:
+            def _write(change, _f=out_f):
+                nonlocal new_count
+                _f.write(json.dumps(asdict(change)) + "\n")
+                _f.flush()
+                new_count += 1
+
+            collect_pr_ground_truth(
+                repo,
+                config.ground_truth,
+                github_token=token,
+                existing_change_ids=existing_ids,
+                on_change=_write,
+            )
+
+        total = len(existing_ids) + new_count
+        print(
+            f"[{idx}/{total_repos}] {repo.full_name}: {new_count} new "
+            f"({total} total) -> {out_file}",
+            flush=True,
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -508,6 +574,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     gt_collect = gt_subparsers.add_parser("collect", help="Enumerate and normalize landed changes")
     _add_common_args(gt_collect)
+    gt_collect.add_argument(
+        "--resume",
+        action="store_true",
+        default=False,
+        help="Resume from existing output, skipping already-collected changes",
+    )
+    gt_collect.add_argument(
+        "--pr-only",
+        action="store_true",
+        default=False,
+        help="Only collect from pull requests (skip direct commits)",
+    )
 
     gt_extract = gt_subparsers.add_parser("extract", help="Extract patches, descriptions, and provenance")
     _add_common_args(gt_extract)
