@@ -408,13 +408,14 @@ def _cmd_ground_truth(args: argparse.Namespace) -> None:
     """Dispatch ground-truth sub-subcommands."""
     sub = args.gt_command
     if sub is None:
-        print("Usage: swebenchify ground-truth {collect,extract,emit,run}", file=sys.stderr)
+        print("Usage: swebenchify ground-truth {collect,extract,emit,classify,run}", file=sys.stderr)
         sys.exit(1)
 
     gt_commands = {
         "collect": _cmd_ground_truth_collect,
         "extract": _cmd_ground_truth_extract,
         "emit": _cmd_ground_truth_emit,
+        "classify": _cmd_ground_truth_classify,
         "run": _cmd_ground_truth_run,
     }
     handler = gt_commands.get(sub)
@@ -570,8 +571,55 @@ def _cmd_ground_truth_emit(args: argparse.Namespace) -> None:
             print(f"  {kind}: {path}", flush=True)
 
 
+def _cmd_ground_truth_classify(args: argparse.Namespace) -> None:
+    """Run ground-truth classify: apply taxonomy classifier to changes."""
+    import json
+    from dataclasses import asdict
+    from pathlib import Path
+
+    _setup_logging()
+    config = load_config(args.config)
+
+    from swebenchify.ground_truth.models import load_ground_truth_changes
+    from swebenchify.taxonomy.classifier import classify_change
+
+    output_dir = Path(config.output.dir)
+    total_repos = len(config.repos)
+
+    for idx, repo_name in enumerate(config.repos, 1):
+        slug = repo_name.replace("/", "__")
+        validated_file = output_dir / f"{slug}-ground-truth-validated.jsonl"
+        fallback_file = output_dir / f"{slug}-ground-truth.jsonl"
+
+        input_file = validated_file if validated_file.exists() else fallback_file
+        if not input_file.exists():
+            print(
+                f"[{idx}/{total_repos}] {repo_name}: no changes file found, "
+                f"run 'ground-truth collect' first",
+                file=sys.stderr,
+            )
+            continue
+
+        changes = load_ground_truth_changes(str(input_file))
+        output_file = output_dir / f"{slug}-ground-truth-taxonomy.jsonl"
+        print(f"[{idx}/{total_repos}] {repo_name}: classifying {len(changes)} changes ...", flush=True)
+
+        level_counts: dict[str, int] = {}
+        with open(output_file, "w") as out_f:
+            for change in changes:
+                classification = classify_change(change)
+                out_f.write(json.dumps(asdict(classification)) + "\n")
+                level_counts[classification.framework_level] = level_counts.get(classification.framework_level, 0) + 1
+
+        summary = ", ".join(f"{k}={v}" for k, v in sorted(level_counts.items()))
+        print(
+            f"[{idx}/{total_repos}] {repo_name}: {len(changes)} classified ({summary}) -> {output_file}",
+            flush=True,
+        )
+
+
 def _cmd_ground_truth_run(args: argparse.Namespace) -> None:
-    """Run the full ground truth pipeline: collect -> extract -> emit."""
+    """Run the full ground truth pipeline: collect -> extract -> emit [-> classify]."""
     _setup_logging()
     print("=== Phase 1: Collect ===", flush=True)
     _cmd_ground_truth_collect(args)
@@ -579,6 +627,9 @@ def _cmd_ground_truth_run(args: argparse.Namespace) -> None:
     _cmd_ground_truth_extract(args)
     print("\n=== Phase 3: Emit ===", flush=True)
     _cmd_ground_truth_emit(args)
+    if getattr(args, "classify", False):
+        print("\n=== Phase 4: Classify (taxonomy) ===", flush=True)
+        _cmd_ground_truth_classify(args)
     print("\n=== Done ===", flush=True)
 
 
@@ -695,6 +746,9 @@ def build_parser() -> argparse.ArgumentParser:
     gt_emit = gt_subparsers.add_parser("emit", help="Write JSONL output artifacts")
     _add_common_args(gt_emit)
 
+    gt_classify = gt_subparsers.add_parser("classify", help="Classify changes using taxonomy heuristics")
+    _add_common_args(gt_classify)
+
     gt_run = gt_subparsers.add_parser("run", help="Run the full ground truth pipeline")
     _add_common_args(gt_run)
     gt_run.add_argument(
@@ -702,6 +756,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Resume from existing output, skipping already-collected changes",
+    )
+    gt_run.add_argument(
+        "--classify",
+        action="store_true",
+        default=False,
+        help="Also run taxonomy classification after emit",
     )
 
     return parser
