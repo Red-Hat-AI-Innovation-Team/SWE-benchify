@@ -81,6 +81,18 @@ class OutputConfig:
 
 
 @dataclass
+class GroundTruthConfig:
+    """Configuration for ground truth initialization pipeline."""
+
+    target_branch: str | None = None  # auto-detect if None
+    commit_after: str | None = None   # ISO 8601 date
+    commit_before: str | None = None  # ISO 8601 date
+    max_changes_per_repo: int | None = None
+    min_link_confidence: float = 0.0
+    github_api_for_missing_only: bool = True
+
+
+@dataclass
 class DockerConfig:
     """Configuration for Docker image registry publishing."""
 
@@ -100,6 +112,7 @@ class Config:
     filters: FilterConfig = field(default_factory=FilterConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     docker: DockerConfig = field(default_factory=DockerConfig)
+    ground_truth: GroundTruthConfig = field(default_factory=GroundTruthConfig)
     go_repos: list[str] = field(default_factory=list)
     rust_repos: list[str] = field(default_factory=list)
     rh_jira_projects: list[str] = field(default_factory=lambda: ["STOR", "MGMT"])
@@ -228,6 +241,24 @@ def _build_output_config(data: dict | None) -> OutputConfig:
     )
 
 
+def _build_ground_truth_config(data: dict | None) -> GroundTruthConfig:
+    if data is None:
+        return GroundTruthConfig()
+    return GroundTruthConfig(
+        target_branch=data.get("target_branch"),
+        commit_after=data.get("commit_after"),
+        commit_before=data.get("commit_before"),
+        max_changes_per_repo=data.get("max_changes_per_repo"),
+        min_link_confidence=data.get(
+            "min_link_confidence", GroundTruthConfig.min_link_confidence
+        ),
+        github_api_for_missing_only=data.get(
+            "github_api_for_missing_only",
+            GroundTruthConfig.github_api_for_missing_only,
+        ),
+    )
+
+
 def _build_docker_config(data: dict | None) -> DockerConfig:
     if data is None:
         return DockerConfig()
@@ -286,6 +317,7 @@ def load_config(path: str) -> Config:
         filters=_build_filter_config(raw.get("filters")),
         output=_build_output_config(raw.get("output")),
         docker=_build_docker_config(raw.get("docker")),
+        ground_truth=_build_ground_truth_config(raw.get("ground_truth")),
         go_repos=raw.get("go_repos", []) or [],
         rust_repos=raw.get("rust_repos", []) or [],
         rh_jira_projects=raw.get("rh_jira_projects", ["STOR", "MGMT"]) or ["STOR", "MGMT"],

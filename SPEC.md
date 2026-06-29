@@ -529,3 +529,227 @@ Docker harness, the resolve rates SHOULD reflect the expected ordering.
 
 **Measured:** haiku 3% (1/30) < sonnet 10% (1/10) < opus 65% (13/20).
 Monotonic ordering confirmed.
+
+## 10. Ground Truth Initialization
+
+### 10.1 Purpose
+
+Mine landed changes from a repository's git history into reusable JSONL
+artifacts. These artifacts capture the full context of each change —
+patches, descriptions, linked issues, and provenance — enabling
+downstream tasks such as benchmark generation, taxonomy classification,
+and dataset quality analysis.
+
+The pipeline operates on **local git history first**, falling back to the
+GitHub API only when metadata (issue bodies, PR descriptions, review
+comments) is missing from the local clone.
+
+### 10.2 Pipeline Stages
+
+| Stage | Name | Description |
+|-------|------|-------------|
+| 1 | Repository Preparation | Clone or update the target repository; resolve branch |
+| 2 | Landed Change Enumeration | Walk merge commits and direct pushes on the target branch |
+| 3 | Change Normalization | Normalize each landed change into a `GroundTruthChange` |
+| 4 | Patch Extraction & Categorization | Split the full diff into 5 categories: code, test, doc, tooling, agent_instruction |
+| 5 | Description & Provenance Extraction | Gather descriptions from issues, PR bodies, commit messages, review comments, ADRs, docs, release notes |
+| 6 | Quality Checks | Validate patch integrity, description completeness, link confidence |
+| 7 | Emission | Write JSONL output artifacts and summary report |
+
+### 10.3 Patch Categories
+
+Each landed change's full diff is split into five non-overlapping patch
+categories:
+
+| Category | Description |
+|----------|-------------|
+| `code` | Production source code changes |
+| `test` | Test file changes (files matching test detection heuristics) |
+| `doc` | Documentation changes (README, docs/, *.md, *.rst, etc.) |
+| `tooling` | Build system, CI/CD, configuration file changes |
+| `agent_instruction` | Changes to AI agent instructions, prompts, or CLAUDE.md files |
+
+### 10.4 Data Models
+
+#### GroundTruthChange
+
+Represents a single landed change extracted from repository history.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `repo` | `str` | Repository full name (owner/repo) |
+| `change_id` | `str` | Unique identifier: `pr:<number>`, `commit:<sha>`, `merge:<sha>` |
+| `change_kind` | `str` | One of: `pull_request`, `direct_commit`, `merge_commit`, `squash_commit`, `patch_series`, `unknown` |
+| `base_commit` | `str` | Commit SHA before the change |
+| `head_commit` | `str` | Commit SHA after the change |
+| `merge_commit` | `str` | Merge commit SHA (if applicable) |
+| `landed_at` | `str` | ISO 8601 timestamp when the change landed |
+| `title` | `str` | Change title (PR title or first commit message line) |
+| `body` | `str` | Change body (PR body or commit message body) |
+| `description_sources` | `list[DescriptionSource]` | All gathered description sources |
+| `linked_issues` | `list[str]` | GitHub issue numbers, Jira IDs, or URLs |
+| `review_sources` | `list[str]` | URLs or references to code review comments |
+| `full_diff` | `str` | Complete unified diff |
+| `code_patch` | `str \| None` | Production code portion of the diff |
+| `test_patch` | `str \| None` | Test portion of the diff |
+| `doc_patch` | `str \| None` | Documentation portion of the diff |
+| `tooling_patch` | `str \| None` | Tooling/CI portion of the diff |
+| `agent_instruction_patch` | `str \| None` | Agent instruction portion of the diff |
+| `changed_files` | `list[str]` | List of all changed file paths |
+| `link_confidence` | `float` | Confidence score for issue-PR linkage (0.0–1.0) |
+| `extraction_warnings` | `list[str]` | Warnings generated during extraction |
+
+#### DescriptionSource
+
+Represents a single source of descriptive text for a change.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `source_kind` | `str` | — | One of: `issue`, `pr_body`, `commit_message`, `review_comment`, `issue_comment`, `adr`, `doc`, `release_note`, `derived_summary` |
+| `source_id` | `str` | — | URL, issue number, commit SHA, or file path |
+| `created_at` | `str` | — | ISO 8601 timestamp |
+| `text` | `str` | — | The descriptive text content |
+| `allowed_for_task_prompt` | `bool` | `True` | Whether this source can be used in task prompts |
+| `leakage_risk` | `str` | `'none'` | Risk of solution leakage: `none`, `low`, `medium`, `high` |
+| `notes` | `str` | `''` | Additional notes about this source |
+
+### 10.5 Output Contract
+
+The ground truth pipeline produces four output artifacts:
+
+| File | Format | Description |
+|------|--------|-------------|
+| `ground-truth-changes.jsonl` | JSONL | One `GroundTruthChange` per line |
+| `ground-truth-descriptions.jsonl` | JSONL | One `DescriptionSource` per line (denormalized) |
+| `ground-truth-files.jsonl` | JSONL | Per-file change records |
+| `ground-truth-report.md` | Markdown | Human-readable summary with statistics |
+
+### 10.6 CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `swebenchify ground-truth collect` | Enumerate and normalize landed changes |
+| `swebenchify ground-truth extract` | Extract patches, descriptions, and provenance |
+| `swebenchify ground-truth emit` | Write JSONL output artifacts |
+| `swebenchify ground-truth run` | Run the full ground truth pipeline (collect → extract → emit) |
+
+### 10.7 Design Principles
+
+1. **Local-first data access.** Extract as much as possible from the
+   local git clone. Use the GitHub API only for metadata not available
+   locally (issue bodies, PR review comments).
+
+2. **Append/resume-friendly.** Each stage SHOULD be resumable. Output
+   files use JSONL format to support incremental appending. Already-
+   processed changes are detected via `change_id` and skipped on resume.
+
+3. **Leakage-aware descriptions.** Each `DescriptionSource` carries a
+   `leakage_risk` classification. Sources with `high` leakage risk
+   (e.g., review comments that mention the exact fix) MUST NOT be used
+   in task prompts without filtering.
+
+## 11. Change Taxonomy
+
+### 11.1 Purpose
+
+Classify repository changes by their effect on the contribution
+framework — the implicit and explicit rules, patterns, and mechanisms
+that govern how contributions are made to a project. This classification
+enables filtering, stratification, and quality assessment of benchmark
+instances.
+
+### 11.2 Framework Effect Lattice (F0–F4)
+
+Changes are classified into five levels based on their structural impact
+on the project's contribution framework:
+
+| Level | Name | Description |
+|-------|------|-------------|
+| F0 | No Framework Effect | The change does not affect how future contributions are made. Pure bug fixes, feature additions that follow existing patterns. |
+| F1 | Local Knowledge Addition | Adds new domain knowledge or data that future contributors must be aware of. New constants, configuration values, API endpoints. |
+| F2 | Pattern or Invariant Encoding | Establishes or modifies a pattern that future contributions should follow. New coding conventions, test patterns, error handling approaches. |
+| F3 | Framework Mechanism Change | Changes the mechanisms that enforce or enable contributions. Build system changes, CI/CD modifications, test infrastructure updates. |
+| F4 | Governance or Architecture Shift | Alters the fundamental structure or governance of the project. Major refactors, architecture changes, process changes. |
+
+### 11.3 Evaluation Questions
+
+The taxonomy uses 23 binary (yes/no) evaluation questions organized by
+framework level. Each question probes whether a change exhibits
+characteristics of that level.
+
+#### F1 Questions (Local Knowledge Addition)
+- Q01: Does this change introduce new named constants, configuration keys, or feature flags?
+- Q02: Does this change add new API endpoints, CLI commands, or user-facing entry points?
+- Q03: Does this change add new error codes, status values, or enumeration members?
+- Q04: Does this change introduce domain-specific terminology or concepts in code or documentation?
+- Q05: Does this change add data schemas, database migrations, or data model fields?
+
+#### F2 Questions (Pattern or Invariant Encoding)
+- Q06: Does this change establish a new coding pattern that other code should follow?
+- Q07: Does this change modify or add validation rules, input constraints, or invariant checks?
+- Q08: Does this change introduce a new abstraction (interface, base class, trait) for others to implement?
+- Q09: Does this change add or modify test patterns, fixtures, or testing utilities?
+- Q10: Does this change establish conventions for error handling, logging, or observability?
+- Q11: Does this change add or modify documentation templates, style guides, or contribution guidelines?
+
+#### F3 Questions (Framework Mechanism Change)
+- Q12: Does this change modify the build system, package configuration, or dependency management?
+- Q13: Does this change alter CI/CD pipelines, GitHub Actions workflows, or automation scripts?
+- Q14: Does this change modify test infrastructure, test runners, or test configuration?
+- Q15: Does this change affect code generation, scaffolding, or templating tools?
+- Q16: Does this change modify linting rules, formatting configuration, or static analysis settings?
+- Q17: Does this change alter deployment configuration, infrastructure-as-code, or environment setup?
+
+#### F4 Questions (Governance or Architecture Shift)
+- Q18: Does this change restructure the project's directory layout or module organization?
+- Q19: Does this change modify the project's public API surface in a breaking way?
+- Q20: Does this change alter the project's versioning, release, or branching strategy?
+- Q21: Does this change modify governance documents (CODEOWNERS, MAINTAINERS, decision records)?
+- Q22: Does this change introduce or remove a major architectural component or subsystem?
+- Q23: Does this change alter the project's license, security policy, or compliance requirements?
+
+### 11.4 Classification Process
+
+1. **Deterministic heuristic classifier.** A rule-based classifier
+   answers each of the 23 questions using file-path patterns, diff
+   content analysis, and keyword matching. This classifier is fast and
+   deterministic.
+
+2. **Optional LLM classifier.** An LLM-based classifier MAY be used to
+   answer questions that the heuristic classifier cannot confidently
+   resolve. The LLM classifier provides higher accuracy at the cost of
+   latency and expense.
+
+3. **Level assignment.** The framework level is determined by the highest
+   level at which any question is answered affirmatively. If no questions
+   are answered affirmatively, the change is classified as F0.
+
+### 11.5 Data Model
+
+#### TaxonomyQuestion
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `id` | `str` | — | Question identifier (e.g., `q01`) |
+| `text` | `str` | — | The binary question text |
+| `category` | `str` | — | Framework level: `F1`, `F2`, `F3`, or `F4` |
+| `weight` | `float` | `1.0` | Relative weight for confidence scoring |
+
+#### TaxonomyEvaluation
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `question_id` | `str` | — | Reference to a `TaxonomyQuestion.id` |
+| `answer` | `bool` | — | Whether the question is answered affirmatively |
+| `confidence` | `float` | `1.0` | Confidence in the answer (0.0–1.0) |
+| `evidence` | `str` | `''` | Supporting evidence for the answer |
+
+#### TaxonomyClassification
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `change_id` | `str` | — | Reference to a `GroundTruthChange.change_id` |
+| `framework_level` | `str` | — | Assigned level: `F0`, `F1`, `F2`, `F3`, or `F4` |
+| `level_confidence` | `float` | `0.0` | Confidence in the level assignment |
+| `evaluations` | `list[TaxonomyEvaluation]` | `[]` | Individual question evaluations |
+| `reasoning` | `str` | `''` | Summary reasoning for the classification |

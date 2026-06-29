@@ -404,6 +404,16 @@ def _cmd_eval(args: argparse.Namespace) -> None:
     asyncio.run(run())
 
 
+def _cmd_ground_truth(args: argparse.Namespace) -> None:
+    """Dispatch ground-truth sub-subcommands."""
+    sub = args.gt_command
+    if sub is None:
+        print("Usage: swebenchify ground-truth {collect,extract,emit,run}", file=sys.stderr)
+        sys.exit(1)
+    print(f"ground-truth {sub}: Not yet implemented", file=sys.stderr)
+    sys.exit(1)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser with all subcommands."""
     parser = argparse.ArgumentParser(
@@ -488,6 +498,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--output", "-o", default=None, help="Output eval results JSONL file"
     )
 
+    # ground-truth
+    gt_parser = subparsers.add_parser(
+        "ground-truth",
+        help="Ground truth initialization pipeline",
+    )
+    _add_common_args(gt_parser)
+    gt_subparsers = gt_parser.add_subparsers(dest="gt_command", help="Ground truth sub-commands")
+
+    gt_collect = gt_subparsers.add_parser("collect", help="Enumerate and normalize landed changes")
+    _add_common_args(gt_collect)
+
+    gt_extract = gt_subparsers.add_parser("extract", help="Extract patches, descriptions, and provenance")
+    _add_common_args(gt_extract)
+
+    gt_emit = gt_subparsers.add_parser("emit", help="Write JSONL output artifacts")
+    _add_common_args(gt_emit)
+
+    gt_run = gt_subparsers.add_parser("run", help="Run the full ground truth pipeline")
+    _add_common_args(gt_run)
+
     return parser
 
 
@@ -508,6 +538,7 @@ def main(argv: list[str] | None = None) -> int:
         "remote-validate": _cmd_remote_validate,
         "emit": _cmd_emit,
         "eval": _cmd_eval,
+        "ground-truth": _cmd_ground_truth,
     }
 
     try:
