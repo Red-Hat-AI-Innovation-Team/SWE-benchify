@@ -10,9 +10,7 @@ import asyncio
 import json
 import logging
 import os
-import sys
 from collections import defaultdict
-from dataclasses import asdict
 from pathlib import Path
 
 logging.basicConfig(
@@ -22,16 +20,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("full_run")
 
-from swebenchify.config import load_config
-from swebenchify.pipeline import run_pipeline
-from swebenchify.models import TaskInstance, Repository
-from swebenchify.eval_harness import eval_instance, save_eval_results
-from swebenchify.discovery import discover_environment
-from swebenchify.dispatcher import CostTracker
-from swebenchify.workspace import WorkspaceManager
-from swebenchify.emitter import load_dataset
+from swebenchify.config import load_config  # noqa: E402
+from swebenchify.pipeline import run_pipeline  # noqa: E402
+from swebenchify.models import TaskInstance, Repository  # noqa: E402
+from swebenchify.discovery import discover_environment  # noqa: E402
+from swebenchify.dispatcher import CostTracker  # noqa: E402
+from swebenchify.workspace import WorkspaceManager  # noqa: E402
+from swebenchify.emitter import load_dataset  # noqa: E402
 
-CONFIG_PATH = "swebenchify.yaml"
+CONFIG_PATH = "configs/swebenchify.yaml"
 OUTPUT_DIR = "output"
 WORKSPACE_ROOT = "output/workspaces"
 MODELS = ["haiku", "sonnet", "opus"]

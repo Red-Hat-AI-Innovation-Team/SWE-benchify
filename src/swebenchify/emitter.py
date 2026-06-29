@@ -1,7 +1,7 @@
 """Stage 6: JSONL emission.
 
 Serializes validated, filtered instances to SWE-bench-compatible JSONL.
-See SPEC.md Section 5.7.
+See docs/SPEC.md Section 5.7.
 """
 
 from __future__ import annotations

@@ -4,7 +4,7 @@ Downloads the SWE-bench dataset from HuggingFace and compares our
 validated instances' FAIL_TO_PASS lists against theirs. Reports
 per-instance and aggregate agreement rates.
 
-See PLAN.md Section 1.2a and SPEC.md Section 9.2.
+See docs/PLAN.md Section 1.2a and docs/SPEC.md Section 9.2.
 """
 
 from __future__ import annotations

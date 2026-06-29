@@ -17,8 +17,8 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "-c",
         "--config",
-        default="swebenchify.yaml",
-        help="Path to the YAML config file (default: swebenchify.yaml)",
+        default="configs/swebenchify.yaml",
+        help="Path to the YAML config file (default: configs/swebenchify.yaml)",
     )
 
 

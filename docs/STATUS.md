@@ -67,14 +67,14 @@ There are **zero Go instances** in any output file.
 export ANTHROPIC_API_KEY=sk-ant-...
 export GITHUB_TOKEN=ghp_...
 
-# 2. Configure swebenchify.yaml (repos: kubernetes/kubernetes, etcd-io/etcd)
+# 2. Configure configs/swebenchify.yaml (repos: kubernetes/kubernetes, etcd-io/etcd)
 #    go_repos: [kubernetes/kubernetes, etcd-io/etcd]
 #    pipeline.pr_after: "2024-01-01T00:00:00Z"   # post-cutoff
 #    decontam_reference_paths:
 #      - "swe-bench:./output/official-subset.jsonl"
 
 # 3. Run the pipeline
-swebenchify run -c swebenchify.yaml
+swebenchify run -c configs/swebenchify.yaml
 
 # 4. Measure M0 fidelity against rh-swe-bench known-good
 python scripts/validate_go_epic1.py m0 \
@@ -83,7 +83,7 @@ python scripts/validate_go_epic1.py m0 \
 # 5. Full validation
 python scripts/validate_go_epic1.py all \
     --known-good /path/to/rh_swe_bench_go.jsonl \
-    --config swebenchify.yaml
+    --config configs/swebenchify.yaml
 ```
 
 `validate_go_epic1.py` auto-skips any check whose prerequisites are missing and reports clearly what passed vs. what was skipped.

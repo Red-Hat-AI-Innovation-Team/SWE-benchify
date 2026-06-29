@@ -1,7 +1,7 @@
 """Configuration parsing for SWE-benchify.
 
 Loads YAML config files with environment variable resolution for secret
-values. See SPEC.md Section 6 for the configuration schema.
+values. See docs/SPEC.md Section 6 for the configuration schema.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ class PipelineConfig:
 
 @dataclass
 class FilterConfig:
-    """Configuration for quality filters (SPEC.md Section 5.6)."""
+    """Configuration for quality filters (docs/SPEC.md Section 5.6)."""
 
     min_problem_statement_words: int = 40
     max_patch_lines: int = 500

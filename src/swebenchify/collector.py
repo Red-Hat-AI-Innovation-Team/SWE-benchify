@@ -1,7 +1,7 @@
 """Stage 1: PR collection.
 
 Fetches merged pull requests with linked issues from the GitHub API.
-See SPEC.md Section 5.2.
+See docs/SPEC.md Section 5.2.
 """
 
 from __future__ import annotations

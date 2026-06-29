@@ -1,7 +1,7 @@
 """Workspace manager.
 
 Maintains bare clones, creates per-commit worktrees, and manages
-workspace lifecycle. See SPEC.md Section 8.
+workspace lifecycle. See docs/SPEC.md Section 8.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ class WorkspaceManager:
     instance workspace lifecycle.  All workspace paths are rooted under
     a single ``root`` directory.
 
-    Layout (from SPEC.md Section 8.1)::
+    Layout (from docs/SPEC.md Section 8.1)::
 
         {root}/
           {repo_slug}/

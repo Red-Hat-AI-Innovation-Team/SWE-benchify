@@ -1,0 +1,63 @@
+# SWE-benchify Red Hat v2 — Jira-linked OpenShift repos
+#
+# These repos use Jira tickets (OCPBUGS-*, CNTRLPLANE-*, etc.)
+# instead of GitHub issues for PR linkage.
+
+repos:
+  - openshift/origin
+  - openshift/installer
+  - openshift/oc
+  - openshift/source-to-image
+  - openshift/oc-mirror
+  - openshift/machine-config-operator
+  - openshift/hypershift
+  - openshift/microshift
+
+go_repos:
+  - openshift/origin
+  - openshift/installer
+  - openshift/oc
+  - openshift/source-to-image
+  - openshift/oc-mirror
+  - openshift/machine-config-operator
+  - openshift/hypershift
+  - openshift/microshift
+
+github:
+  token: $GITHUB_TOKEN
+
+pipeline:
+  max_concurrent_repos: 3
+  max_concurrent_validations: 6
+  go_n_runs: 1
+  pr_date_range:
+    after: "2025-07-01T00:00:00Z"
+
+agent:
+  max_attempts: 2
+  sandbox: docker
+  docker_image: golang:latest
+  env_discovery:
+    max_turns: 40
+    budget_usd: 2.0
+  validation:
+    max_turns: 60
+    budget_usd: 3.0
+  quality_eval:
+    max_turns: 20
+    budget_usd: 0.50
+
+filters:
+  min_problem_statement_words: 20
+  min_patch_lines: 3
+  max_patch_lines: 500
+  min_fail_to_pass: 1
+  no_new_symbol_tests: true
+  no_shas_in_problem: false
+  no_urls_in_problem: false
+
+decontam_reference_paths:
+  - "swe-bench:./output/official-subset.jsonl"
+
+output:
+  dir: ./output/rh-v2-jira

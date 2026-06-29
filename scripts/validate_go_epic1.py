@@ -17,13 +17,13 @@ Usage
 
   # M1 — requires GITHUB_TOKEN + ANTHROPIC_API_KEY + Docker/Podman
   python scripts/validate_go_epic1.py m1 \\
-      --config swebenchify.yaml \\
+      --config configs/swebenchify.yaml \\
       --repo kubernetes/kubernetes \\
       --max-prs 10
 
   # M2 — same prerequisites as M1 (builds on M1 output)
   python scripts/validate_go_epic1.py m2 \\
-      --config swebenchify.yaml \\
+      --config configs/swebenchify.yaml \\
       --repo etcd-io/etcd \\
       --max-prs 5 \\
       --n-runs 3
@@ -31,7 +31,7 @@ Usage
   # Run all checks (skips unavailable prerequisites automatically)
   python scripts/validate_go_epic1.py all \\
       --known-good path/to/rh_swe_bench.jsonl \\
-      --config swebenchify.yaml
+      --config configs/swebenchify.yaml
 
 Known-good JSONL format (one instance per line)
 ------------------------------------------------

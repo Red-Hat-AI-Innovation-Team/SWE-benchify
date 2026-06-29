@@ -23,7 +23,7 @@ pip install -e ".[dev]"
 
 ### Configuration
 
-Create a `swebenchify.yaml`. Language is detected automatically from the repository.
+Create a config file under `configs/`. Language is detected automatically from the repository.
 
 **Python repo:**
 
@@ -65,20 +65,20 @@ output:
 export GITHUB_TOKEN=ghp_...
 export ANTHROPIC_API_KEY=sk-ant-...
 
-swebenchify run -c swebenchify.yaml
+swebenchify run -c configs/swebenchify.yaml
 ```
 
 ### Run individual stages
 
 ```bash
 # Collect PRs only
-swebenchify collect -c swebenchify.yaml
+swebenchify collect -c configs/swebenchify.yaml
 
 # Validate candidates (requires prior collection + extraction)
-swebenchify validate -c swebenchify.yaml --input output/pallets__flask-candidates.jsonl
+swebenchify validate -c configs/swebenchify.yaml --input output/pallets__flask-candidates.jsonl
 
 # Apply filters and emit dataset
-swebenchify emit -c swebenchify.yaml --input output/validated.jsonl
+swebenchify emit -c configs/swebenchify.yaml --input output/validated.jsonl
 ```
 
 ## Examples
@@ -430,4 +430,4 @@ GITHUB_TOKEN=... python scripts/test_agentic.py
 
 ## How It Works
 
-See [SPEC.md](SPEC.md) for the full specification.
+See [SPEC.md](docs/SPEC.md) for the full specification.

@@ -1,7 +1,7 @@
 """Stage 3: Environment discovery.
 
 Dispatches a coding agent to discover the build, install, and test setup
-for each repository version. See SPEC.md Section 5.4.
+for each repository version. See docs/SPEC.md Section 5.4.
 """
 
 from __future__ import annotations
@@ -9,10 +9,9 @@ from __future__ import annotations
 import json
 import logging
 import shutil
-from pathlib import Path
 
 from swebenchify.dispatcher import AgentResult, CostTracker, run_agent_with_retry
-from swebenchify.go_registry import GoSpecRegistry, get_go_environment_setup_commit
+from swebenchify.go_registry import GoSpecRegistry
 from swebenchify.models import (
     GoEnvironmentSpec,
     RustEnvironmentSpec,

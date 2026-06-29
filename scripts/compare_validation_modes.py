@@ -18,7 +18,7 @@ are available), it runs Docker validation on the overlapping instances.
 Without --run-docker, this script compares agent results against SWE-bench's
 published FAIL_TO_PASS as a proxy for Docker validation ground truth.
 
-See PLAN.md Section 1.2c.
+See docs/PLAN.md Section 1.2c.
 """
 
 from __future__ import annotations
@@ -168,8 +168,8 @@ def try_run_docker_validation(
     validation is not available.
     """
     try:
-        from swebench.harness.run_evaluation import main as run_evaluation
-        from swebench.harness.test_spec import make_test_spec
+        from swebench.harness.run_evaluation import main as run_evaluation  # noqa: F401
+        from swebench.harness.test_spec import make_test_spec  # noqa: F401
     except ImportError:
         logger.warning(
             "swebench.harness not available. Install swebench to run "

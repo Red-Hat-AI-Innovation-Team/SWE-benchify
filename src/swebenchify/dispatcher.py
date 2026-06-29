@@ -1,7 +1,7 @@
 """Agent dispatcher wrapper.
 
 Manages Claude Code sessions via the Agent SDK for environment discovery
-and instance validation. See SPEC.md Section 7.
+and instance validation. See docs/SPEC.md Section 7.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from claude_code_sdk import ClaudeCodeOptions, ResultMessage, query
 
 logger = logging.getLogger(__name__)
 
-# Default tools the agent is allowed to use (SPEC.md Section 5.4).
+# Default tools the agent is allowed to use (docs/SPEC.md Section 5.4).
 DEFAULT_TOOLS = ["Bash", "Read", "Write", "Glob", "Grep"]
 
 

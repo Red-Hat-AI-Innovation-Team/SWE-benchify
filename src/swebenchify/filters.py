@@ -1,7 +1,7 @@
 """Stage 5: Quality filters.
 
 Applies configurable deterministic filters to validated instances.
-See SPEC.md Sections 4.4 and 5.6.
+See docs/SPEC.md Sections 4.4 and 5.6.
 """
 
 from __future__ import annotations

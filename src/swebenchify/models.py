@@ -1,6 +1,6 @@
 """Core domain model dataclasses for SWE-benchify.
 
-Based on SPEC.md Section 4. These dataclasses represent the entities that
+Based on docs/SPEC.md Section 4. These dataclasses represent the entities that
 flow through the pipeline stages.
 """
 

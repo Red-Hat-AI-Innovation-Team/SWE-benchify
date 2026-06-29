@@ -1,7 +1,7 @@
 """Pipeline controller / orchestrator.
 
 Owns the stage sequencing for each repository, manages concurrency,
-and handles resumption. See SPEC.md Sections 3.1 and 12.1.
+and handles resumption. See docs/SPEC.md Sections 3.1 and 12.1.
 """
 
 from __future__ import annotations

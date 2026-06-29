@@ -1,7 +1,7 @@
 """Stage 2: Patch extraction.
 
 Downloads PR diffs and splits them into gold patches and test patches.
-See SPEC.md Section 5.3.
+See docs/SPEC.md Section 5.3.
 """
 
 from __future__ import annotations

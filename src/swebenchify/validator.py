@@ -1,7 +1,7 @@
 """Stage 4: Instance validation.
 
 Dispatches validation for each candidate instance by running tests before
-and after applying the gold patch. See SPEC.md Section 5.5.
+and after applying the gold patch. See docs/SPEC.md Section 5.5.
 
 Languages with a registered backend use deterministic Docker-based
 validation via grader.compute_f2p(). Others fall back to agent-based
