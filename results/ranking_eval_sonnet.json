@@ -1,0 +1,93 @@
+{
+  "instances": 10,
+  "models": {
+    "sonnet": {
+      "resolved": 1,
+      "total": 10,
+      "rate": 0.1,
+      "cost": 6.953371199999999
+    }
+  },
+  "ordering_correct": true,
+  "per_instance": {
+    "sonnet": {
+      "pallets__flask-2322": {
+        "resolved": true,
+        "cost_usd": 0.5523751499999999,
+        "passed": [
+          "tests/test_basic.py::test_session_vary_cookie"
+        ],
+        "failed": [],
+        "error": null
+      },
+      "pallets__flask-2348": {
+        "resolved": false,
+        "cost_usd": 0.58864515,
+        "passed": [],
+        "failed": [],
+        "error": "Agent failed: error_max_turns"
+      },
+      "pallets__flask-2350": {
+        "resolved": false,
+        "cost_usd": 0.71084485,
+        "passed": [],
+        "failed": [],
+        "error": "Agent failed: error_max_turns"
+      },
+      "pallets__flask-2352": {
+        "resolved": false,
+        "cost_usd": 0.76921925,
+        "passed": [],
+        "failed": [],
+        "error": "Agent failed: error_max_turns"
+      },
+      "pallets__flask-2354": {
+        "resolved": false,
+        "cost_usd": 1.0404935999999998,
+        "passed": [],
+        "failed": [],
+        "error": "Agent failed: error_max_turns"
+      },
+      "psf__requests-1239": {
+        "resolved": false,
+        "cost_usd": 0.54118315,
+        "passed": [],
+        "failed": [
+          "test_requests.py::RequestsTestCase::test_cookie_sent_on_redirect"
+        ],
+        "error": null
+      },
+      "psf__requests-1290": {
+        "resolved": false,
+        "cost_usd": 0.7435202999999998,
+        "passed": [],
+        "failed": [],
+        "error": "Agent failed: error_max_turns"
+      },
+      "psf__requests-1343": {
+        "resolved": false,
+        "cost_usd": 0.68168325,
+        "passed": [],
+        "failed": [
+          "test_requests.py::RequestsTestCase::test_header_remove_is_case_insensitive",
+          "test_requests.py::RequestsTestCase::test_params_are_merged_case_sensitive"
+        ],
+        "error": null
+      },
+      "psf__requests-1376": {
+        "resolved": false,
+        "cost_usd": 0.6029075,
+        "passed": [],
+        "failed": [],
+        "error": "Agent failed: error_max_turns"
+      },
+      "psf__requests-1537": {
+        "resolved": false,
+        "cost_usd": 0.7224989999999998,
+        "passed": [],
+        "failed": [],
+        "error": "Agent failed: error_max_turns"
+      }
+    }
+  }
+}

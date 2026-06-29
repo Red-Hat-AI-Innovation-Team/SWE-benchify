@@ -1,0 +1,86 @@
+name: Remote Validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch_id:
+        description: "Batch identifier (matches branch remote-validate/{batch_id})"
+        required: true
+        type: string
+      n_runs:
+        description: "Number of validation runs for flake quarantine"
+        required: false
+        default: "1"
+        type: string
+      timeout:
+        description: "Timeout in seconds per validation"
+        required: false
+        default: "300"
+        type: string
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
+      job_count: ${{ steps.build-matrix.outputs.job_count }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build matrix from manifest
+        id: build-matrix
+        run: |
+          python3 -c "
+          import json, os
+          entries = []
+          with open('.remote-validate/manifest.jsonl') as f:
+              for i, line in enumerate(f):
+                  line = line.strip()
+                  if not line:
+                      continue
+                  data = json.loads(line)
+                  entries.append({'index': i, 'instance_id': data['instance_id']})
+          matrix = json.dumps({'include': entries})
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f'matrix={matrix}\n')
+              out.write(f'job_count={len(entries)}\n')
+          print(f'{len(entries)} validation jobs queued')
+          "
+
+  validate:
+    needs: setup
+    if: needs.setup.outputs.job_count != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install swebenchify
+        run: pip install -e .
+
+      - name: Run validation
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/validate_one.py \
+            --manifest .remote-validate/manifest.jsonl \
+            --index ${{ matrix.index }} \
+            --n-runs ${{ inputs.n_runs }} \
+            --timeout ${{ inputs.timeout }} \
+            --output result.json
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: result-${{ matrix.instance_id }}
+          path: result.json
+          retention-days: 7

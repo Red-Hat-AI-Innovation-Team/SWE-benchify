@@ -1,0 +1,9 @@
+{
+  "language": "go",
+  "go_version": "1.25",
+  "build_cmd": "go build google.golang.org/grpc/...",
+  "test_cmd": "go test -cpu 1,4 -timeout 7m google.golang.org/grpc/...",
+  "module_mode": "modules",
+  "goflags": "",
+  "system_dependencies": []
+}

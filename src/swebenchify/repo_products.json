@@ -1,0 +1,8 @@
+{
+  "kubernetes/kubernetes": "OpenShift",
+  "kubernetes/kubectl": "OpenShift",
+  "etcd-io/etcd": "OpenShift",
+  "openshift/openshift-controller-manager": "OpenShift",
+  "openshift/cluster-version-operator": "OpenShift",
+  "cri-o/cri-o": "OpenShift"
+}

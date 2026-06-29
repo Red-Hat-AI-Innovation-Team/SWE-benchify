@@ -1,0 +1,12 @@
+{
+  "language": "go",
+  "go_version": "1.25.0",
+  "build_cmd": "make build",
+  "test_cmd": "go test -v -cover -tags ceph_preview ./cmd/... ./pkg/...",
+  "module_mode": "modules",
+  "goflags": "",
+  "system_dependencies": [
+    "shellcheck",
+    "s3cmd"
+  ]
+}

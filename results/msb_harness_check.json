@@ -1,0 +1,75 @@
+[
+  {
+    "pr_number": 19086,
+    "base_commit": "8c1547bc59398b39a0af12b2699ac1984e98910f",
+    "build_ok": true,
+    "resolved": true,
+    "msb_f2p": [
+      "TestHTTPSubPath",
+      "TestHTTPSubPath//readyz",
+      "TestLearnerReadyCheck"
+    ],
+    "our_f2p": [
+      "go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp.TestHTTPSubPath",
+      "go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp.TestHTTPSubPath//readyz/learner_ok",
+      "go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp.TestLearnerReadyCheck",
+      "go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp.TestLearnerReadyCheck/not_ready_because_member_is_learner"
+    ],
+    "gaps": [
+      "SUBTEST_COLLAPSE: our parser has 32 subtest entries that MSB collapses (e.g. ['go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp.TestDataCorruptionCheck/Live_if_CORRUPT_alarm_is_on', 'go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp.TestDataCorruptionCheck/Not_ready_if_CORRUPT_alarm_is_on'])",
+      "ID_PREFIX: our IDs have package prefix (e.g. ['go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp.TestDataCorruptionCheck', 'go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp.TestDataCorruptionCheck/Live_if_CORRUPT_alarm_is_on']); MSB uses bare test names"
+    ],
+    "error": null
+  },
+  {
+    "pr_number": 18956,
+    "base_commit": "46127e7ea5db0e79e04cd7b5dfcad775e4bf9bdf",
+    "build_ok": true,
+    "resolved": false,
+    "msb_f2p": [],
+    "our_f2p": [],
+    "gaps": [
+      "SUBTEST_COLLAPSE: our parser has 36 subtest entries that MSB collapses (e.g. ['go.etcd.io/etcd/pkg/v3/featuregate.TestFeatureGateFlag/#00', 'go.etcd.io/etcd/pkg/v3/featuregate.TestFeatureGateFlag/AllAlpha=banana'])",
+      "ID_PREFIX: our IDs have package prefix (e.g. ['go.etcd.io/etcd/pkg/v3/featuregate.TestFeatureGateFlag', 'go.etcd.io/etcd/pkg/v3/featuregate.TestFeatureGateFlag/#00']); MSB uses bare test names"
+    ],
+    "error": null
+  },
+  {
+    "pr_number": 18899,
+    "base_commit": "507c0de87bd5034e3de4ab76ebf96b54dae0cd52",
+    "build_ok": true,
+    "resolved": false,
+    "msb_f2p": [],
+    "our_f2p": [],
+    "gaps": [
+      "NO_OUTPUT: both parsers saw empty output \u2014 check test command / package scope"
+    ],
+    "error": null
+  },
+  {
+    "pr_number": 18829,
+    "base_commit": "5711c07a45a6410be3bdb4e1836cbfea229273be",
+    "build_ok": true,
+    "resolved": false,
+    "msb_f2p": [],
+    "our_f2p": [],
+    "gaps": [
+      "SUBTEST_COLLAPSE: our parser has 43 subtest entries that MSB collapses (e.g. ['go.etcd.io/etcd/tests/v3/e2e.TestAuthority/Size:_1,_Scenario:_\"http://address[:port]\"', 'go.etcd.io/etcd/tests/v3/e2e.TestAuthority/Size:_1,_Scenario:_\"http://domain[:port]\"'])",
+      "ID_PREFIX: our IDs have package prefix (e.g. ['go.etcd.io/etcd/tests/v3/e2e.TestAuth_CVE_2021_28235', 'go.etcd.io/etcd/tests/v3/e2e.TestAuthority']); MSB uses bare test names"
+    ],
+    "error": null
+  },
+  {
+    "pr_number": 18827,
+    "base_commit": "bd8896364a1d9adb554b538232004e5b2d6c850a",
+    "build_ok": true,
+    "resolved": false,
+    "msb_f2p": [],
+    "our_f2p": [],
+    "gaps": [
+      "SUBTEST_COLLAPSE: our parser has 33 subtest entries that MSB collapses (e.g. ['go.etcd.io/etcd/tests/v3/e2e.TestAuthority/Size:_1,_Scenario:_\"http://address[:port]\"', 'go.etcd.io/etcd/tests/v3/e2e.TestAuthority/Size:_1,_Scenario:_\"http://domain[:port]\"'])",
+      "ID_PREFIX: our IDs have package prefix (e.g. ['go.etcd.io/etcd/tests/v3/e2e.TestAuthCluster', 'go.etcd.io/etcd/tests/v3/e2e.TestAuth_CVE_2021_28235']); MSB uses bare test names"
+    ],
+    "error": null
+  }
+]

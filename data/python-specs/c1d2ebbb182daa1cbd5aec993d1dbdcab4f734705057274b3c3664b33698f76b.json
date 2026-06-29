@@ -1,0 +1,13 @@
+{
+  "language": "python",
+  "language_version": "3.13",
+  "package_manager": "pip",
+  "install_cmd": "pip install -e .",
+  "test_cmd": "pytest",
+  "pre_install": [
+    "pip install -r test/lib/ansible_test/_data/requirements/units.txt",
+    "pip install -r test/units/requirements.txt"
+  ],
+  "pip_packages": [],
+  "system_dependencies": []
+}

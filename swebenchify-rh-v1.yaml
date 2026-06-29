@@ -1,0 +1,131 @@
+# SWE-benchify Red Hat v1 — large-scale mining configuration
+#
+# Covers all 25 repos from rh-swe-bench (rounakbende/rh-swe-bench) plus
+# kubernetes/kubernetes, helm/helm, and grpc/grpc-go.
+#
+# Language split:
+#   Go   (24 repos): kubernetes, etcd, prometheus, containers/*, openshift/*, ...
+#   Python (4 repos): ansible/*, RedHatInsights/insights-core, osbuild/osbuild
+#
+# Recommended workflow:
+#   1.  swebenchify collect -c swebenchify-rh-v1.yaml        # ~minutes, resumable
+#   2.  swebenchify extract -c swebenchify-rh-v1.yaml        # hours, resumable
+#   3.  swebenchify run    -c swebenchify-rh-v1.yaml --resume # validates extracted candidates
+
+repos:
+  # --- Kubernetes ecosystem (Go) ---
+  - kubernetes/kubernetes
+  - kubernetes/kubectl
+  - kubernetes/apimachinery
+  - kubernetes-sigs/kustomize
+  - etcd-io/etcd
+
+  # --- Monitoring / Observability (Go) ---
+  - prometheus/prometheus
+
+  # --- Package management (Go) ---
+  - helm/helm
+
+  # --- gRPC (Go) ---
+  - grpc/grpc-go
+
+  # --- Container tools (Go) ---
+  - containers/buildah
+  - containers/podman
+  - containers/storage
+  - containers/image
+  - containers/common
+
+  # --- OpenShift (Go) ---
+  - openshift/router
+  - openshift/cluster-version-operator
+  - openshift/origin
+  - openshift/oc
+  - openshift/installer
+
+  # --- Operators / GitOps (Go) ---
+  - operator-framework/operator-sdk
+  - operator-framework/operator-lifecycle-manager
+  - argoproj/argo-cd
+  - tektoncd/pipeline
+
+  # --- Storage / Virtualization (Go) ---
+  - rook/rook
+  - kubevirt/kubevirt
+
+  # --- Ansible (Python) ---
+  - ansible/ansible
+  - ansible/molecule
+
+  # --- Red Hat Insights / OSBuild (Python) ---
+  - RedHatInsights/insights-core
+  - osbuild/osbuild
+
+# Repos using Go toolchain (everything except Python repos above)
+go_repos:
+  - kubernetes/kubernetes
+  - kubernetes/kubectl
+  - kubernetes/apimachinery
+  - kubernetes-sigs/kustomize
+  - etcd-io/etcd
+  - prometheus/prometheus
+  - helm/helm
+  - grpc/grpc-go
+  - containers/buildah
+  - containers/podman
+  - containers/storage
+  - containers/image
+  - containers/common
+  - openshift/router
+  - openshift/cluster-version-operator
+  - openshift/origin
+  - openshift/oc
+  - openshift/installer
+  - operator-framework/operator-sdk
+  - operator-framework/operator-lifecycle-manager
+  - argoproj/argo-cd
+  - tektoncd/pipeline
+  - rook/rook
+  - kubevirt/kubevirt
+
+github:
+  token: $GITHUB_TOKEN
+
+pipeline:
+  max_concurrent_repos: 3
+  max_concurrent_validations: 6
+  # max_prs_per_repo omitted → unlimited (collect all 2024+ issue-linked PRs)
+  go_n_runs: 1
+  pr_date_range:
+    after: "2025-07-01T00:00:00Z"
+    # no 'before' → collects through the current date
+
+agent:
+  max_attempts: 2
+  sandbox: docker
+  docker_image: golang:latest
+  env_discovery:
+    max_turns: 40
+    budget_usd: 2.0
+  validation:
+    max_turns: 60
+    budget_usd: 3.0
+  quality_eval:
+    max_turns: 20
+    budget_usd: 0.50
+
+filters:
+  min_problem_statement_words: 20
+  min_patch_lines: 3
+  max_patch_lines: 500
+  min_fail_to_pass: 1
+  no_new_symbol_tests: true
+  # Go/Python repos routinely reference commits/URLs in issue bodies
+  no_shas_in_problem: false
+  no_urls_in_problem: false
+
+decontam_reference_paths:
+  - "swe-bench:./output/official-subset.jsonl"
+
+output:
+  dir: ./output/rh-v1

@@ -1,0 +1,66 @@
+{
+  "pallets/flask": {
+    "overall_score": 0.8,
+    "field_match_rates": {
+      "python": 0.5,
+      "install": 1.0,
+      "test_cmd": 1.0,
+      "pip_packages": 0.5,
+      "pre_install": 1.0
+    },
+    "versions": [
+      {
+        "version": "2.1",
+        "overall": 0.6,
+        "fields": {
+          "python": {
+            "match": false,
+            "detail": "gen=3.11 exp=3.10"
+          },
+          "install": {
+            "match": true,
+            "detail": "functional match (both pip install)"
+          },
+          "test_cmd": {
+            "match": true,
+            "detail": "exact match"
+          },
+          "pip_packages": {
+            "match": false,
+            "detail": "4/6 expected packages covered (67%); missing: ['markupsafe', 'setuptools']; extra: ['asgiref', 'blinker', 'greenlet', 'pytest', 'python_dotenv']"
+          },
+          "pre_install": {
+            "match": true,
+            "detail": "both empty"
+          }
+        }
+      },
+      {
+        "version": "2.2",
+        "overall": 1.0,
+        "fields": {
+          "python": {
+            "match": true,
+            "detail": "3.11"
+          },
+          "install": {
+            "match": true,
+            "detail": "functional match (both pip install)"
+          },
+          "test_cmd": {
+            "match": true,
+            "detail": "exact match"
+          },
+          "pip_packages": {
+            "match": true,
+            "detail": "5/6 expected packages covered (83%); missing: ['setuptools']; extra: ['asgiref', 'blinker', 'greenlet', 'importlib_metadata', 'pytest', 'python_dotenv']"
+          },
+          "pre_install": {
+            "match": true,
+            "detail": "both empty"
+          }
+        }
+      }
+    ]
+  }
+}

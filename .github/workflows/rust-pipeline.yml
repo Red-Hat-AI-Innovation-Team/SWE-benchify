@@ -1,0 +1,105 @@
+name: Rust Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "GitHub repo to process (owner/repo)"
+        required: true
+        type: string
+      rust_version:
+        description: "Rust toolchain version (default: auto-detect)"
+        required: false
+        type: string
+      test_cmd:
+        description: "Test command (default: cargo test)"
+        required: false
+        type: string
+      features:
+        description: "Cargo feature flags (e.g. --all-features)"
+        required: false
+        type: string
+      system_deps:
+        description: "Comma-separated system packages to install"
+        required: false
+        type: string
+      max_prs:
+        description: "Max PRs to scan"
+        required: false
+        default: "500"
+        type: string
+      timeout:
+        description: "Validation timeout per phase (seconds)"
+        required: false
+        default: "600"
+        type: string
+      skip_valid:
+        description: "Skip already-validated candidates on rerun"
+        required: false
+        default: "false"
+        type: boolean
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    timeout-minutes: 720
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install swebenchify
+        run: pip install -e .
+
+      - name: Run pipeline
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/discover_and_validate_rust.py \
+            --repo "${{ inputs.repo }}" \
+            --max-prs ${{ inputs.max_prs }} \
+            --timeout ${{ inputs.timeout }} \
+            ${{ inputs.rust_version && format('--rust-version {0}', inputs.rust_version) || '' }} \
+            ${{ inputs.test_cmd && format('--test-cmd "{0}"', inputs.test_cmd) || '' }} \
+            ${{ inputs.features && format('--features "{0}"', inputs.features) || '' }} \
+            ${{ inputs.system_deps && format('--system-deps "{0}"', inputs.system_deps) || '' }} \
+            ${{ inputs.skip_valid && '--skip-valid' || '' }}
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build and push images
+        if: success()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ inputs.repo }}
+        run: |
+          SLUG="${REPO//\//__}"
+          INSTANCES="output/${SLUG}/${SLUG}-task-instances.jsonl"
+          if [ -f "$INSTANCES" ]; then
+            python3 scripts/build_and_push_images_generic.py \
+              --instances "$INSTANCES" \
+              --update-jsonl
+          else
+            echo "No task instances file found, skipping image build"
+          fi
+
+      - name: Set artifact name
+        if: always()
+        id: artifact
+        run: echo "name=pipeline-${REPO//\//__}" >> "$GITHUB_OUTPUT"
+        env:
+          REPO: ${{ inputs.repo }}
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: output/
+          retention-days: 30

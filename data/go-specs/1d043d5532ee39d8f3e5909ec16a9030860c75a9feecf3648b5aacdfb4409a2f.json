@@ -1,0 +1,28 @@
+{
+  "language": "go",
+  "go_version": "1.26.3",
+  "build_cmd": "make build-local",
+  "test_cmd": "go test ./...",
+  "module_mode": "modules",
+  "goflags": "",
+  "system_dependencies": [
+    "git",
+    "make",
+    "gcc",
+    "openssh-server",
+    "openssh-client",
+    "nginx",
+    "unzip",
+    "zip",
+    "fcgiwrap",
+    "wget",
+    "sudo",
+    "tini",
+    "ca-certificates",
+    "gpg",
+    "gpg-agent",
+    "tzdata",
+    "connect-proxy",
+    "shellcheck"
+  ]
+}

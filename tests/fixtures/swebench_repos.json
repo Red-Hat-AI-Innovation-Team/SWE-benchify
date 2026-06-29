@@ -1,0 +1,14 @@
+{
+  "django/django": 850,
+  "sympy/sympy": 386,
+  "scikit-learn/scikit-learn": 229,
+  "sphinx-doc/sphinx": 187,
+  "matplotlib/matplotlib": 184,
+  "pytest-dev/pytest": 119,
+  "pydata/xarray": 110,
+  "astropy/astropy": 95,
+  "pylint-dev/pylint": 57,
+  "psf/requests": 44,
+  "mwaskom/seaborn": 22,
+  "pallets/flask": 11
+}
