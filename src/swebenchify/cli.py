@@ -411,11 +411,17 @@ def _cmd_ground_truth(args: argparse.Namespace) -> None:
         print("Usage: swebenchify ground-truth {collect,extract,emit,run}", file=sys.stderr)
         sys.exit(1)
 
-    if sub == "collect":
-        _cmd_ground_truth_collect(args)
-    else:
-        print(f"ground-truth {sub}: Not yet implemented", file=sys.stderr)
+    gt_commands = {
+        "collect": _cmd_ground_truth_collect,
+        "extract": _cmd_ground_truth_extract,
+        "emit": _cmd_ground_truth_emit,
+        "run": _cmd_ground_truth_run,
+    }
+    handler = gt_commands.get(sub)
+    if handler is None:
+        print(f"ground-truth {sub}: unknown sub-command", file=sys.stderr)
         sys.exit(1)
+    handler(args)
 
 
 def _cmd_ground_truth_collect(args: argparse.Namespace) -> None:
@@ -478,6 +484,102 @@ def _cmd_ground_truth_collect(args: argparse.Namespace) -> None:
             f"({total} total) -> {out_file}",
             flush=True,
         )
+
+
+def _cmd_ground_truth_extract(args: argparse.Namespace) -> None:
+    """Run ground-truth extract: load collected changes, run quality checks, save validated."""
+    from pathlib import Path
+
+    _setup_logging()
+    config = load_config(args.config)
+
+    from swebenchify.ground_truth.models import load_ground_truth_changes, save_ground_truth_changes
+    from swebenchify.ground_truth.quality_checks import run_all_checks
+
+    output_dir = Path(config.output.dir)
+    total_repos = len(config.repos)
+
+    for idx, repo_name in enumerate(config.repos, 1):
+        slug = repo_name.replace("/", "__")
+        input_file = output_dir / f"{slug}-ground-truth.jsonl"
+        output_file = output_dir / f"{slug}-ground-truth-validated.jsonl"
+
+        if not input_file.exists():
+            print(
+                f"[{idx}/{total_repos}] {repo_name}: no collected changes ({input_file}), "
+                f"run 'ground-truth collect' first",
+                file=sys.stderr,
+            )
+            continue
+
+        changes = load_ground_truth_changes(str(input_file))
+        print(f"[{idx}/{total_repos}] {repo_name}: validating {len(changes)} changes ...", flush=True)
+
+        passed_count = 0
+        for change in changes:
+            passed, warnings = run_all_checks(change, repo_path=None)
+            if passed:
+                passed_count += 1
+
+        save_ground_truth_changes(changes, str(output_file))
+        print(
+            f"[{idx}/{total_repos}] {repo_name}: {passed_count}/{len(changes)} passed "
+            f"all checks -> {output_file}",
+            flush=True,
+        )
+
+
+def _cmd_ground_truth_emit(args: argparse.Namespace) -> None:
+    """Run ground-truth emit: load validated changes, emit all JSONL files + report."""
+    from pathlib import Path
+
+    _setup_logging()
+    config = load_config(args.config)
+
+    from swebenchify.ground_truth.emitter import emit_ground_truth
+    from swebenchify.ground_truth.models import load_ground_truth_changes
+    from swebenchify.ground_truth.quality_checks import run_all_checks
+
+    output_dir = Path(config.output.dir)
+    total_repos = len(config.repos)
+
+    for idx, repo_name in enumerate(config.repos, 1):
+        slug = repo_name.replace("/", "__")
+        validated_file = output_dir / f"{slug}-ground-truth-validated.jsonl"
+        fallback_file = output_dir / f"{slug}-ground-truth.jsonl"
+
+        input_file = validated_file if validated_file.exists() else fallback_file
+        if not input_file.exists():
+            print(
+                f"[{idx}/{total_repos}] {repo_name}: no changes file found, "
+                f"run 'ground-truth collect' first",
+                file=sys.stderr,
+            )
+            continue
+
+        changes = load_ground_truth_changes(str(input_file))
+        print(f"[{idx}/{total_repos}] {repo_name}: emitting {len(changes)} changes ...", flush=True)
+
+        check_results: dict[str, tuple[bool, list[str]]] = {}
+        for change in changes:
+            passed, warnings = run_all_checks(change, repo_path=None)
+            check_results[change.change_id] = (passed, warnings)
+
+        files = emit_ground_truth(changes, str(output_dir), slug, check_results)
+        for kind, path in files.items():
+            print(f"  {kind}: {path}", flush=True)
+
+
+def _cmd_ground_truth_run(args: argparse.Namespace) -> None:
+    """Run the full ground truth pipeline: collect -> extract -> emit."""
+    _setup_logging()
+    print("=== Phase 1: Collect ===", flush=True)
+    _cmd_ground_truth_collect(args)
+    print("\n=== Phase 2: Extract (quality checks) ===", flush=True)
+    _cmd_ground_truth_extract(args)
+    print("\n=== Phase 3: Emit ===", flush=True)
+    _cmd_ground_truth_emit(args)
+    print("\n=== Done ===", flush=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -595,6 +697,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     gt_run = gt_subparsers.add_parser("run", help="Run the full ground truth pipeline")
     _add_common_args(gt_run)
+    gt_run.add_argument(
+        "--resume",
+        action="store_true",
+        default=False,
+        help="Resume from existing output, skipping already-collected changes",
+    )
 
     return parser
 
