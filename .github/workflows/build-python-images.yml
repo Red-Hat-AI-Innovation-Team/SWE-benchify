@@ -42,8 +42,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          python3 scripts/build_and_push_python_images.py \
+          python3 scripts/build_and_push_images_generic.py \
             --instances "${{ inputs.instances_jsonl }}" \
-            --specs-dir data/python-specs \
             --registry "${{ inputs.registry }}" \
             ${{ inputs.dry_run && '--dry-run' || '' }}

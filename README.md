@@ -282,152 +282,62 @@ docker:
   push_images: true                              # push after build
 ```
 
-## Python Pipeline
+## Standalone Pipeline
 
-For Python repositories, a standalone pipeline script handles discovery and
-validation without the full agentic flow:
+A unified script runs the full pipeline (collect, extract, filter, validate,
+emit) for any supported language:
 
 ```bash
-python scripts/discover_and_validate_python.py \
-    --repo containers/podman-compose \
-    --max-prs 300 \
-    --timeout 600
+# Python
+python scripts/discover_and_validate.py --language python \
+    --repo containers/podman-compose --max-prs 300
+
+# Java (Maven)
+python scripts/discover_and_validate.py --language java \
+    --repo apache/commons-lang --max-prs 500
+
+# Rust (Cargo)
+python scripts/discover_and_validate.py --language rust \
+    --repo cloudflare/pingora --max-prs 200
 ```
 
-The script auto-detects environment settings from `pyproject.toml` and
-`requirements.txt`, or accepts explicit overrides:
+The script auto-detects language version and build settings from project files
+(`pyproject.toml`, `pom.xml`, `Cargo.toml`, `rust-toolchain.toml`). Override
+any detected value with CLI flags:
 
 ```bash
-python scripts/discover_and_validate_python.py \
+python scripts/discover_and_validate.py --language python \
     --repo pallets/flask \
-    --python-version 3.11 \
+    --lang-version 3.11 \
     --install-cmd "pip install -e '.[async,dotenv]'" \
     --test-cmd "pytest tests/" \
     --pre-install "pip install -r requirements/tests.txt"
 ```
 
-### Custom base images
+### Language-specific options
 
-Repos that need infrastructure beyond `python:slim` (e.g. PostgreSQL, Redis)
-can specify a custom Docker base image:
+**Python** supports `--base-image` for custom Docker base images (e.g.
+repos needing PostgreSQL or Redis) and `--run-preamble` to inject shell
+commands before the test phase (e.g. starting services).
 
-```bash
-python scripts/discover_and_validate_python.py \
-    --repo pulp/pulp_ansible \
-    --base-image ghcr.io/pulp/pulp-ci-centos9 \
-    --install-cmd "pip install -e ." \
-    --test-cmd "pytest -v --pyargs pulp_ansible.tests.unit" \
-    --pre-install "pip install mock pytest-django"
-```
+**Java** supports `--jira-projects` to match Jira issue keys when collecting
+PRs (e.g. `--jira-projects WFLY,WFCORE`).
 
-The `--run-preamble` flag injects shell commands before the test phase,
-useful for starting services:
+**Rust** supports `--build-cmd`, `--features`, and `--system-deps`. Inline
+`#[cfg(test)]` blocks are automatically moved from the gold patch to the test
+patch.
 
-```bash
---run-preamble "/init & sleep 5; curl -sf http://localhost/pulp/api/v3/status/"
-```
+### GitHub Actions workflows
 
-### GitHub Actions workflow
-
-The `Python Pipeline` workflow (`.github/workflows/python-pipeline.yml`)
-runs the pipeline in CI:
+Each language has a workflow that invokes the unified script:
 
 ```bash
-gh workflow run python-pipeline.yml \
-    -f repo="containers/podman-compose" \
-    -f max_prs=300
+gh workflow run python-pipeline.yml -f repo="containers/podman-compose"
+gh workflow run java-pipeline.yml -f repo="apache/commons-lang"
+gh workflow run rust-pipeline.yml -f repo="cloudflare/pingora"
 ```
 
-All environment overrides (`python_version`, `install_cmd`, `test_cmd`,
-`pre_install`, `base_image`, `run_preamble`) are available as workflow inputs.
-
-## Java Pipeline
-
-For Maven-based Java repositories:
-
-```bash
-python scripts/discover_and_validate_java.py \
-    --repo apache/commons-lang \
-    --max-prs 300 \
-    --timeout 900
-```
-
-The script auto-detects the Java version from `pom.xml` (`maven.compiler.release`,
-`maven.compiler.source`, or `java.version` properties), defaulting to Java 8.
-Overrides are available:
-
-```bash
-python scripts/discover_and_validate_java.py \
-    --repo apache/commons-lang \
-    --java-version 17 \
-    --test-cmd "mvn test -B" \
-    --pre-install "mvn dependency:resolve -q -B"
-```
-
-For Red Hat repos with Jira-linked issues, use `--jira-projects` to match
-issue keys (e.g. `OCPBUGS`, `JBEAP`):
-
-```bash
-python scripts/discover_and_validate_java.py \
-    --repo wildfly/wildfly \
-    --jira-projects WFLY,WFCORE
-```
-
-### GitHub Actions workflow
-
-The `Java Pipeline` workflow (`.github/workflows/java-pipeline.yml`)
-runs the pipeline in CI:
-
-```bash
-gh workflow run java-pipeline.yml \
-    -f repo="apache/commons-lang" \
-    -f max_prs=300
-```
-
-All environment overrides (`java_version`, `test_cmd`, `pre_install`,
-`jira_projects`) are available as workflow inputs.
-
-## Rust Pipeline
-
-For Cargo-based Rust repositories:
-
-```bash
-python scripts/discover_and_validate_rust.py \
-    --repo cloudflare/pingora \
-    --max-prs 200 \
-    --timeout 600
-```
-
-The script auto-detects the Rust toolchain version from `rust-toolchain.toml`,
-`rust-toolchain`, or `Cargo.toml`, and detects workspace structure automatically.
-Overrides are available:
-
-```bash
-python scripts/discover_and_validate_rust.py \
-    --repo cloudflare/pingora \
-    --rust-version 1.84 \
-    --test-cmd "cargo test --workspace" \
-    --features "--all-features" \
-    --system-deps "libssl-dev,pkg-config"
-```
-
-Rust repos commonly define unit tests inline with `#[cfg(test)]` blocks.
-The pipeline automatically detects these hunks and moves them from the gold
-patch to the test patch so that validation works correctly.
-
-### GitHub Actions workflow
-
-The `Rust Pipeline` workflow (`.github/workflows/rust-pipeline.yml`)
-runs the pipeline in CI:
-
-```bash
-gh workflow run rust-pipeline.yml \
-    -f repo="cloudflare/pingora" \
-    -f max_prs=200
-```
-
-All environment overrides (`rust_version`, `test_cmd`, `features`,
-`system_deps`) are available as workflow inputs.
+Language-specific overrides are available as workflow inputs.
 
 ## Docker Images
 

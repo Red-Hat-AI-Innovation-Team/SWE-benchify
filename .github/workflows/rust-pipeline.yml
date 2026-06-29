@@ -60,11 +60,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          python3 scripts/discover_and_validate_rust.py \
+          python3 scripts/discover_and_validate.py --language rust \
             --repo "${{ inputs.repo }}" \
             --max-prs ${{ inputs.max_prs }} \
             --timeout ${{ inputs.timeout }} \
-            ${{ inputs.rust_version && format('--rust-version {0}', inputs.rust_version) || '' }} \
+            ${{ inputs.rust_version && format('--lang-version {0}', inputs.rust_version) || '' }} \
             ${{ inputs.test_cmd && format('--test-cmd "{0}"', inputs.test_cmd) || '' }} \
             ${{ inputs.features && format('--features "{0}"', inputs.features) || '' }} \
             ${{ inputs.system_deps && format('--system-deps "{0}"', inputs.system_deps) || '' }} \

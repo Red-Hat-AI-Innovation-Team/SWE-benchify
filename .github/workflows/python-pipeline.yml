@@ -63,11 +63,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          python3 scripts/discover_and_validate_python.py \
+          python3 scripts/discover_and_validate.py --language python \
             --repo "${{ inputs.repo }}" \
             --max-prs ${{ inputs.max_prs }} \
             --timeout ${{ inputs.timeout }} \
-            ${{ inputs.python_version && format('--python-version {0}', inputs.python_version) || '' }} \
+            ${{ inputs.python_version && format('--lang-version {0}', inputs.python_version) || '' }} \
             ${{ inputs.install_cmd && format('--install-cmd "{0}"', inputs.install_cmd) || '' }} \
             ${{ inputs.test_cmd && format('--test-cmd "{0}"', inputs.test_cmd) || '' }} \
             ${{ inputs.pre_install && format('--pre-install "{0}"', inputs.pre_install) || '' }} \
