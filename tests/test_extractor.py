@@ -385,3 +385,125 @@ class TestMergedAtPropagation:
         loaded = load_candidates(path)
         assert loaded[0].merged_at == "2024-01-02T12:00:00Z"
         assert loaded[0].link_confidence == 0.95
+
+
+class TestRustInlineTestSplitting:
+    """Test hunk-level splitting for Rust inline #[cfg(test)] blocks."""
+
+    MIXED_RS_DIFF = textwrap.dedent("""\
+        diff --git a/src/lib.rs b/src/lib.rs
+        --- a/src/lib.rs
+        +++ b/src/lib.rs
+        @@ -10,3 +10,7 @@ impl Foo
+         pub fn add(a: i32, b: i32) -> i32 {
+        -    a + b + 1
+        +    a + b
+        +}
+        +
+        +pub fn multiply(a: i32, b: i32) -> i32 {
+        +    a * b
+         }
+        @@ -50,3 +54,7 @@ mod tests
+             use super::*;
+        +    #[test]
+        +    fn test_add() {
+        +        assert_eq!(add(2, 3), 5);
+        +    }
+             // existing
+         }
+    """)
+
+    def test_extracts_inline_test_hunk(self) -> None:
+        from swebenchify.backends import get_backend, refine_patch_split
+        backend = get_backend("rust")
+        new_gold, new_test = refine_patch_split(self.MIXED_RS_DIFF, None, backend)
+        assert new_gold is not None
+        assert new_test is not None
+        assert "multiply" in new_gold
+        assert "mod tests" not in new_gold
+        assert "test_add" in new_test
+
+    def test_preserves_existing_test_patch(self) -> None:
+        from swebenchify.backends import get_backend, refine_patch_split
+        existing_test = textwrap.dedent("""\
+            diff --git a/tests/integration.rs b/tests/integration.rs
+            --- a/tests/integration.rs
+            +++ b/tests/integration.rs
+            @@ -1,2 +1,4 @@
+             use my_crate::add;
+            +#[test]
+            +fn test_integration() {}
+        """)
+        backend = get_backend("rust")
+        new_gold, new_test = refine_patch_split(self.MIXED_RS_DIFF, existing_test, backend)
+        assert "integration.rs" in new_test
+        assert "test_add" in new_test
+
+    def test_gold_only_rs_unchanged(self) -> None:
+        from swebenchify.backends import get_backend, refine_patch_split
+        gold = textwrap.dedent("""\
+            diff --git a/src/lib.rs b/src/lib.rs
+            --- a/src/lib.rs
+            +++ b/src/lib.rs
+            @@ -10,3 +10,5 @@ impl Foo
+             pub fn add(a: i32, b: i32) -> i32 {
+            -    a + b + 1
+            +    a + b
+             }
+        """)
+        backend = get_backend("rust")
+        new_gold, new_test = refine_patch_split(gold, None, backend)
+        assert new_gold is not None
+        assert new_test is None
+        assert "add" in new_gold
+
+    def test_non_rs_file_unchanged(self) -> None:
+        from swebenchify.backends import get_backend, refine_patch_split
+        gold = textwrap.dedent("""\
+            diff --git a/src/main.py b/src/main.py
+            --- a/src/main.py
+            +++ b/src/main.py
+            @@ -1,2 +1,3 @@
+             x = 1
+            +y = 2
+             z = 3
+        """)
+        backend = get_backend("rust")
+        new_gold, new_test = refine_patch_split(gold, None, backend)
+        assert new_gold is not None
+        assert new_test is None
+
+    def test_no_backend_callback_passthrough(self) -> None:
+        from swebenchify.backends import get_backend, refine_patch_split
+        go_backend = get_backend("go")
+        new_gold, new_test = refine_patch_split(self.MIXED_RS_DIFF, None, go_backend)
+        assert new_gold == self.MIXED_RS_DIFF
+        assert new_test is None
+
+    def test_cfg_test_in_context_line(self) -> None:
+        from swebenchify.backends import get_backend, refine_patch_split
+        gold = textwrap.dedent("""\
+            diff --git a/src/parser.rs b/src/parser.rs
+            --- a/src/parser.rs
+            +++ b/src/parser.rs
+            @@ -100,3 +100,3 @@ fn parse
+             fn parse() -> Result<()> {
+            -    todo!()
+            +    Ok(())
+             }
+            @@ -200,4 +200,8 @@ fn helper
+             #[cfg(test)]
+             mod tests {
+                 use super::*;
+            +    #[test]
+            +    fn test_parse() {
+            +        assert!(parse().is_ok());
+            +    }
+             }
+        """)
+        backend = get_backend("rust")
+        new_gold, new_test = refine_patch_split(gold, None, backend)
+        assert new_gold is not None
+        assert new_test is not None
+        assert "parse" in new_gold
+        assert "test_parse" in new_test

@@ -36,6 +36,7 @@ import tempfile
 from dataclasses import asdict
 from pathlib import Path
 
+from swebenchify.backends import get_backend, refine_patch_split
 from swebenchify.collector import collect_prs, save_prs
 from swebenchify.extractor import extract_all, save_candidates
 from swebenchify.grader import compute_f2p
@@ -228,6 +229,20 @@ def main(argv: list[str] | None = None) -> int:
         save_candidates(candidates, str(candidates_path))
 
     logger.info("  Extracted %d candidates", len(candidates))
+
+    # --- Stage 2.5: Refine patch split for Rust inline tests ---
+    rust_backend = get_backend("rust")
+    if rust_backend:
+        refined = 0
+        for c in candidates:
+            if c.patch:
+                new_gold, new_test = refine_patch_split(c.patch, c.test_patch, rust_backend)
+                if new_test != c.test_patch:
+                    c.patch = new_gold
+                    c.test_patch = new_test
+                    refined += 1
+        if refined:
+            logger.info("  Refined patch split for %d candidates (extracted inline test hunks)", refined)
 
     # --- Stage 3: Filter to viable Rust test candidates ---
     viable = [

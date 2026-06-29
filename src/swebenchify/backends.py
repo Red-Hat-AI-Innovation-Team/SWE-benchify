@@ -8,9 +8,12 @@ so adding a new language is configuration, not forked code.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from io import StringIO
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
+
+from unidiff import PatchSet
 
 from swebenchify.models import AnyEnvironmentSpec, EnvironmentSpec, GoEnvironmentSpec, RustEnvironmentSpec
 from swebenchify.parsers import (
@@ -37,6 +40,7 @@ class LanguageBackend:
     make_test_cmd: Callable[[AnyEnvironmentSpec], str]
     test_scope: Callable[[str], str]
     normalize_f2p: Callable[[list[str]], list[str]]
+    is_test_hunk: Callable[[Any], bool] | None = field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +56,72 @@ def register_backend(backend: LanguageBackend) -> None:
 
 def get_backend(language: str) -> LanguageBackend | None:
     return _BACKENDS.get(language)
+
+
+def _reconstruct_file_diff(patched_file: Any, hunks: list[Any]) -> str:
+    """Build a valid unified diff string from a file header and a subset of hunks."""
+    header = f"diff --git a/{patched_file.path} b/{patched_file.path}\n"
+    header += f"--- {patched_file.source_file}\n"
+    header += f"+++ {patched_file.target_file}\n"
+    return header + "".join(str(h) for h in hunks)
+
+
+def refine_patch_split(
+    gold_patch: str | None,
+    test_patch: str | None,
+    backend: LanguageBackend,
+) -> tuple[str | None, str | None]:
+    """Re-split patches using a backend's ``is_test_hunk`` callback.
+
+    The generic extractor splits at the file level. Some languages (e.g.
+    Rust) put unit tests inline in source files. This function re-examines
+    hunks in the gold patch and moves any that the backend identifies as
+    test code into the test patch.
+
+    If the backend has no ``is_test_hunk`` callback, returns the inputs
+    unchanged.
+    """
+    if not backend.is_test_hunk or not gold_patch:
+        return gold_patch, test_patch
+
+    try:
+        patch_set = PatchSet(StringIO(gold_patch))
+    except Exception:
+        return gold_patch, test_patch
+
+    ext = {"rust": ".rs"}.get(backend.name)
+    if not ext:
+        return gold_patch, test_patch
+
+    new_gold: list[str] = []
+    extra_test: list[str] = []
+
+    for patched_file in patch_set:
+        if not patched_file.path.endswith(ext) or len(patched_file) == 0:
+            new_gold.append(str(patched_file))
+            continue
+
+        gold_hunks = []
+        test_hunks = []
+        for hunk in patched_file:
+            if backend.is_test_hunk(hunk):
+                test_hunks.append(hunk)
+            else:
+                gold_hunks.append(hunk)
+
+        if gold_hunks:
+            new_gold.append(_reconstruct_file_diff(patched_file, gold_hunks))
+        if test_hunks:
+            extra_test.append(_reconstruct_file_diff(patched_file, test_hunks))
+
+    refined_gold = "".join(new_gold) if new_gold else None
+    if extra_test:
+        combined = (test_patch or "") + "".join(extra_test)
+        refined_test = combined if combined else None
+    else:
+        refined_test = test_patch
+
+    return refined_gold, refined_test
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +422,18 @@ def _rust_test_scope(test_patch: str) -> str:
     return ""
 
 
+def _rust_is_test_hunk(hunk: Any) -> bool:
+    """True if a diff hunk is inside a ``#[cfg(test)]`` / ``mod tests`` block."""
+    if hunk.section_header and "mod tests" in hunk.section_header:
+        return True
+    for line in hunk:
+        if line.line_type in (" ", "+"):
+            text = line.value
+            if "#[cfg(test)]" in text or ("mod tests" in text and "{" in text):
+                return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Register built-in backends
 # ---------------------------------------------------------------------------
@@ -402,4 +484,5 @@ register_backend(LanguageBackend(
     make_test_cmd=_rust_make_test_cmd,
     test_scope=_rust_test_scope,
     normalize_f2p=normalize_rust_f2p,
+    is_test_hunk=_rust_is_test_hunk,
 ))
