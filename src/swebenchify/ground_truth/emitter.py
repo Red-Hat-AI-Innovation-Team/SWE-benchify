@@ -98,6 +98,7 @@ def generate_report(
     check_results: dict[str, tuple[bool, list[str]]],
     output_dir: str,
     repo_slug: str,
+    taxonomy_classifications: dict[str, object] | None = None,
 ) -> str:
     os.makedirs(output_dir, exist_ok=True)
     path = os.path.join(output_dir, f"{repo_slug}-ground-truth-report.md")
@@ -178,6 +179,36 @@ def generate_report(
     ]
     for kind, count in sorted(desc_counts.items()):
         lines.append(f"- {kind}: {count}")
+
+    if taxonomy_classifications:
+        level_counts: dict[str, int] = {"F0": 0, "F1": 0, "F2": 0, "F3": 0, "F4": 0}
+        question_true_counts: Counter = Counter()
+        for tc in taxonomy_classifications.values():
+            level = getattr(tc, "framework_level", "F0")
+            level_counts[level] = level_counts.get(level, 0) + 1
+            for ev in getattr(tc, "evaluations", []):
+                if getattr(ev, "answer", False):
+                    question_true_counts[ev.question_id] += 1
+
+        total_classified = sum(level_counts.values())
+        lines += [
+            "",
+            "## Taxonomy Distribution",
+            "",
+        ]
+        for level in ("F0", "F1", "F2", "F3", "F4"):
+            count = level_counts[level]
+            pct = (100 * count // total_classified) if total_classified else 0
+            lines.append(f"- {level}: {count} ({pct}%)")
+
+        if question_true_counts:
+            lines += [
+                "",
+                "### Top Questions (most common True)",
+                "",
+            ]
+            for qid, qcount in question_true_counts.most_common(3):
+                lines.append(f"- {qid}: {qcount}")
 
     lines.append("")
 
