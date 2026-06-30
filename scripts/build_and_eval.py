@@ -10,12 +10,12 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger("build_and_eval")
 
-from swebenchify.models import TaskInstance, Repository, CandidateInstance
-from swebenchify.extractor import load_candidates
-from swebenchify.dispatcher import CostTracker, run_agent_task
-from swebenchify.discovery import discover_environment
-from swebenchify.workspace import WorkspaceManager
-from swebenchify.versioning import detect_version
+from swebenchify.models import TaskInstance, Repository  # noqa: E402
+from swebenchify.extractor import load_candidates  # noqa: E402
+from swebenchify.dispatcher import CostTracker, run_agent_task  # noqa: E402
+from swebenchify.discovery import discover_environment  # noqa: E402
+from swebenchify.workspace import WorkspaceManager  # noqa: E402
+from swebenchify.versioning import detect_version  # noqa: E402
 
 OUTPUT_DIR = "output"
 WORKSPACE_ROOT = "output/workspaces"
@@ -94,7 +94,8 @@ async def run_eval_model(instances, model, workspace_mgr, cost_tracker):
             continue
 
         for inst in repo_instances:
-            import shutil, subprocess
+            import shutil
+            import subprocess
             eval_dir = (workspace_mgr.repo_dir(repo) / "eval_instances" / f"{model}_{inst.instance_id}").resolve()
             if eval_dir.exists():
                 shutil.rmtree(eval_dir, ignore_errors=True)
@@ -233,7 +234,7 @@ async def main():
     if ranking == ["opus", "sonnet", "haiku"]:
         logger.info("SANITY CHECK PASSED")
     else:
-        logger.info(f"Expected opus > sonnet > haiku")
+        logger.info("Expected opus > sonnet > haiku")
 
     with open(f"{OUTPUT_DIR}/eval_comparison.json", "w") as f:
         json.dump({"instances": len(instances), "models": {m: {"rate": rates[m]} for m in MODELS}, "ranking": ranking}, f, indent=2)

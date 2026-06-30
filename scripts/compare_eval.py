@@ -13,11 +13,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("compare_eval")
 
-from swebenchify.discovery import discover_environment
-from swebenchify.dispatcher import CostTracker
-from swebenchify.eval_harness import eval_instance, save_eval_results
-from swebenchify.models import EnvironmentSpec, Repository, TaskInstance
-from swebenchify.workspace import WorkspaceManager
+from swebenchify.discovery import discover_environment  # noqa: E402
+from swebenchify.dispatcher import CostTracker  # noqa: E402
+from swebenchify.eval_harness import eval_instance  # noqa: E402
+from swebenchify.models import Repository, TaskInstance  # noqa: E402
+from swebenchify.workspace import WorkspaceManager  # noqa: E402
 
 WORKSPACE_ROOT = "output/workspaces"
 

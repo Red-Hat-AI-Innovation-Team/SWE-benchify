@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-from dataclasses import asdict
 from pathlib import Path
 
 from swebenchify.models import GoEnvironmentSpec, compute_env_spec_hash

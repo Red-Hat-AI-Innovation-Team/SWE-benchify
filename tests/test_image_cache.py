@@ -9,7 +9,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from swebenchify.models import GoEnvironmentSpec
 from swebenchify.sandbox import GoDockerfile, GoImageCache
@@ -193,7 +192,7 @@ class TestGoImageCacheGetOrBuild:
         cache = GoImageCache(tmp_path)
         spec = _spec()
 
-        with patch.object(cache, "is_cached", return_value=True) as mock_cached, \
+        with patch.object(cache, "is_cached", return_value=True), \
              patch.object(cache, "build") as mock_build:
             result = cache.get_or_build("kubernetes/kubectl", "abc", spec, tmp_path)
             assert result is not None

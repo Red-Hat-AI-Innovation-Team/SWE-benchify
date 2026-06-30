@@ -6,7 +6,6 @@ import json
 import tempfile
 from pathlib import Path
 
-import pytest
 
 from swebenchify.versioning import (
     _from_cargo_toml,

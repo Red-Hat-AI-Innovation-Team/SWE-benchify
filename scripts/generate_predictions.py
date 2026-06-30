@@ -13,19 +13,16 @@ import argparse
 import asyncio
 import json
 import logging
-import os
 import shutil
 import subprocess
-from dataclasses import asdict
-from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger("predictions")
 
-from swebenchify.models import TaskInstance, Repository
-from swebenchify.dispatcher import run_agent_task, CostTracker
-from swebenchify.discovery import discover_environment
-from swebenchify.workspace import WorkspaceManager
+from swebenchify.models import TaskInstance, Repository  # noqa: E402
+from swebenchify.dispatcher import run_agent_task, CostTracker  # noqa: E402
+from swebenchify.discovery import discover_environment  # noqa: E402
+from swebenchify.workspace import WorkspaceManager  # noqa: E402
 
 DATASET = "output/swebenchify-dataset.jsonl"
 WORKSPACE_ROOT = "output/workspaces"
@@ -173,10 +170,10 @@ async def main():
     with_patches = sum(1 for p in predictions if p["model_patch"])
     logger.info(f"Total cost: ${total_cost:.2f}")
     logger.info(f"Predictions with patches: {with_patches}/{len(predictions)}")
-    logger.info(f"\nTo evaluate with SWE-bench:")
-    logger.info(f"  python -m swebench.harness.run_evaluation \\")
+    logger.info("\nTo evaluate with SWE-bench:")
+    logger.info("  python -m swebench.harness.run_evaluation \\")
     logger.info(f"    --predictions_path {out_file} \\")
-    logger.info(f"    --swe_bench_tasks output/swebenchify-dataset.jsonl \\")
+    logger.info("    --swe_bench_tasks output/swebenchify-dataset.jsonl \\")
     logger.info(f"    --run_id {args.model}")
 
 

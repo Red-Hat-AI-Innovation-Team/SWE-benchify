@@ -28,7 +28,6 @@ import textwrap
 from dataclasses import asdict
 from pathlib import Path
 
-import pytest
 
 from swebenchify.extractor import is_test_file, split_patch
 from swebenchify.models import (

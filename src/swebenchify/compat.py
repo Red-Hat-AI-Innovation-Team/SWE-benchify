@@ -8,9 +8,16 @@ Two requirements:
 2. environment_setup_commit must be a real commit SHA
 """
 
+from __future__ import annotations
+
 import logging
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from swebenchify.go_registry import GoSpecRegistry
+    from swebenchify.models import GoEnvironmentSpec
 
 logger = logging.getLogger(__name__)
 

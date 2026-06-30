@@ -524,8 +524,8 @@ def main() -> None:
         print(f"    Our F2P ({len(r.our_f2p)}): {r.our_f2p[:3]}{'…' if len(r.our_f2p)>3 else ''}")
         if r.pre_verbose_sample:
             # Show first 3 relevant lines of verbose output for debugging
-            relevant = [l for l in r.pre_verbose_sample.splitlines()
-                        if any(k in l for k in ("FAIL", "PASS", "SKIP", "error", "cannot"))][:4]
+            relevant = [line for line in r.pre_verbose_sample.splitlines()
+                        if any(k in line for k in ("FAIL", "PASS", "SKIP", "error", "cannot"))][:4]
             if relevant:
                 print("    test sample:", relevant[0])
         for g in r.gaps:
@@ -560,7 +560,7 @@ def main() -> None:
          "gaps": r.gaps, "error": r.error}
         for r in results
     ], indent=2))
-    print(f"\nFull results: results/msb_harness_check.json")
+    print("\nFull results: results/msb_harness_check.json")
 
 
 if __name__ == "__main__":

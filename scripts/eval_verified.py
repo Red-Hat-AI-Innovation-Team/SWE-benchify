@@ -8,16 +8,15 @@ import asyncio
 import json
 import logging
 import os
-from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("eval_verified")
 
-from swebenchify.models import TaskInstance, Repository
-from swebenchify.eval_harness import eval_instance
-from swebenchify.discovery import discover_environment
-from swebenchify.dispatcher import CostTracker
-from swebenchify.workspace import WorkspaceManager
+from swebenchify.models import TaskInstance, Repository  # noqa: E402
+from swebenchify.eval_harness import eval_instance  # noqa: E402
+from swebenchify.discovery import discover_environment  # noqa: E402
+from swebenchify.dispatcher import CostTracker  # noqa: E402
+from swebenchify.workspace import WorkspaceManager  # noqa: E402
 
 WORKSPACE_ROOT = "output/workspaces"
 MODEL = "haiku"
@@ -35,8 +34,10 @@ def load_instances(path):
 def dict_to_task(d):
     f2p = d.get("FAIL_TO_PASS", "[]")
     p2p = d.get("PASS_TO_PASS", "[]")
-    if isinstance(f2p, list): f2p = json.dumps(f2p)
-    if isinstance(p2p, list): p2p = json.dumps(p2p)
+    if isinstance(f2p, list):
+        f2p = json.dumps(f2p)
+    if isinstance(p2p, list):
+        p2p = json.dumps(p2p)
     return TaskInstance(
         repo=d["repo"], instance_id=d["instance_id"],
         base_commit=d["base_commit"], patch=d["patch"],
@@ -113,7 +114,7 @@ async def main():
         })
 
     # Summary
-    actually_ran = [r for r in results if not r.get("error") or "SDK" not in str(r.get("error", ""))]
+    _ = [r for r in results if not r.get("error") or "SDK" not in str(r.get("error", ""))]
     resolved = sum(1 for r in results if r["resolved"])
     errors = sum(1 for r in results if r.get("error"))
     total = len(results)

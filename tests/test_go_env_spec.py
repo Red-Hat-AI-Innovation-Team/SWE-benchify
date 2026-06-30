@@ -5,9 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 
-from swebenchify.go_registry import GoSpecRegistry, get_go_environment_setup_commit
+from swebenchify.go_registry import GoSpecRegistry
 from swebenchify.models import GoEnvironmentSpec, compute_env_spec_hash
 
 

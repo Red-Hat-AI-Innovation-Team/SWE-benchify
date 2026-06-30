@@ -5,18 +5,17 @@ import json
 import logging
 import os
 import sys
-from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("test_requests")
 
-from swebenchify.models import Repository, CandidateInstance, EnvironmentSpec
-from swebenchify.collector import collect_prs, save_prs
-from swebenchify.extractor import extract_all, save_candidates
-from swebenchify.dispatcher import CostTracker
-from swebenchify.discovery import discover_environment
-from swebenchify.validator import validate_instance
-from swebenchify.workspace import WorkspaceManager
+from swebenchify.models import Repository, CandidateInstance  # noqa: E402
+from swebenchify.collector import collect_prs, save_prs  # noqa: E402
+from swebenchify.extractor import extract_all, save_candidates  # noqa: E402
+from swebenchify.dispatcher import CostTracker  # noqa: E402
+from swebenchify.discovery import discover_environment  # noqa: E402
+from swebenchify.validator import validate_instance  # noqa: E402
+from swebenchify.workspace import WorkspaceManager  # noqa: E402
 
 FIXTURE_PATH = "tests/fixtures/swebench_requests.jsonl"
 WORKSPACE_ROOT = "output/workspaces"
@@ -47,7 +46,7 @@ prs = collect_prs(repo, pr_after=PR_AFTER, pr_before=PR_BEFORE)
 logger.info(f"Collected {len(prs)} candidate PRs")
 save_prs(prs, "output/requests-prs.jsonl")
 
-logger.info(f"\n=== Stage 2: Extracting patches ===")
+logger.info("\n=== Stage 2: Extracting patches ===")
 candidates = extract_all(prs, github_token=token)
 save_candidates(candidates, "output/requests-candidates.jsonl")
 
@@ -57,7 +56,7 @@ logger.info(f"Viable: {len(viable)}/{len(candidates)}")
 # Compare mechanical stages
 our_ids = {c.instance_id for c in viable}
 overlap = fixture_ids & our_ids
-logger.info(f"\n=== Mechanical overlap ===")
+logger.info("\n=== Mechanical overlap ===")
 logger.info(f"SWE-bench: {len(fixture_ids)} | Ours: {len(our_ids)} | Overlap: {len(overlap)} ({100*len(overlap)/len(fixture_ids):.0f}%)")
 missing = fixture_ids - our_ids
 if missing:
@@ -134,7 +133,7 @@ async def run_agentic():
         if result.error_message:
             logger.info(f"  Error: {result.error_message}")
 
-    logger.info(f"\n=== Cost Summary ===")
+    logger.info("\n=== Cost Summary ===")
     logger.info(cost_tracker.summary())
 
 

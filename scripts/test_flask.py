@@ -7,9 +7,9 @@ import logging
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-from swebenchify.models import Repository
-from swebenchify.collector import collect_prs, save_prs
-from swebenchify.extractor import extract_all, save_candidates
+from swebenchify.models import Repository  # noqa: E402
+from swebenchify.collector import collect_prs, save_prs  # noqa: E402
+from swebenchify.extractor import extract_all, save_candidates  # noqa: E402
 
 token = os.environ.get("GITHUB_TOKEN")
 if not token:
@@ -31,7 +31,7 @@ os.makedirs("output", exist_ok=True)
 save_prs(prs, "output/flask-prs.jsonl")
 
 # Stage 2: Extract patches
-print(f"\n=== Stage 2: Extracting patches ===")
+print("\n=== Stage 2: Extracting patches ===")
 candidates = extract_all(prs, github_token=token)
 print(f"Extracted {len(candidates)} candidates")
 save_candidates(candidates, "output/flask-candidates.jsonl")

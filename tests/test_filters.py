@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 from swebenchify.config import FilterConfig
 from swebenchify.filters import (
@@ -546,7 +545,7 @@ class TestApplyGoFilters:
         assert len(result) == 1
 
     def test_compiled_false_is_filtered(self) -> None:
-        from swebenchify.filters import apply_go_filters, get_go_filter_reasons
+        from swebenchify.filters import get_go_filter_reasons
         from swebenchify.models import ValidationResult
 
         inst = _make_instance()
