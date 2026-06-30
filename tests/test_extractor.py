@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 
 from swebenchify.extractor import (
+    count_braces,
+    find_function_end,
     is_test_file,
     load_candidates,
     save_candidates,
@@ -514,3 +516,273 @@ class TestRustInlineTestSplitting:
         assert new_test is not None
         assert "parse" in new_gold
         assert "test_parse" in new_test
+
+
+# =========================================================================
+# Brace-counting state machine tests
+# =========================================================================
+
+
+class TestCountBracesBasic:
+    """Basic brace counting without string/comment interference."""
+
+    def test_simple_braces(self) -> None:
+        assert count_braces("{ }") == 0
+
+    def test_nested_braces(self) -> None:
+        assert count_braces("{ { } }") == 0
+
+    def test_unmatched_open(self) -> None:
+        assert count_braces("func main() {") == 1
+
+    def test_unmatched_close(self) -> None:
+        assert count_braces("}") == -1
+
+    def test_multiple_opens(self) -> None:
+        assert count_braces("{ { {") == 3
+
+    def test_empty_string(self) -> None:
+        assert count_braces("") == 0
+
+    def test_no_braces(self) -> None:
+        assert count_braces("hello world") == 0
+
+
+class TestCountBracesDoubleQuotedStrings:
+    """Braces inside double-quoted strings are not counted."""
+
+    def test_go_string_with_json(self) -> None:
+        assert count_braces('s := "{key: value}"', "go") == 0
+
+    def test_java_string_concatenation(self) -> None:
+        assert count_braces('String s = "{ " + val + " }";', "java") == 0
+
+    def test_rust_string_with_braces(self) -> None:
+        assert count_braces('let s = "{}";', "rust") == 0
+
+    def test_escaped_quote_in_string(self) -> None:
+        assert count_braces(r's := "hello\"{"', "go") == 0
+
+    def test_real_brace_after_string(self) -> None:
+        assert count_braces('if s == "ok" {', "go") == 1
+
+
+class TestCountBracesBacktickStrings:
+    """Go backtick (raw) strings should suppress brace counting."""
+
+    def test_go_backtick_json(self) -> None:
+        src = 'j := `{"key": "value"}`'
+        assert count_braces(src, "go") == 0
+
+    def test_go_backtick_multiline(self) -> None:
+        src = 'j := `{\n  "a": 1\n}`'
+        assert count_braces(src, "go") == 0
+
+    def test_backtick_with_real_brace_after(self) -> None:
+        src = 'if x := `{}`; x != "" {'
+        assert count_braces(src, "go") == 1
+
+    def test_backtick_ignored_for_java(self) -> None:
+        src = "x = `{}`"
+        assert count_braces(src, "java") == 0  # backtick not a string in Java, but {} still cancel
+
+
+class TestCountBracesRustRawStrings:
+    """Rust raw strings (r"...", r#"..."#) suppress brace counting."""
+
+    def test_rust_raw_string_simple(self) -> None:
+        src = 'let re = r"[{}]+";'
+        assert count_braces(src, "rust") == 0
+
+    def test_rust_raw_string_with_hashes(self) -> None:
+        src = 'let re = r#"{"key": "val"}"#;'
+        assert count_braces(src, "rust") == 0
+
+    def test_rust_byte_string(self) -> None:
+        src = 'let b = b"{ }";'
+        assert count_braces(src, "rust") == 0
+
+    def test_rust_raw_byte_string(self) -> None:
+        src = 'let b = br#"{}"#;'
+        assert count_braces(src, "rust") == 0
+
+    def test_rust_real_brace_after_raw_string(self) -> None:
+        src = 'if r"test" == s {'
+        assert count_braces(src, "rust") == 1
+
+
+class TestCountBracesSingleQuotedChars:
+    """Single-quoted char literals suppress brace counting."""
+
+    def test_go_rune_brace(self) -> None:
+        assert count_braces("c := '{'", "go") == 0
+
+    def test_java_char_brace(self) -> None:
+        assert count_braces("char c = '}';", "java") == 0
+
+    def test_rust_char_brace(self) -> None:
+        assert count_braces("let c = '{';", "rust") == 0
+
+    def test_escaped_single_quote(self) -> None:
+        assert count_braces(r"c := '\''", "go") == 0
+
+
+class TestCountBracesLineComments:
+    """Braces in // line comments are not counted."""
+
+    def test_go_line_comment(self) -> None:
+        assert count_braces("// { open brace", "go") == 0
+
+    def test_java_line_comment(self) -> None:
+        assert count_braces("// if (x) { stuff }", "java") == 0
+
+    def test_rust_line_comment(self) -> None:
+        assert count_braces("// fn foo() { }", "rust") == 0
+
+    def test_code_before_comment(self) -> None:
+        assert count_braces("func f() { // comment }", "go") == 1
+
+    def test_comment_resets_at_newline(self) -> None:
+        src = "// comment {}\nfunc f() {"
+        assert count_braces(src, "go") == 1
+
+
+class TestCountBracesBlockComments:
+    """Braces in /* ... */ block comments are not counted."""
+
+    def test_go_block_comment(self) -> None:
+        assert count_braces("/* { } */", "go") == 0
+
+    def test_java_block_comment_multiline(self) -> None:
+        src = "/* open {\n   close } */\nclass Foo {"
+        assert count_braces(src, "java") == 1
+
+    def test_rust_block_comment(self) -> None:
+        assert count_braces("/* fn foo() { } */", "rust") == 0
+
+    def test_block_comment_then_code(self) -> None:
+        src = "/* skip {} */ real {"
+        assert count_braces(src, "go") == 1
+
+
+class TestCountBracesEscapeSequences:
+    """Escape sequences inside strings don't break the state machine."""
+
+    def test_escaped_backslash_before_quote(self) -> None:
+        src = r's := "path\\" + "{"'
+        assert count_braces(src, "go") == 0
+
+    def test_escaped_newline_in_string(self) -> None:
+        src = r's := "line\n{"'
+        assert count_braces(src, "go") == 0
+
+    def test_escaped_brace_like_chars(self) -> None:
+        src = r's := "\x7B"'  # \x7B is {
+        assert count_braces(src, "go") == 0
+
+
+class TestCountBracesMixedContexts:
+    """Combinations of strings, comments, and real code."""
+
+    def test_go_realistic_function(self) -> None:
+        src = textwrap.dedent('''\
+            func marshal(v interface{}) string {
+                data := `{"type": "test"}`
+                // format: {"result": true}
+                return fmt.Sprintf("{ %s }", data)
+            }
+        ''')
+        assert count_braces(src, "go") == 0
+
+    def test_java_realistic_method(self) -> None:
+        src = textwrap.dedent('''\
+            public String toJson() {
+                /* build {"status": "ok"} */
+                return "{ " + status + " }";
+            }
+        ''')
+        assert count_braces(src, "java") == 0
+
+    def test_rust_realistic_function(self) -> None:
+        src = textwrap.dedent('''\
+            fn parse(input: &str) -> Result<()> {
+                let re = r#"\\{[^}]+\\}"#;
+                // match {braces}
+                Ok(())
+            }
+        ''')
+        assert count_braces(src, "rust") == 0
+
+
+class TestFindFunctionEnd:
+    """Test function boundary detection using brace counting."""
+
+    def test_simple_go_function(self) -> None:
+        lines = [
+            "func main() {",
+            "    fmt.Println()",
+            "}",
+        ]
+        assert find_function_end(lines, 0, "go") == 2
+
+    def test_nested_go_function(self) -> None:
+        lines = [
+            "func process() {",
+            "    if x {",
+            "        y()",
+            "    }",
+            "}",
+        ]
+        assert find_function_end(lines, 0, "go") == 4
+
+    def test_go_function_with_string_braces(self) -> None:
+        lines = [
+            "func getJSON() string {",
+            '    return `{"key": "value"}`',
+            "}",
+        ]
+        assert find_function_end(lines, 0, "go") == 2
+
+    def test_rust_function_with_raw_string(self) -> None:
+        lines = [
+            "fn build_regex() -> Regex {",
+            '    Regex::new(r"[{}]+")',
+            "}",
+        ]
+        assert find_function_end(lines, 0, "rust") == 2
+
+    def test_java_method_with_string_braces(self) -> None:
+        lines = [
+            "public void render() {",
+            '    out.write("{ " + name + " }");',
+            "}",
+        ]
+        assert find_function_end(lines, 0, "java") == 2
+
+    def test_function_with_comment_braces(self) -> None:
+        lines = [
+            "func f() {",
+            "    // TODO: handle { edge case }",
+            "    x()",
+            "}",
+        ]
+        assert find_function_end(lines, 0, "go") == 3
+
+    def test_truncated_function(self) -> None:
+        lines = [
+            "func f() {",
+            "    x()",
+        ]
+        assert find_function_end(lines, 0, "go") == 1
+
+    def test_start_mid_file(self) -> None:
+        lines = [
+            "package main",
+            "",
+            "func f() {",
+            "    x()",
+            "}",
+            "",
+            "func g() {",
+        ]
+        assert find_function_end(lines, 2, "go") == 4

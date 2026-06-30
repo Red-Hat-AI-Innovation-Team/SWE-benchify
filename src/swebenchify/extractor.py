@@ -2,10 +2,14 @@
 
 Downloads PR diffs and splits them into gold patches and test patches.
 See docs/SPEC.md Section 5.3.
+
+Also provides brace-counting utilities for Go/Rust/Java function boundary
+detection that correctly skip braces inside string literals and comments.
 """
 
 from __future__ import annotations
 
+import enum
 import json
 import logging
 import re
@@ -19,6 +23,186 @@ from swebenchify.github import github_get as _shared_github_get, make_headers
 from swebenchify.models import CandidateInstance, CandidatePR
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Brace-counting state machine for Go / Rust / Java
+# ---------------------------------------------------------------------------
+
+
+class _LexState(enum.Enum):
+    CODE = "code"
+    LINE_COMMENT = "line_comment"
+    BLOCK_COMMENT = "block_comment"
+    DOUBLE_STRING = "double_string"
+    SINGLE_STRING = "single_string"
+    BACKTICK_STRING = "backtick_string"
+    RAW_STRING = "raw_string"
+
+
+def count_braces(source: str, language: str = "go") -> int:
+    """Count net brace depth (opens minus closes) in *source*, skipping
+    braces that appear inside string literals or comments.
+
+    Supported languages: ``"go"``, ``"rust"``, ``"java"``.
+
+    Language-specific handling:
+
+    * **Go** — backtick (raw) strings, double-quoted strings, single-quoted
+      rune literals, ``//`` and ``/* */`` comments.
+    * **Rust** — ``r"..."`` / ``r#"..."#`` raw strings, double-quoted
+      strings, byte strings (``b"..."``, ``br"..."``, ``br#"..."#``),
+      single-quoted char literals, ``//`` and ``/* */`` comments.
+    * **Java** — double-quoted strings, single-quoted char literals,
+      ``//`` and ``/* */`` comments.
+
+    Returns:
+        Net depth (positive means more ``{`` than ``}``).
+    """
+    state = _LexState.CODE
+    depth = 0
+    i = 0
+    n = len(source)
+    raw_hashes = 0
+
+    while i < n:
+        c = source[i]
+
+        if state == _LexState.CODE:
+            if c == "/" and i + 1 < n:
+                if source[i + 1] == "/":
+                    state = _LexState.LINE_COMMENT
+                    i += 2
+                    continue
+                if source[i + 1] == "*":
+                    state = _LexState.BLOCK_COMMENT
+                    i += 2
+                    continue
+
+            if c == '"':
+                state = _LexState.DOUBLE_STRING
+                i += 1
+                continue
+
+            if c == "'" and language in ("go", "rust", "java"):
+                state = _LexState.SINGLE_STRING
+                i += 1
+                continue
+
+            if c == "`" and language == "go":
+                state = _LexState.BACKTICK_STRING
+                i += 1
+                continue
+
+            if language == "rust" and c in ("r", "b"):
+                consumed, hashes = _try_rust_raw_string_start(source, i, n)
+                if consumed > 0:
+                    raw_hashes = hashes
+                    state = _LexState.RAW_STRING
+                    i += consumed
+                    continue
+
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+            i += 1
+
+        elif state == _LexState.LINE_COMMENT:
+            if c == "\n":
+                state = _LexState.CODE
+            i += 1
+
+        elif state == _LexState.BLOCK_COMMENT:
+            if c == "*" and i + 1 < n and source[i + 1] == "/":
+                state = _LexState.CODE
+                i += 2
+                continue
+            i += 1
+
+        elif state == _LexState.DOUBLE_STRING:
+            if c == "\\":
+                i += 2
+                continue
+            if c == '"':
+                state = _LexState.CODE
+            i += 1
+
+        elif state == _LexState.SINGLE_STRING:
+            if c == "\\":
+                i += 2
+                continue
+            if c == "'":
+                state = _LexState.CODE
+            i += 1
+
+        elif state == _LexState.BACKTICK_STRING:
+            if c == "`":
+                state = _LexState.CODE
+            i += 1
+
+        elif state == _LexState.RAW_STRING:
+            if c == '"':
+                closing = '"' + "#" * raw_hashes
+                end = i + 1 + raw_hashes
+                if source[i:end] == closing:
+                    state = _LexState.CODE
+                    i = end
+                    continue
+            i += 1
+
+    return depth
+
+
+def _try_rust_raw_string_start(source: str, i: int, n: int) -> tuple[int, int]:
+    """Try to match a Rust raw string opening at position *i*.
+
+    Handles ``r""``, ``r#""#``, ``br""``, ``br#""#``, ``b""``.
+
+    Returns ``(chars_consumed, hash_count)``; ``(0, 0)`` if no match.
+    """
+    j = i
+    if j < n and source[j] == "b":
+        j += 1
+    if j >= n:
+        return 0, 0
+
+    if source[j] == "r":
+        j += 1
+        hashes = 0
+        while j < n and source[j] == "#":
+            hashes += 1
+            j += 1
+        if j < n and source[j] == '"':
+            return j - i + 1, hashes
+        return 0, 0
+
+    if source[j] == '"' and i < n and source[i] == "b":
+        return j - i + 1, 0
+
+    return 0, 0
+
+
+def find_function_end(lines: list[str], start_line: int, language: str = "go") -> int:
+    """Find the closing brace of a function starting at *start_line*.
+
+    Scans lines beginning at *start_line* (0-indexed), counting braces
+    with :func:`count_braces` (which correctly skips string literals and
+    comments). Returns the 0-based index of the line containing the
+    closing ``}`` that brings depth back to zero.
+
+    If the function body is never closed (e.g. truncated source), returns
+    ``len(lines) - 1``.
+    """
+    depth = 0
+    found_open = False
+    for idx in range(start_line, len(lines)):
+        depth += count_braces(lines[idx], language)
+        if depth > 0:
+            found_open = True
+        if found_open and depth <= 0:
+            return idx
+    return len(lines) - 1
 
 # Patterns that identify test files.  A file is considered a test file if
 # any path component matches one of these directory names, or if the
