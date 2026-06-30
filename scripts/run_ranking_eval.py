@@ -18,15 +18,13 @@ import argparse
 import asyncio
 import json
 import logging
-import os
 import sys
 from collections import defaultdict
-from dataclasses import asdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from swebenchify.dispatcher import CostTracker, run_agent_task
+from swebenchify.dispatcher import CostTracker
 from swebenchify.discovery import discover_environment
 from swebenchify.eval_harness import eval_instance
 from swebenchify.models import EnvironmentSpec, Repository, TaskInstance

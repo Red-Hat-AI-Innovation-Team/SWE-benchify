@@ -49,7 +49,7 @@ def main():
     import docker
     from datasets import load_dataset
     from swebench.harness.test_spec.test_spec import make_test_spec
-    from swebench.harness.docker_build import build_env_images, build_container
+    from swebench.harness.docker_build import build_env_images
     from swebench.harness.run_evaluation import run_instance
 
     docker_host = os.environ.get("DOCKER_HOST", "unix:///tmp/podman.sock")

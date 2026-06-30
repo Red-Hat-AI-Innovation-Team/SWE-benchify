@@ -3,19 +3,16 @@
 import asyncio
 import json
 import logging
-import os
 import sys
-from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("test_agentic")
 
-from swebenchify.models import Repository, EnvironmentSpec
-from swebenchify.dispatcher import CostTracker
-from swebenchify.discovery import discover_environment
-from swebenchify.validator import validate_instance
-from swebenchify.workspace import WorkspaceManager
-from swebenchify.extractor import load_candidates
+from swebenchify.models import Repository, EnvironmentSpec  # noqa: E402
+from swebenchify.dispatcher import CostTracker  # noqa: E402
+from swebenchify.discovery import discover_environment  # noqa: E402
+from swebenchify.validator import validate_instance  # noqa: E402
+from swebenchify.workspace import WorkspaceManager  # noqa: E402
 
 # Pick pallets__flask-5063 from the SWE-bench fixture
 INSTANCE_ID = "pallets__flask-5063"

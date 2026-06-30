@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 
 from swebenchify.emitter import emit_dataset, load_dataset
 from swebenchify.models import TaskInstance

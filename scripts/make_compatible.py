@@ -16,10 +16,10 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("make_compatible")
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-from swebenchify.models import TaskInstance
-from swebenchify.extractor import load_candidates
-from swebenchify.versioning import detect_version
-from swebenchify.compat import snap_version, get_environment_setup_commit, is_version_supported
+from swebenchify.models import TaskInstance  # noqa: E402
+from swebenchify.extractor import load_candidates  # noqa: E402
+from swebenchify.versioning import detect_version  # noqa: E402
+from swebenchify.compat import snap_version, get_environment_setup_commit  # noqa: E402
 
 OUTPUT_DIR = Path("output")
 WORKSPACE_ROOT = Path("output/workspaces")
@@ -105,7 +105,7 @@ def validate_with_swebench(instances):
     for inst in instances:
         d = asdict(inst)
         try:
-            spec = make_test_spec(d)
+            make_test_spec(d)
             valid.append(inst)
         except Exception as e:
             logger.warning(f"  TestSpec failed for {inst.instance_id}: {e}")

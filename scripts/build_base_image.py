@@ -45,7 +45,7 @@ def build_base_image(python_version: str, docker_host: str | None = None) -> str
 
     Returns the image tag.
     """
-    tag = f"sweb.base.py.x86_64:latest"
+    tag = "sweb.base.py.x86_64:latest"
 
     with tempfile.TemporaryDirectory() as tmpdir:
         dockerfile = Path(tmpdir) / "Dockerfile"

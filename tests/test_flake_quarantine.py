@@ -6,8 +6,6 @@ these tests run fast with no Docker or network access.
 
 from __future__ import annotations
 
-import asyncio
-import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
