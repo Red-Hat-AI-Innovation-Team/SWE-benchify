@@ -11,11 +11,13 @@ from swebenchify.synthesizer import (
     BugSpec,
     SynthesisResult,
     _collect_repo_context,
+    _count_changed_lines,
     _edge_case_score,
     _find_existing_test_file,
     _find_file_commits,
     _find_related_files,
     _format_new_test_patch,
+    _mine_issue_style_examples,
     _normalize_test_whitespace,
     _parse_bug_response,
     _parse_incidental_changes,
@@ -717,11 +719,68 @@ def test_issue_description_no_file_leak() -> None:
         from swebenchify.synthesizer import generate_issue_description
         result = asyncio.run(generate_issue_description(bug_spec))
 
-    assert "src/internal/processor.py" not in captured_prompts[0]
-    assert "process_data" not in captured_prompts[0]
+    # First prompt is _bug_to_symptom; second is the issue generation
+    # Neither should contain file paths or function names
+    for p in captured_prompts:
+        assert "src/internal/processor.py" not in p
+        assert "process_data" not in p
     assert "Seeing an issue with" in result
     assert "src/internal/processor.py" not in result
     assert "process_data" not in result
+
+
+def test_generate_issue_from_symptom_no_bugspec() -> None:
+    """Verify generate_issue_from_symptom takes no BugSpec and only symptom."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import generate_issue_from_symptom
+        result = asyncio.run(generate_issue_from_symptom(
+            symptom="time duration handling uses wrong units",
+            repo_context={"version": "2.0", "lang_version": "3.11", "os_info": "Ubuntu 22.04"},
+        ))
+
+    assert len(captured_prompts) >= 1
+    issue_prompt = captured_prompts[0]
+    assert "time duration handling" in issue_prompt
+    assert "2.0" in issue_prompt
+    assert "Ubuntu 22.04" in issue_prompt
+    # Fallback result since fake_query returns nothing
+    assert "Seeing an issue with" in result
+
+
+def test_generate_issue_from_symptom_with_style_examples() -> None:
+    """Verify style examples are included in the prompt."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import generate_issue_from_symptom
+        asyncio.run(generate_issue_from_symptom(
+            symptom="parsing breaks on unicode input",
+            style_examples=["Fix config loading for nested keys", "Handle empty input gracefully"],
+        ))
+
+    assert len(captured_prompts) >= 1
+    assert "Fix config loading for nested keys" in captured_prompts[0]
+    assert "Handle empty input gracefully" in captured_prompts[0]
 
 
 # ---------------------------------------------------------------------------
@@ -897,8 +956,9 @@ def test_issue_description_has_context(tmp_path: Path) -> None:
             bug_spec, repo_path=str(tmp_path),
         ))
 
-    assert len(captured_prompts) == 2
-    # First call is _bug_to_symptom, second is the issue generation
+    # First call is _bug_to_symptom, second is issue generation,
+    # third is critique (may or may not happen depending on fallback path)
+    assert len(captured_prompts) >= 2
     symptom_prompt = captured_prompts[0]
     assert "user-facing symptom" in symptom_prompt
     issue_prompt = captured_prompts[1]
@@ -1317,3 +1377,152 @@ def test_strip_issue_shas_preserves_short_hex() -> None:
     text = "Error code abc12 returned."
     result = _strip_issue_shas(text)
     assert result == text
+
+
+# ---------------------------------------------------------------------------
+# _mine_issue_style_examples
+# ---------------------------------------------------------------------------
+
+def test_mine_issue_style_examples(tmp_path: Path) -> None:
+    """Extract issue titles from git commit messages."""
+    import subprocess
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=True)
+
+    f = tmp_path / "a.py"
+    f.write_text("v1")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "Fix #42: Handle empty config gracefully"], cwd=tmp_path, capture_output=True, check=True)
+
+    f.write_text("v2")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "Closes #99: Parsing fails on unicode input"], cwd=tmp_path, capture_output=True, check=True)
+
+    f.write_text("v3")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "Regular commit with no issue ref"], cwd=tmp_path, capture_output=True, check=True)
+
+    examples = _mine_issue_style_examples(str(tmp_path))
+    assert len(examples) == 2
+    assert "Parsing fails on unicode input" in examples[0]
+    assert "Handle empty config gracefully" in examples[1]
+
+
+def test_mine_issue_style_examples_no_repo(tmp_path: Path) -> None:
+    examples = _mine_issue_style_examples(str(tmp_path))
+    assert examples == []
+
+
+def test_mine_issue_style_examples_no_matches(tmp_path: Path) -> None:
+    import subprocess
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=True)
+
+    f = tmp_path / "a.py"
+    f.write_text("v1")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "initial commit"], cwd=tmp_path, capture_output=True, check=True)
+
+    examples = _mine_issue_style_examples(str(tmp_path))
+    assert examples == []
+
+
+# ---------------------------------------------------------------------------
+# _count_changed_lines
+# ---------------------------------------------------------------------------
+
+def test_count_changed_lines_basic() -> None:
+    patch = textwrap.dedent("""\
+        --- a/module.py
+        +++ b/module.py
+        @@ -1,3 +1,3 @@
+         def add(a, b):
+        -    return a - b
+        +    return a + b
+    """)
+    assert _count_changed_lines(patch) == 2
+
+
+def test_count_changed_lines_multiline() -> None:
+    patch = textwrap.dedent("""\
+        --- a/module.py
+        +++ b/module.py
+        @@ -1,5 +1,5 @@
+         def process(items):
+             result = []
+        -    for item in items:
+        -        if item >= 0:
+        +    for item in items[:]:
+        +        if item > 0:
+                     result.append(item)
+        -    return result
+        +    return sorted(result)
+    """)
+    assert _count_changed_lines(patch) == 6
+
+
+def test_count_changed_lines_empty() -> None:
+    assert _count_changed_lines("") == 0
+
+
+# ---------------------------------------------------------------------------
+# _critique_and_rewrite_issue
+# ---------------------------------------------------------------------------
+
+def test_critique_rewrite_no_flags() -> None:
+    """If critique finds no flags, issue is returned unchanged."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    call_count = 0
+
+    async def fake_query(prompt: str, options: object = None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Critique returns no flags
+            result = MagicMock()
+            result.content = [type("B", (), {"text": "<no_flags/>"})()]
+            yield result
+        return
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()), \
+         mock_patch("swebenchify.synthesizer.ResultMessage", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import _critique_and_rewrite_issue
+        result = asyncio.run(_critique_and_rewrite_issue("## Bug\nSomething is broken"))
+
+    assert result == "## Bug\nSomething is broken"
+
+
+def test_critique_rewrite_with_flags() -> None:
+    """If critique finds flags, rewrite call is made."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    call_count = 0
+
+    class FakeResult:
+        pass
+
+    async def fake_query(prompt: str, options: object = None):
+        nonlocal call_count
+        call_count += 1
+        msg = FakeResult()
+        if call_count == 1:
+            msg.content = [type("B", (), {"text": "<flags>\n<flag>the process_data function</flag>\n</flags>"})()]
+        elif call_count == 2:
+            msg.content = [type("B", (), {"text": "## Bug\nSomething is broken and I have no idea why"})()]
+        yield msg
+        return
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()), \
+         mock_patch("swebenchify.synthesizer.ResultMessage", FakeResult):
+        import asyncio
+        from swebenchify.synthesizer import _critique_and_rewrite_issue
+        result = asyncio.run(_critique_and_rewrite_issue("## Bug\nthe process_data function is broken"))
+
+    assert call_count == 2
+    assert "no idea why" in result
