@@ -126,6 +126,7 @@ class SynthesisResult:
     problem_statement: str
     instance_id: str
     base_commit: str
+    test_output: str = ""
 
 
 def _should_exclude(filepath: str, language: str) -> bool:
@@ -590,26 +591,97 @@ def _validate_test_code(code: str, language: str) -> bool:
 
 
 def _validate_test_imports(code: str, repo_path: str) -> bool:
-    """Check that import statements in test code reference real modules."""
+    """Check that import statements in test code reference real modules.
+
+    Validates both `from X import Y` and `import X` statements. For
+    dotted module paths (e.g., flask.celery), checks that the FULL path
+    resolves — not just the top-level package.
+    """
+    repo_modules = _discover_repo_modules(repo_path)
     root = Path(repo_path)
-    for m in re.finditer(r"^\s*from\s+([\w.]+)\s+import", code, re.MULTILINE):
-        module = m.group(1)
+
+    for m in re.finditer(
+        r"^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))", code, re.MULTILINE,
+    ):
+        module = m.group(1) or m.group(2)
         parts = module.split(".")
-        # Check if the module path exists as a file or package
-        candidates = [
-            root / "/".join(parts) / "__init__.py",
-            root / ("/".join(parts) + ".py"),
-            root / "src" / "/".join(parts) / "__init__.py",
-            root / "src" / ("/".join(parts) + ".py"),
-        ]
-        if not any(c.is_file() for c in candidates):
-            # Allow standard library and third-party imports
-            try:
-                __import__(parts[0])
-            except ImportError:
-                logger.warning("  Test imports non-existent module: %s", module)
-                return False
+
+        if _is_repo_module(parts, root, repo_modules):
+            continue
+
+        if _is_stdlib_or_installed(module, parts):
+            continue
+
+        logger.warning("  Test imports non-existent module: %s", module)
+        return False
     return True
+
+
+def _discover_repo_modules(repo_path: str) -> set[str]:
+    """Walk the repo to build a set of importable dotted module paths."""
+    root = Path(repo_path)
+    modules: set[str] = set()
+
+    for search_root in (root, root / "src"):
+        if not search_root.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(search_root):
+            dirnames[:] = [d for d in dirnames if d not in _EXCLUDE_DIRS]
+            dp = Path(dirpath)
+            for fname in filenames:
+                if not fname.endswith(".py"):
+                    continue
+                rel = (dp / fname).relative_to(search_root)
+                parts = list(rel.with_suffix("").parts)
+                if parts[-1] == "__init__":
+                    parts = parts[:-1]
+                if not parts:
+                    continue
+                dotted = ".".join(parts)
+                modules.add(dotted)
+                for i in range(1, len(parts)):
+                    modules.add(".".join(parts[:i]))
+    return modules
+
+
+def _is_repo_module(parts: list[str], root: Path, repo_modules: set[str]) -> bool:
+    """Check if the dotted module path exists in the repo."""
+    dotted = ".".join(parts)
+    if dotted in repo_modules:
+        return True
+    candidates = [
+        root / "/".join(parts) / "__init__.py",
+        root / ("/".join(parts) + ".py"),
+        root / "src" / "/".join(parts) / "__init__.py",
+        root / "src" / ("/".join(parts) + ".py"),
+    ]
+    return any(c.is_file() for c in candidates)
+
+
+def _is_stdlib_or_installed(module: str, parts: list[str]) -> bool:
+    """Check if a module is part of stdlib or an installed third-party package.
+
+    For dotted paths like flask.celery, validates the full path — not
+    just that the top-level package (flask) is importable.
+    """
+    try:
+        __import__(module)
+        return True
+    except ImportError:
+        pass
+    if len(parts) > 1:
+        try:
+            __import__(parts[0])
+        except ImportError:
+            return False
+        top = __import__(parts[0])
+        current = top
+        for part in parts[1:]:
+            if not hasattr(current, part):
+                return False
+            current = getattr(current, part)
+        return True
+    return False
 
 
 async def introduce_bug(
@@ -1271,6 +1343,8 @@ def _find_existing_test_file(
 ) -> str | None:
     """Find an existing test file corresponding to a source file.
 
+    Searches broadly: direct name-based candidates, tests/ directory
+    fuzzy match, and any test file that imports the same module.
     Returns the repo-relative path if found, None otherwise.
     """
     root = Path(repo_path)
@@ -1290,11 +1364,32 @@ def _find_existing_test_file(
         for c in candidates:
             if (root / c).is_file():
                 return c
-        tests_dir = root / "tests"
-        if tests_dir.is_dir():
-            for f in tests_dir.rglob("*.py"):
-                if stem in f.stem:
-                    return str(f.relative_to(root))
+        # Fuzzy match: any test file in tests/ whose name contains the stem
+        for test_dir_name in ("tests", "test"):
+            tests_dir = root / test_dir_name
+            if tests_dir.is_dir():
+                for f in tests_dir.rglob("*.py"):
+                    if stem in f.stem:
+                        return str(f.relative_to(root))
+        # Broader search: find any test_*.py file that imports the same module
+        module_name = _source_to_module_name(source_file)
+        if module_name:
+            match = _find_test_file_importing(root, module_name)
+            if match:
+                return match
+        # Last resort: any test file in the same package directory
+        pkg_dir = source_path.parent
+        if pkg_dir != Path("."):
+            pkg_parts = list(pkg_dir.parts)
+            search_dirs = [pkg_dir]
+            if len(pkg_parts) > 1:
+                search_dirs.append(Path(*pkg_parts[1:]))
+            for test_dir_name in ("tests", "test"):
+                for sub in search_dirs:
+                    pkg_test_dir = root / test_dir_name / sub
+                    if pkg_test_dir.is_dir():
+                        for f in sorted(pkg_test_dir.glob("test_*.py")):
+                            return str(f.relative_to(root))
     elif language == "go":
         test_file = str(source_path.parent / f"{stem}_test.go")
         if (root / test_file).is_file():
@@ -1318,6 +1413,44 @@ def _find_existing_test_file(
     return None
 
 
+def _source_to_module_name(source_file: str) -> str | None:
+    """Convert a source file path to a dotted module name for import matching."""
+    p = Path(source_file)
+    if p.suffix != ".py":
+        return None
+    parts = list(p.with_suffix("").parts)
+    if parts and parts[0] == "src":
+        parts = parts[1:]
+    return ".".join(parts) if parts else None
+
+
+def _find_test_file_importing(root: Path, module_name: str) -> str | None:
+    """Find a test_*.py file that imports the given module (or its parent package)."""
+    parts = module_name.split(".")
+    import_patterns = [
+        re.compile(rf"^\s*(?:from|import)\s+{re.escape(module_name)}\b", re.MULTILINE),
+    ]
+    if len(parts) > 1:
+        parent = ".".join(parts[:-1])
+        import_patterns.append(
+            re.compile(rf"^\s*from\s+{re.escape(parent)}\s+import\b", re.MULTILINE),
+        )
+
+    for test_dir_name in ("tests", "test"):
+        test_dir = root / test_dir_name
+        if not test_dir.is_dir():
+            continue
+        for f in sorted(test_dir.rglob("test_*.py")):
+            try:
+                content = f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for pat in import_patterns:
+                if pat.search(content):
+                    return str(f.relative_to(root))
+    return None
+
+
 async def generate_test_patch(
     bug_spec: BugSpec,
     repo_path: str,
@@ -1326,7 +1459,9 @@ async def generate_test_patch(
 ) -> str | None:
     """Generate a test patch that exposes a synthetic bug.
 
-    Prefers modifying an existing test file over creating a new one.
+    Only modifies existing test files. If no existing test file can be
+    found, returns None — creating new test files produces detectable
+    synthetic patterns (fabricated imports, brand-new functions).
     """
     existing_test = _find_existing_test_file(repo_path, bug_spec.file, language)
 
@@ -1334,7 +1469,11 @@ async def generate_test_patch(
         return await _generate_test_patch_existing(
             bug_spec, repo_path, existing_test, language, model,
         )
-    return await _generate_test_patch_new(bug_spec, repo_path, language, model)
+    logger.warning(
+        "  No existing test file found for %s — skipping test patch generation",
+        bug_spec.file,
+    )
+    return None
 
 
 async def _generate_test_patch_existing(
@@ -1438,7 +1577,14 @@ async def _generate_test_patch_new(
     language: str,
     model: str,
 ) -> str | None:
-    """Fallback: generate a test patch creating a new test file."""
+    """DEPRECATED: no longer called. Kept for backward compatibility.
+
+    Creating new test files produces synthetic signals (fabricated
+    imports, brand-new functions). Use existing test file modification
+    via _generate_test_patch_existing instead.
+    """
+    return None
+    # --- original implementation below, unreachable ---
     prompt = f"""You are a test engineer. Write tests for a module that has a bug.
 
 Original (correct) code:
@@ -1842,6 +1988,70 @@ def _create_buggy_commit_multi(
         return None
 
 
+_TEST_COMMANDS: dict[str, list[list[str]]] = {
+    "python": [
+        ["python", "-m", "pytest", "--tb=short", "-q"],
+        ["python", "-m", "unittest", "discover", "-s", "tests"],
+    ],
+    "go": [["go", "test", "./..."]],
+    "rust": [["cargo", "test"]],
+    "java": [["mvn", "test", "-q"]],
+}
+
+
+def _run_tests_on_buggy_code(
+    repo_path: str,
+    buggy_commit: str,
+    language: str,
+    timeout: int = 120,
+) -> str | None:
+    """Run the project's test suite against buggy code and capture output.
+
+    Checks out the buggy commit, runs tests, then restores the original
+    branch. Returns the combined stderr/stdout truncated to 2000 chars,
+    or None if tests couldn't be run.
+    """
+    def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            cmd, cwd=repo_path, capture_output=True, text=True, check=True,
+        )
+
+    try:
+        orig = run(["git", "rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
+        if orig == "HEAD":
+            orig = run(["git", "rev-parse", "HEAD"]).stdout.strip()
+    except subprocess.CalledProcessError:
+        return None
+
+    try:
+        run(["git", "checkout", buggy_commit])
+    except subprocess.CalledProcessError:
+        return None
+
+    test_output: str | None = None
+    try:
+        commands = _TEST_COMMANDS.get(language, [])
+        for cmd in commands:
+            try:
+                result = subprocess.run(
+                    cmd, cwd=repo_path, capture_output=True, text=True,
+                    timeout=timeout,
+                )
+                combined = (result.stdout + "\n" + result.stderr).strip()
+                if result.returncode != 0 and combined:
+                    test_output = combined[:2000]
+                    break
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                continue
+    finally:
+        try:
+            run(["git", "checkout", orig])
+        except subprocess.CalledProcessError:
+            logger.warning("  Failed to restore branch after test run")
+
+    return test_output
+
+
 async def synthesize_repo(
     repo_path: str,
     repo_slug: str,
@@ -2063,12 +2273,19 @@ async def synthesize_repo(
             logger.warning("  Skipped — could not create buggy commit")
             continue
 
+        # H3: Capture test failure output from buggy code
+        test_output = _run_tests_on_buggy_code(
+            repo_path, buggy_commit, language,
+        )
+        if test_output:
+            logger.info("  Captured %d chars of test output", len(test_output))
+
         # H1: Information firewall — generate issue from symptom only
         symptom = await _bug_to_symptom(bug_spec.bug_description, model=model)
         style_examples = _mine_issue_style_examples(repo_path)
         problem_statement = await generate_issue_from_symptom(
             symptom=symptom,
-            test_output=None,
+            test_output=test_output,
             repo_context=ctx,
             style_examples=style_examples,
             model=model,
@@ -2087,6 +2304,7 @@ async def synthesize_repo(
             problem_statement=problem_statement,
             instance_id="",
             base_commit=buggy_commit,
+            test_output=test_output or "",
         )
 
         candidate = build_candidate(
