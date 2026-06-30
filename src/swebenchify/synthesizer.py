@@ -650,10 +650,16 @@ CRITICAL CONSTRAINTS on bug subtlety:
 - The bug should only manifest with specific inputs, edge cases, or unusual conditions. Think: boundary values, empty collections, negative numbers, Unicode strings, concurrent access, large inputs.
 - The bug must be plausible as something that would survive a typical CI suite. If the existing test suite would trivially catch it, the bug is too obvious.
 - Prefer bugs in error handling paths, edge case branches, or rarely-exercised code paths over bugs in the main happy path.
-- The change should be small (1-3 tokens) but impactful only under specific conditions.
 
-MUTATION TYPE — CRITICAL:
-- STRONGLY PREFER substitution mutations: change an existing condition, operator, variable name, or value. Example: `>=` → `>`, `is None` → `not val`, `len(x)` → `len(x) - 1`.
+MUTATION COMPLEXITY — CRITICAL:
+- The bug MUST involve changes to at least 2-3 lines of code. Single-token or single-line swaps (like `<` → `<=`) are too easy to detect as synthetic.
+- Prefer bugs that require COORDINATED changes across multiple statements:
+  * Wrong statement order: swap two statements that have an order dependency
+  * Missing cleanup in error path: remove/alter both the error check AND its cleanup/recovery code
+  * Incorrect state transition: change a condition AND the state it transitions to
+  * Stale variable: shadow or reassign a variable early, causing wrong value in a later use
+  * Mismatched init-and-use: change a default value AND the validation that depends on it
+  * Split logic error: alter a condition in one branch AND the corresponding else/fallback behavior
 - AVOID additive mutations: do NOT add new conditions, new if-branches, or new code that wasn't there before. Adding `and not key.startswith('_')` to an existing condition is suspicious because it introduces code with no plausible origin in the repo's history.
 - The mutation should look like a refactoring mistake — something a developer could accidentally introduce while cleaning up or reorganizing existing code.
 
@@ -743,6 +749,17 @@ def _extract_text_from_result(message: ResultMessage) -> str | None:
         if hasattr(block, "text"):
             parts.append(block.text)
     return "\n".join(parts) if parts else None
+
+
+def _count_changed_lines(patch: str) -> int:
+    """Count the number of added/removed lines in a unified diff."""
+    count = 0
+    for line in patch.splitlines():
+        if line.startswith(("---", "+++")):
+            continue
+        if line.startswith(("+", "-")):
+            count += 1
+    return count
 
 
 def _parse_bug_response(text: str, target: dict) -> BugSpec | None:
@@ -925,6 +942,39 @@ def _collect_repo_context(repo_path: str) -> dict:
     return ctx
 
 
+def _mine_issue_style_examples(
+    repo_path: str, max_examples: int = 3,
+) -> list[str]:
+    """Extract real issue titles from git commit messages.
+
+    Looks for patterns like 'Fix #NNN: ...', 'Closes #NNN: ...',
+    'Fixes #NNN ...', etc. in recent commit messages.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "log", "--oneline", "-200", "--format=%s"],
+            cwd=repo_path, capture_output=True, text=True, check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return []
+
+    issue_title_pat = re.compile(
+        r"(?:fix(?:e[sd])?|clos(?:e[sd])?|resolv(?:e[sd])?)\s+#\d+[:\s]+(.+)",
+        re.IGNORECASE,
+    )
+    titles: list[str] = []
+    for line in result.stdout.strip().splitlines():
+        m = issue_title_pat.search(line)
+        if m:
+            title = m.group(1).strip()
+            if 10 < len(title) < 120:
+                titles.append(title)
+            if len(titles) >= max_examples:
+                break
+
+    return titles
+
+
 def _find_file_commits(
     repo_path: str, file_path: str, max_commits: int = 3,
 ) -> list[dict[str, str]]:
@@ -991,41 +1041,50 @@ Respond with ONLY the symptom sentence, nothing else."""
     return bug_description
 
 
-async def generate_issue_description(
-    bug_spec: BugSpec,
+async def generate_issue_from_symptom(
+    symptom: str,
     test_output: str | None = None,
+    repo_context: dict | None = None,
+    style_examples: list[str] | None = None,
     model: str = "sonnet",
-    repo_path: str | None = None,
 ) -> str:
-    """Generate a realistic GitHub issue description for a bug.
+    """Generate a realistic GitHub issue description from a symptom only.
 
-    Uses a two-stage approach: first converts the bug description to a
-    user-facing symptom, then generates the issue from the symptom alone.
+    This function enforces the information firewall: it receives ONLY
+    a one-sentence symptom string, NOT the BugSpec, function name, file
+    name, or any code. This prevents the issue from betraying root-cause
+    knowledge.
+
+    After initial generation, runs a critique-rewrite loop: a second LLM
+    call detects synthetic tells, and a third rewrites flagged sections.
 
     Args:
-        bug_spec: The bug specification.
+        symptom: One-sentence user-facing symptom from _bug_to_symptom().
         test_output: Optional test output showing the failure.
+        repo_context: Dict with version, lang_version, os_info keys.
+        style_examples: Real issue titles from git history for style.
         model: Claude model shortname.
-        repo_path: Optional repo path for gathering context.
 
     Returns:
         Issue description text.
     """
-    ctx = _collect_repo_context(repo_path) if repo_path else {
+    ctx = repo_context or {
         "version": "", "lang_version": "", "os_info": random.choice(_OS_CHOICES),
-        "recent_issues": [],
     }
 
-    version = ctx["version"] or "latest main branch"
-    lang_version = ctx["lang_version"] or "3.11"
-    os_info = ctx["os_info"]
+    version = ctx.get("version", "") or "latest main branch"
+    lang_version = ctx.get("lang_version", "") or "3.11"
+    os_info = ctx.get("os_info", "") or random.choice(_OS_CHOICES)
 
     test_context = ""
     if test_output:
         test_context = f"\n\nTest output that may be relevant:\n```\n{test_output[:2000]}\n```"
 
-    # Two-stage: convert bug description to user-facing symptom
-    symptom = await _bug_to_symptom(bug_spec.bug_description, model=model)
+    style_section = ""
+    if style_examples:
+        examples_text = "\n".join(f"  - {t}" for t in style_examples[:3])
+        style_section = f"\n\nHere are real issue titles from this project for style reference:\n{examples_text}\nMatch this project's tone and terminology.\n"
+
     general_area = symptom.split(".")[0] if "." in symptom else symptom
 
     prompt = f"""Write a GitHub issue report for a bug. A user observed this symptom: {symptom}
@@ -1036,7 +1095,7 @@ Environment context:
 - Package version: {version}
 - Python/language version: {lang_version}
 - OS: {os_info}
-
+{style_section}
 CRITICAL REQUIREMENTS — read carefully:
 
 1. Describe DOWNSTREAM SYMPTOMS ONLY. You do NOT know the root cause — you know ONLY what broke from the outside: wrong output, unexpected error, corrupted data, broken rendering. Do NOT walk through the source code, do NOT trace the logic, do NOT identify which function or condition is wrong. A developer reading this issue should have to investigate to find the bug.
@@ -1081,12 +1140,129 @@ Format: start with "## " title, then the body."""
             "LLM call failed for issue description, using fallback"
         )
 
-    if result_text:
-        return _strip_issue_shas(result_text)
+    if not result_text:
+        return (
+            f"Seeing an issue with {general_area} — {symptom}. "
+            f"Running on {os_info}, version {version}. Anyone else hit this?"
+        )
 
-    return (
-        f"Seeing an issue with {general_area} — {symptom}. "
-        f"Running on {os_info}, version {version}. Anyone else hit this?"
+    result_text = _strip_issue_shas(result_text)
+
+    # Critique-rewrite loop: detect and fix synthetic tells
+    result_text = await _critique_and_rewrite_issue(result_text, model=model)
+
+    return result_text
+
+
+async def _critique_and_rewrite_issue(
+    issue_text: str,
+    model: str = "sonnet",
+) -> str:
+    """Run a critique-rewrite loop on a generated issue description.
+
+    Makes a second LLM call to detect synthetic tells, and if flags are
+    found, a third call to rewrite the flagged sections.
+    """
+    resolved_model = MODEL_MAP.get(model, model)
+    options = ClaudeCodeOptions(max_turns=1, model=resolved_model)
+
+    critique_prompt = f"""You are a synthetic-content detector. Analyze this GitHub issue and flag any phrases that:
+1. Reveal the reporter knows the root cause (e.g., identifying specific functions, conditions, or operators)
+2. Follow a perfect problem → diagnosis → solution arc
+3. Use developer terminology a typical user wouldn't know (e.g., specific exception class names, internal API details)
+4. Reference specific function names, file names, or line numbers
+5. Have an unnaturally clean structure (perfect headers, organized sections)
+6. Sound like technical documentation rather than a frustrated user
+
+Issue to analyze:
+---
+{issue_text}
+---
+
+If you find ANY flags, return them in this format:
+<flags>
+<flag>exact quoted phrase that is suspicious</flag>
+<flag>another suspicious phrase</flag>
+</flags>
+
+If the issue reads like a genuine user report with no synthetic tells, return:
+<no_flags/>"""
+
+    critique_text: str | None = None
+    try:
+        async for message in query(prompt=critique_prompt, options=options):
+            if isinstance(message, ResultMessage):
+                critique_text = _extract_text_from_result(message)
+    except Exception:
+        logger.warning("Critique LLM call failed, keeping original issue")
+        return issue_text
+
+    if not critique_text or "<no_flags/>" in critique_text:
+        return issue_text
+
+    flags = re.findall(r"<flag>(.*?)</flag>", critique_text, re.DOTALL)
+    if not flags:
+        return issue_text
+
+    flags_text = "\n".join(f"- {f.strip()}" for f in flags)
+    logger.info("  Critique found %d flags, rewriting issue", len(flags))
+
+    rewrite_prompt = f"""Rewrite this GitHub issue to fix the flagged synthetic tells. The reporter is a CONFUSED user who does NOT know the root cause.
+
+Original issue:
+---
+{issue_text}
+---
+
+Flagged phrases (these betray root-cause knowledge or sound synthetic):
+{flags_text}
+
+For each flagged phrase:
+- If it reveals root-cause knowledge: replace with genuine confusion, a wrong guess, or just remove it
+- If it uses developer jargon: replace with user-level language ("it crashes", "gives wrong output", "breaks")
+- If it's too structured: make it messier — interrupt the thought, add a tangent, or merge sections
+
+Return ONLY the rewritten issue text. Keep the "## " title format."""
+
+    rewritten: str | None = None
+    try:
+        async for message in query(prompt=rewrite_prompt, options=options):
+            if isinstance(message, ResultMessage):
+                rewritten = _extract_text_from_result(message)
+    except Exception:
+        logger.warning("Rewrite LLM call failed, keeping original issue")
+        return issue_text
+
+    if rewritten:
+        return _strip_issue_shas(rewritten)
+    return issue_text
+
+
+async def generate_issue_description(
+    bug_spec: BugSpec,
+    test_output: str | None = None,
+    model: str = "sonnet",
+    repo_path: str | None = None,
+) -> str:
+    """Generate a realistic GitHub issue description for a bug.
+
+    Legacy wrapper that converts BugSpec to symptom and delegates to
+    generate_issue_from_symptom(). New code should call
+    generate_issue_from_symptom() directly to enforce the information
+    firewall.
+    """
+    ctx = _collect_repo_context(repo_path) if repo_path else {
+        "version": "", "lang_version": "", "os_info": random.choice(_OS_CHOICES),
+        "recent_issues": [],
+    }
+    symptom = await _bug_to_symptom(bug_spec.bug_description, model=model)
+    style_examples = _mine_issue_style_examples(repo_path) if repo_path else []
+    return await generate_issue_from_symptom(
+        symptom=symptom,
+        test_output=test_output,
+        repo_context=ctx,
+        style_examples=style_examples,
+        model=model,
     )
 
 
@@ -1729,47 +1905,76 @@ async def synthesize_repo(
         if related_files:
             logger.info("  Found %d related files", len(related_files))
 
-        bug_spec = await introduce_bug(
-            target, model=model, related_files=related_files,
-        )
-        if bug_spec is None:
-            logger.warning("  Skipped — LLM did not produce a valid mutation")
-            continue
-
-        file_path = Path(repo_path) / bug_spec.file
-        try:
-            original_content = file_path.read_text(
-                encoding="utf-8", errors="replace"
+        # H2: retry introduce_bug up to 2 times if patch is too simple
+        bug_spec = None
+        patch = ""
+        mutated_content = ""
+        original_content = ""
+        for attempt in range(3):
+            bug_spec = await introduce_bug(
+                target, model=model, related_files=related_files,
             )
-        except OSError:
-            logger.warning("  Skipped — could not read %s", bug_spec.file)
+            if bug_spec is None:
+                logger.warning("  Skipped — LLM did not produce a valid mutation")
+                break
+
+            file_path = Path(repo_path) / bug_spec.file
+            try:
+                original_content = file_path.read_text(
+                    encoding="utf-8", errors="replace"
+                )
+            except OSError:
+                logger.warning("  Skipped — could not read %s", bug_spec.file)
+                bug_spec = None
+                break
+
+            mutated_content = original_content.replace(
+                bug_spec.original_code, bug_spec.buggy_code, 1,
+            )
+
+            if mutated_content == original_content:
+                logger.warning("  Skipped — could not apply mutation to file")
+                bug_spec = None
+                break
+
+            if not _validate_mutation_parses(mutated_content, language):
+                logger.warning("  Skipped — mutated file does not parse (%s)", language)
+                bug_spec = None
+                break
+
+            orig_stripped = [ln.strip() for ln in original_content.splitlines() if ln.strip()]
+            mut_stripped = [ln.strip() for ln in mutated_content.splitlines() if ln.strip()]
+            if orig_stripped == mut_stripped:
+                logger.warning("  Skipped — mutation is whitespace-only (no semantic change)")
+                bug_spec = None
+                break
+
+            mutated_content = _normalize_test_whitespace(mutated_content, original_content)
+
+            patch = generate_patch(original_content, mutated_content, bug_spec.file)
+            if not patch.strip():
+                logger.warning("  Skipped — empty patch")
+                bug_spec = None
+                break
+
+            changed = _count_changed_lines(patch)
+            if changed >= 3:
+                break
+            if attempt < 2:
+                logger.info(
+                    "  Patch too simple (%d changed lines), retrying (%d/2)",
+                    changed, attempt + 1,
+                )
+                bug_spec = None
+            else:
+                logger.warning(
+                    "  Patch still too simple after retries (%d changed lines), accepting",
+                    changed,
+                )
+
+        if bug_spec is None:
             continue
-
-        mutated_content = original_content.replace(
-            bug_spec.original_code, bug_spec.buggy_code, 1,
-        )
-
-        if mutated_content == original_content:
-            logger.warning("  Skipped — could not apply mutation to file")
-            continue
-
-        if not _validate_mutation_parses(mutated_content, language):
-            logger.warning("  Skipped — mutated file does not parse (%s)", language)
-            continue
-
-        # Reject whitespace-only mutations — they produce cosmetic patches
-        orig_stripped = [ln.strip() for ln in original_content.splitlines() if ln.strip()]
-        mut_stripped = [ln.strip() for ln in mutated_content.splitlines() if ln.strip()]
-        if orig_stripped == mut_stripped:
-            logger.warning("  Skipped — mutation is whitespace-only (no semantic change)")
-            continue
-
-        # Normalize whitespace to match original file's blank-line pattern
-        mutated_content = _normalize_test_whitespace(mutated_content, original_content)
-
-        patch = generate_patch(original_content, mutated_content, bug_spec.file)
         if not patch.strip():
-            logger.warning("  Skipped — empty patch")
             continue
 
         # Apply secondary changes from multi-file mutation
@@ -1858,8 +2063,15 @@ async def synthesize_repo(
             logger.warning("  Skipped — could not create buggy commit")
             continue
 
-        problem_statement = await generate_issue_description(
-            bug_spec, model=model, repo_path=repo_path,
+        # H1: Information firewall — generate issue from symptom only
+        symptom = await _bug_to_symptom(bug_spec.bug_description, model=model)
+        style_examples = _mine_issue_style_examples(repo_path)
+        problem_statement = await generate_issue_from_symptom(
+            symptom=symptom,
+            test_output=None,
+            repo_context=ctx,
+            style_examples=style_examples,
+            model=model,
         )
 
         test_patch = await generate_test_patch(
