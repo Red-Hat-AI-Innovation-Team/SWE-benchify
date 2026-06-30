@@ -12,21 +12,27 @@ from swebenchify.synthesizer import (
     SynthesisResult,
     _collect_repo_context,
     _count_changed_lines,
+    _discover_repo_modules,
     _edge_case_score,
     _find_existing_test_file,
     _find_file_commits,
     _find_related_files,
+    _find_test_file_importing,
     _format_new_test_patch,
+    _is_stdlib_or_installed,
     _mine_issue_style_examples,
     _normalize_test_whitespace,
     _parse_bug_response,
     _parse_incidental_changes,
     _parse_secondary_changes,
+    _run_tests_on_buggy_code,
+    _source_to_module_name,
     _strip_strategy_labels,
     _strip_issue_shas,
     _validate_mutation_parses,
     _validate_rst_references,
     _validate_test_code,
+    _validate_test_imports,
     build_candidate,
     find_mutation_targets,
     generate_patch,
@@ -1526,3 +1532,260 @@ def test_critique_rewrite_with_flags() -> None:
 
     assert call_count == 2
     assert "no idea why" in result
+
+
+# ---------------------------------------------------------------------------
+# _find_existing_test_file — broadened search
+# ---------------------------------------------------------------------------
+
+def test_find_existing_test_file_by_import(tmp_path: Path) -> None:
+    """Finds a test file that imports the same module, even with a different name."""
+    (tmp_path / "mypackage").mkdir()
+    (tmp_path / "mypackage" / "__init__.py").write_text("")
+    (tmp_path / "mypackage" / "utils.py").write_text("def helper(): pass\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_integration.py").write_text(
+        "from mypackage.utils import helper\n\ndef test_it():\n    assert helper() is None\n"
+    )
+
+    result = _find_existing_test_file(str(tmp_path), "mypackage/utils.py", "python")
+    assert result == "tests/test_integration.py"
+
+
+def test_find_existing_test_file_package_dir_fallback(tmp_path: Path) -> None:
+    """Falls back to test files in the same package subdirectory under tests/."""
+    (tmp_path / "mypackage" / "sub").mkdir(parents=True)
+    (tmp_path / "mypackage" / "sub" / "core.py").write_text("pass\n")
+    (tmp_path / "tests" / "sub").mkdir(parents=True)
+    (tmp_path / "tests" / "sub" / "test_other.py").write_text("def test_x(): pass\n")
+
+    result = _find_existing_test_file(str(tmp_path), "mypackage/sub/core.py", "python")
+    assert result == "tests/sub/test_other.py"
+
+
+# ---------------------------------------------------------------------------
+# _source_to_module_name
+# ---------------------------------------------------------------------------
+
+def test_source_to_module_name_basic() -> None:
+    assert _source_to_module_name("mypackage/utils.py") == "mypackage.utils"
+
+
+def test_source_to_module_name_strips_src() -> None:
+    assert _source_to_module_name("src/mypackage/utils.py") == "mypackage.utils"
+
+
+def test_source_to_module_name_non_python() -> None:
+    assert _source_to_module_name("main.go") is None
+
+
+# ---------------------------------------------------------------------------
+# _find_test_file_importing
+# ---------------------------------------------------------------------------
+
+def test_find_test_file_importing_found(tmp_path: Path) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_api.py").write_text(
+        "from mypackage.api import Client\n\ndef test_client(): pass\n"
+    )
+    result = _find_test_file_importing(tmp_path, "mypackage.api")
+    assert result == "tests/test_api.py"
+
+
+def test_find_test_file_importing_parent_match(tmp_path: Path) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_core.py").write_text(
+        "from mypackage import core\n\ndef test_core(): pass\n"
+    )
+    result = _find_test_file_importing(tmp_path, "mypackage.core")
+    assert result == "tests/test_core.py"
+
+
+def test_find_test_file_importing_not_found(tmp_path: Path) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_other.py").write_text(
+        "from unrelated import stuff\n"
+    )
+    result = _find_test_file_importing(tmp_path, "mypackage.core")
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _discover_repo_modules
+# ---------------------------------------------------------------------------
+
+def test_discover_repo_modules(tmp_path: Path) -> None:
+    (tmp_path / "mypackage").mkdir()
+    (tmp_path / "mypackage" / "__init__.py").write_text("")
+    (tmp_path / "mypackage" / "core.py").write_text("pass\n")
+    (tmp_path / "mypackage" / "sub").mkdir()
+    (tmp_path / "mypackage" / "sub" / "__init__.py").write_text("")
+    (tmp_path / "mypackage" / "sub" / "util.py").write_text("pass\n")
+
+    modules = _discover_repo_modules(str(tmp_path))
+    assert "mypackage" in modules
+    assert "mypackage.core" in modules
+    assert "mypackage.sub" in modules
+    assert "mypackage.sub.util" in modules
+
+
+def test_discover_repo_modules_src_layout(tmp_path: Path) -> None:
+    (tmp_path / "src" / "pkg").mkdir(parents=True)
+    (tmp_path / "src" / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "src" / "pkg" / "api.py").write_text("pass\n")
+
+    modules = _discover_repo_modules(str(tmp_path))
+    assert "pkg" in modules
+    assert "pkg.api" in modules
+
+
+# ---------------------------------------------------------------------------
+# _is_stdlib_or_installed
+# ---------------------------------------------------------------------------
+
+def test_is_stdlib_or_installed_stdlib() -> None:
+    assert _is_stdlib_or_installed("os", ["os"]) is True
+    assert _is_stdlib_or_installed("os.path", ["os", "path"]) is True
+
+
+def test_is_stdlib_or_installed_nonexistent() -> None:
+    assert _is_stdlib_or_installed("totally_fake_module_xyz", ["totally_fake_module_xyz"]) is False
+
+
+def test_is_stdlib_or_installed_dotted_nonexistent() -> None:
+    assert _is_stdlib_or_installed("os.nonexistent_submodule_xyz", ["os", "nonexistent_submodule_xyz"]) is False
+
+
+# ---------------------------------------------------------------------------
+# _validate_test_imports — strengthened
+# ---------------------------------------------------------------------------
+
+def test_validate_test_imports_valid_repo_module(tmp_path: Path) -> None:
+    (tmp_path / "mypackage").mkdir()
+    (tmp_path / "mypackage" / "__init__.py").write_text("")
+    (tmp_path / "mypackage" / "core.py").write_text("pass\n")
+
+    code = "from mypackage.core import something\n"
+    assert _validate_test_imports(code, str(tmp_path)) is True
+
+
+def test_validate_test_imports_rejects_fabricated_submodule(tmp_path: Path) -> None:
+    code = "from os.nonexistent_submodule_xyz import something\n"
+    assert _validate_test_imports(code, str(tmp_path)) is False
+
+
+def test_validate_test_imports_allows_stdlib(tmp_path: Path) -> None:
+    code = "from os.path import join\nimport json\n"
+    assert _validate_test_imports(code, str(tmp_path)) is True
+
+
+def test_validate_test_imports_rejects_completely_fake(tmp_path: Path) -> None:
+    code = "from totally_fake_xyz import stuff\n"
+    assert _validate_test_imports(code, str(tmp_path)) is False
+
+
+# ---------------------------------------------------------------------------
+# generate_test_patch — returns None without existing test file
+# ---------------------------------------------------------------------------
+
+def test_generate_test_patch_returns_none_without_existing_test(tmp_path: Path) -> None:
+    """When no existing test file exists, generate_test_patch returns None."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "orphan.py").write_text("def orphan(): pass\n")
+
+    bug_spec = BugSpec(
+        file="src/orphan.py",
+        function_name="orphan",
+        original_code="def orphan(): pass",
+        buggy_code="def orphan(): return None",
+        bug_description="Returns None",
+        bug_category="wrong-return",
+    )
+
+    with mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import generate_test_patch
+        result = asyncio.run(generate_test_patch(bug_spec, str(tmp_path), "python"))
+
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# SynthesisResult.test_output field
+# ---------------------------------------------------------------------------
+
+def test_synthesis_result_has_test_output() -> None:
+    bug_spec = BugSpec(
+        file="a.py",
+        function_name="f",
+        original_code="code",
+        buggy_code="buggy",
+        bug_description="desc",
+        bug_category="cat",
+    )
+    sr = SynthesisResult(
+        bug_spec=bug_spec,
+        patch="p",
+        problem_statement="ps",
+        instance_id="",
+        base_commit="c",
+        test_output="FAILED test_foo - AssertionError",
+    )
+    assert sr.test_output == "FAILED test_foo - AssertionError"
+
+
+def test_synthesis_result_test_output_default() -> None:
+    bug_spec = BugSpec(
+        file="a.py",
+        function_name="f",
+        original_code="code",
+        buggy_code="buggy",
+        bug_description="desc",
+        bug_category="cat",
+    )
+    sr = SynthesisResult(
+        bug_spec=bug_spec,
+        patch="p",
+        problem_statement="ps",
+        instance_id="",
+        base_commit="c",
+    )
+    assert sr.test_output == ""
+
+
+# ---------------------------------------------------------------------------
+# _run_tests_on_buggy_code
+# ---------------------------------------------------------------------------
+
+def test_run_tests_on_buggy_code_captures_failure(tmp_path: Path) -> None:
+    """Captures test output when tests fail against buggy code."""
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=True)
+
+    f = tmp_path / "module.py"
+    f.write_text("def add(a, b):\n    return a + b\n")
+    test_f = tmp_path / "test_module.py"
+    test_f.write_text("from module import add\n\ndef test_add():\n    assert add(1, 2) == 3\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "correct version"], cwd=tmp_path, capture_output=True, check=True)
+
+    f.write_text("def add(a, b):\n    return a - b\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "buggy version"], cwd=tmp_path, capture_output=True, check=True)
+    buggy_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    output = _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
+    assert output is not None
+    assert "FAILED" in output or "assert" in output.lower() or "Error" in output
+
+
+def test_run_tests_on_buggy_code_no_repo(tmp_path: Path) -> None:
+    result = _run_tests_on_buggy_code(str(tmp_path), "fake_sha", "python")
+    assert result is None
