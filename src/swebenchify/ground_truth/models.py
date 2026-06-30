@@ -18,8 +18,8 @@ class DescriptionSource:
 @dataclass
 class GroundTruthChange:
     repo: str
-    change_id: str          # pr:123, commit:<sha>, merge:<sha>
-    change_kind: str        # pull_request, direct_commit, merge_commit, squash_commit, patch_series, unknown
+    change_id: str          # pr:123, commit:<sha>, merge:<sha>, batch:<sha>..<sha>
+    change_kind: str        # pull_request, direct_commit, merge_commit, squash_commit, commit_batch, patch_series, unknown
     base_commit: str
     head_commit: str
     merge_commit: str = ''

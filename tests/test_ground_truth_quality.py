@@ -161,7 +161,7 @@ class TestCheckDescriptionProvenance:
 class TestCheckChangeIdFormat:
     @pytest.mark.parametrize(
         "change_id",
-        ["pr:123", "pr:1", "commit:abc123def", "merge:abc123def"],
+        ["pr:123", "pr:1", "commit:abc123def", "merge:abc123def", "batch:abc12345..def67890"],
     )
     def test_valid_formats(self, change_id: str) -> None:
         change = _make_change(change_id=change_id)

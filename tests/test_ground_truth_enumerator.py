@@ -5,10 +5,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from swebenchify.ground_truth.enumerator import (
+    batch_direct_commits,
     build_change_from_commit,
     classify_change_kind,
     collect_all_ground_truth,
     enumerate_landed_changes,
+    is_empty_merge,
     link_to_pr,
     parse_trailers,
 )
@@ -276,3 +278,199 @@ class TestEnumerateLandedChanges:
         assert commits[1]["sha"] == "def456"
         assert commits[1]["parents"] == ["p1", "p2"]
         assert commits[1]["subject"] == "Merge PR #5"
+
+
+class TestIsEmptyMerge:
+    @patch("swebenchify.ground_truth.enumerator.subprocess.run")
+    def test_returns_true_for_empty_diff(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = MagicMock(stdout="")
+        commit_data = {"sha": "abc123", "parents": ["p1", "p2"], "subject": "Merge branch"}
+        assert is_empty_merge(commit_data, "/tmp/repo") is True
+        cmd = mock_run.call_args[0][0]
+        assert "git" in cmd
+        assert "--stat" in cmd
+
+    @patch("swebenchify.ground_truth.enumerator.subprocess.run")
+    def test_returns_false_for_nonempty_diff(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = MagicMock(stdout=" file.py | 2 +-\n 1 file changed\n")
+        commit_data = {"sha": "abc123", "parents": ["p1", "p2"], "subject": "Merge branch"}
+        assert is_empty_merge(commit_data, "/tmp/repo") is False
+
+    def test_returns_false_for_non_merge(self) -> None:
+        commit_data = {"sha": "abc123", "parents": ["p1"], "subject": "Direct commit"}
+        assert is_empty_merge(commit_data, "/tmp/repo") is False
+
+
+class TestBatchDirectCommits:
+    @patch("swebenchify.ground_truth.enumerator.subprocess.run")
+    @patch("swebenchify.ground_truth.enumerator.split_patch_5way")
+    def test_groups_consecutive(self, mock_split: MagicMock, mock_run: MagicMock) -> None:
+        diff_text = "diff --git a/f.py b/f.py\n"
+        mock_run.side_effect = [
+            MagicMock(stdout=diff_text),
+            MagicMock(stdout="f.py\na.py\n"),
+        ]
+        mock_split.return_value = {
+            "code_patch": diff_text, "test_patch": None,
+            "doc_patch": None, "tooling_patch": None, "agent_instruction_patch": None,
+        }
+
+        commits = [
+            {"sha": f"commit{i}abcdef0", "parents": [f"p{i}"], "subject": f"Fix {i}", "author_date": f"2024-01-0{i}T00:00:00Z", "body": ""}
+            for i in range(1, 6)
+        ]
+
+        result = batch_direct_commits(commits, "/tmp/repo", "owner/repo")
+        assert len(result) == 1
+        assert result[0].change_kind == "commit_batch"
+        assert result[0].change_id.startswith("batch:")
+        assert ".." in result[0].change_id
+        assert "Batch of 5 commits" in result[0].title
+
+    @patch("swebenchify.ground_truth.enumerator.subprocess.run")
+    @patch("swebenchify.ground_truth.enumerator.split_patch_5way")
+    def test_single_stays_direct(self, mock_split: MagicMock, mock_run: MagicMock) -> None:
+        diff_text = "diff --git a/f.py b/f.py\n"
+        mock_run.side_effect = [
+            MagicMock(stdout=diff_text),
+            MagicMock(stdout="f.py\n"),
+        ]
+        mock_split.return_value = {
+            "code_patch": diff_text, "test_patch": None,
+            "doc_patch": None, "tooling_patch": None, "agent_instruction_patch": None,
+        }
+
+        commits = [
+            {"sha": "single_abc1234", "parents": ["p1"], "subject": "Solo fix", "author_date": "2024-01-01T00:00:00Z", "body": ""},
+        ]
+
+        result = batch_direct_commits(commits, "/tmp/repo", "owner/repo")
+        assert len(result) == 1
+        assert result[0].change_kind == "direct_commit"
+        assert result[0].change_id.startswith("commit:")
+
+    @patch("swebenchify.ground_truth.enumerator.subprocess.run")
+    @patch("swebenchify.ground_truth.enumerator.split_patch_5way")
+    def test_combined_diff(self, mock_split: MagicMock, mock_run: MagicMock) -> None:
+        diff_text = "diff --git a/f.py b/f.py\n+new line\n"
+        mock_run.side_effect = [
+            MagicMock(stdout=diff_text),
+            MagicMock(stdout="f.py\n"),
+        ]
+        mock_split.return_value = {
+            "code_patch": diff_text, "test_patch": None,
+            "doc_patch": None, "tooling_patch": None, "agent_instruction_patch": None,
+        }
+
+        commits = [
+            {"sha": "aaa11111abcdef0", "parents": ["base000"], "subject": "First", "author_date": "2024-01-01T00:00:00Z", "body": ""},
+            {"sha": "bbb22222abcdef0", "parents": ["aaa11111abcdef0"], "subject": "Second", "author_date": "2024-01-02T00:00:00Z", "body": ""},
+        ]
+
+        result = batch_direct_commits(commits, "/tmp/repo", "owner/repo")
+        diff_cmd = mock_run.call_args_list[0][0][0]
+        assert "base000..bbb22222abcdef0" in " ".join(diff_cmd)
+
+    @patch("swebenchify.ground_truth.enumerator.subprocess.run")
+    @patch("swebenchify.ground_truth.enumerator.split_patch_5way")
+    def test_description_sources(self, mock_split: MagicMock, mock_run: MagicMock) -> None:
+        mock_run.side_effect = [
+            MagicMock(stdout="diff\n"),
+            MagicMock(stdout="f.py\n"),
+        ]
+        mock_split.return_value = {
+            "code_patch": None, "test_patch": None,
+            "doc_patch": None, "tooling_patch": None, "agent_instruction_patch": None,
+        }
+
+        commits = [
+            {"sha": "aaa11111", "parents": ["p0"], "subject": "First", "author_date": "2024-01-01T00:00:00Z", "body": "body1"},
+            {"sha": "bbb22222", "parents": ["aaa11111"], "subject": "Second", "author_date": "2024-01-02T00:00:00Z", "body": ""},
+            {"sha": "ccc33333", "parents": ["bbb22222"], "subject": "Third", "author_date": "2024-01-03T00:00:00Z", "body": "body3"},
+        ]
+
+        result = batch_direct_commits(commits, "/tmp/repo", "owner/repo")
+        assert len(result[0].description_sources) == 3
+        assert result[0].description_sources[0].source_id == "aaa11111"
+        assert result[0].description_sources[1].source_id == "bbb22222"
+        assert result[0].description_sources[2].source_id == "ccc33333"
+
+
+class TestCollectAllSkipsEmptyMerges:
+    @patch("swebenchify.ground_truth.enumerator.is_empty_merge")
+    @patch("swebenchify.ground_truth.enumerator.build_change_from_commit")
+    @patch("swebenchify.ground_truth.enumerator.enumerate_landed_changes")
+    def test_skips_empty_merges(
+        self, mock_enumerate: MagicMock, mock_build: MagicMock, mock_empty: MagicMock,
+    ) -> None:
+        mock_enumerate.return_value = [
+            {"sha": "merge_sha_1", "parents": ["p1", "p2"], "subject": "Merge branch x", "author_date": "2024-01-01T00:00:00Z", "body": ""},
+        ]
+        mock_empty.return_value = True
+
+        changes = collect_all_ground_truth("/tmp/repo", "owner/repo")
+        assert len(changes) == 0
+        mock_build.assert_not_called()
+
+
+class TestCollectAllBatchesBetweenPRs:
+    @patch("swebenchify.ground_truth.enumerator.batch_direct_commits")
+    @patch("swebenchify.ground_truth.enumerator.build_change_from_commit")
+    @patch("swebenchify.ground_truth.enumerator.enumerate_landed_changes")
+    def test_batches_between_prs(
+        self, mock_enumerate: MagicMock, mock_build: MagicMock, mock_batch: MagicMock,
+    ) -> None:
+        mock_enumerate.return_value = [
+            {"sha": "pr_sha_1", "parents": ["p1", "p2"], "subject": "Merge pull request #10 from x", "author_date": "2024-01-01T00:00:00Z", "body": ""},
+            {"sha": "direct_1", "parents": ["pr_sha_1"], "subject": "Direct fix 1", "author_date": "2024-01-02T00:00:00Z", "body": ""},
+            {"sha": "direct_2", "parents": ["direct_1"], "subject": "Direct fix 2", "author_date": "2024-01-03T00:00:00Z", "body": ""},
+            {"sha": "direct_3", "parents": ["direct_2"], "subject": "Direct fix 3", "author_date": "2024-01-04T00:00:00Z", "body": ""},
+            {"sha": "pr_sha_2", "parents": ["p3", "p4"], "subject": "Merge pull request #20 from y", "author_date": "2024-01-05T00:00:00Z", "body": ""},
+        ]
+
+        pr_change_1 = MagicMock()
+        pr_change_1.landed_at = "2024-01-01T00:00:00Z"
+        pr_change_1.change_id = "pr:10"
+
+        pr_change_2 = MagicMock()
+        pr_change_2.landed_at = "2024-01-05T00:00:00Z"
+        pr_change_2.change_id = "pr:20"
+
+        mock_build.side_effect = [pr_change_1, pr_change_2]
+
+        batch_change = MagicMock()
+        batch_change.landed_at = "2024-01-04T00:00:00Z"
+        batch_change.change_id = "batch:direct_1..direct_3"
+        mock_batch.return_value = [batch_change]
+
+        changes = collect_all_ground_truth("/tmp/repo", "owner/repo")
+
+        assert mock_build.call_count == 2
+        mock_batch.assert_called_once()
+        batch_args = mock_batch.call_args[0][0]
+        assert len(batch_args) == 3
+        assert batch_args[0]["sha"] == "direct_1"
+        assert batch_args[2]["sha"] == "direct_3"
+        assert len(changes) == 3
+
+
+class TestBatchChangeIdFormat:
+    @patch("swebenchify.ground_truth.enumerator.subprocess.run")
+    @patch("swebenchify.ground_truth.enumerator.split_patch_5way")
+    def test_batch_id_format(self, mock_split: MagicMock, mock_run: MagicMock) -> None:
+        mock_run.side_effect = [
+            MagicMock(stdout="diff\n"),
+            MagicMock(stdout="f.py\n"),
+        ]
+        mock_split.return_value = {
+            "code_patch": None, "test_patch": None,
+            "doc_patch": None, "tooling_patch": None, "agent_instruction_patch": None,
+        }
+
+        commits = [
+            {"sha": "abc12345ffffffff", "parents": ["p0"], "subject": "A", "author_date": "2024-01-01T00:00:00Z", "body": ""},
+            {"sha": "def67890aaaaaaaa", "parents": ["abc12345ffffffff"], "subject": "B", "author_date": "2024-01-02T00:00:00Z", "body": ""},
+        ]
+
+        result = batch_direct_commits(commits, "/tmp/repo", "owner/repo")
+        assert result[0].change_id == "batch:abc12345..def67890"

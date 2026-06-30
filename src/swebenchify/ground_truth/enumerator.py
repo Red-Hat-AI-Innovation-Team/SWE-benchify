@@ -182,6 +182,104 @@ def build_change_from_commit(
     )
 
 
+def is_empty_merge(commit_data: dict, repo_path: str) -> bool:
+    parents = commit_data.get("parents", [])
+    if len(parents) < 2:
+        return False
+    first_parent = parents[0]
+    sha = commit_data["sha"]
+    result = subprocess.run(
+        ["git", "diff", "--stat", f"{first_parent}..{sha}"],
+        capture_output=True,
+        text=True,
+        cwd=repo_path,
+        check=True,
+    )
+    return not result.stdout.strip()
+
+
+def batch_direct_commits(
+    commits: list[dict],
+    repo_path: str,
+    repo_name: str,
+) -> list[GroundTruthChange]:
+    if not commits:
+        return []
+
+    changes: list[GroundTruthChange] = []
+
+    first = commits[0]
+    last = commits[-1]
+    first_parent = first["parents"][0] if first["parents"] else first["sha"] + "~1"
+
+    if len(commits) == 1:
+        return [
+            build_change_from_commit(
+                first, repo_path, repo_name,
+                pr_number=None, change_kind="direct_commit",
+            )
+        ]
+
+    diff_result = subprocess.run(
+        ["git", "diff", f"{first_parent}..{last['sha']}"],
+        capture_output=True, text=True, cwd=repo_path, check=True,
+    )
+    full_diff = diff_result.stdout
+
+    patches = split_patch_5way(full_diff)
+
+    ls_result = subprocess.run(
+        ["git", "diff", "--name-only", f"{first_parent}..{last['sha']}"],
+        capture_output=True, text=True, cwd=repo_path, check=True,
+    )
+    changed_files = [f for f in ls_result.stdout.strip().splitlines() if f]
+
+    first_subject = first["subject"]
+    last_subject = last["subject"]
+    title = f"Batch of {len(commits)} commits: {first_subject} ... {last_subject}"
+    if len(title) > 200:
+        title = title[:197] + "..."
+
+    body_parts = []
+    desc_sources = []
+    for c in commits:
+        msg = c["subject"]
+        if c.get("body"):
+            msg += "\n\n" + c["body"]
+        body_parts.append(msg)
+        desc_sources.append(
+            DescriptionSource(
+                source_kind="commit_message",
+                source_id=c["sha"],
+                created_at=c.get("author_date", ""),
+                text=msg,
+            )
+        )
+
+    change_id = f"batch:{first['sha'][:8]}..{last['sha'][:8]}"
+
+    changes.append(GroundTruthChange(
+        repo=repo_name,
+        change_id=change_id,
+        change_kind="commit_batch",
+        base_commit=first_parent,
+        head_commit=last["sha"],
+        landed_at=last.get("author_date", ""),
+        title=title,
+        body="\n---\n".join(body_parts),
+        description_sources=desc_sources,
+        full_diff=full_diff,
+        code_patch=patches.get("code_patch"),
+        test_patch=patches.get("test_patch"),
+        doc_patch=patches.get("doc_patch"),
+        tooling_patch=patches.get("tooling_patch"),
+        agent_instruction_patch=patches.get("agent_instruction_patch"),
+        changed_files=changed_files,
+    ))
+
+    return changes
+
+
 def collect_all_ground_truth(
     repo_path: str,
     repo_name: str,
@@ -203,6 +301,7 @@ def collect_all_ground_truth(
     changes: list[GroundTruthChange] = []
     seen_ids: set[str] = set(existing_change_ids)
 
+    annotated: list[tuple[dict, int | None, float, str]] = []
     for commit_data in commits:
         pr_number, confidence = link_to_pr(
             commit_data["sha"],
@@ -212,22 +311,42 @@ def collect_all_ground_truth(
             github_token=github_token,
         )
         change_kind = classify_change_kind(commit_data["parents"], pr_number)
+        annotated.append((commit_data, pr_number, confidence, change_kind))
 
-        if change_kind in ("pull_request", "squash_commit") and pr_number is not None:
-            candidate_id = f"pr:{pr_number}"
-        elif change_kind == "merge_commit":
-            candidate_id = f"merge:{commit_data['sha'][:12]}"
-        else:
-            candidate_id = f"commit:{commit_data['sha'][:12]}"
+    current_batch: list[dict] = []
 
-        if candidate_id in seen_ids:
-            continue
-        seen_ids.add(candidate_id)
-
-        change = build_change_from_commit(
-            commit_data, repo_path, repo_name, pr_number, change_kind, confidence
+    def _flush_batch() -> None:
+        if not current_batch:
+            return
+        batch_changes = batch_direct_commits(
+            list(current_batch), repo_path, repo_name,
         )
-        changes.append(change)
+        for bc in batch_changes:
+            if bc.change_id not in seen_ids:
+                seen_ids.add(bc.change_id)
+                changes.append(bc)
+        current_batch.clear()
+
+    for commit_data, pr_number, confidence, change_kind in annotated:
+        is_pr_backed = change_kind in ("pull_request", "squash_commit")
+
+        if is_pr_backed:
+            _flush_batch()
+
+            candidate_id = f"pr:{pr_number}"
+            if candidate_id in seen_ids:
+                continue
+            seen_ids.add(candidate_id)
+            change = build_change_from_commit(
+                commit_data, repo_path, repo_name, pr_number, change_kind, confidence
+            )
+            changes.append(change)
+        else:
+            if change_kind == "merge_commit" and is_empty_merge(commit_data, repo_path):
+                continue
+            current_batch.append(commit_data)
+
+    _flush_batch()
 
     changes.sort(key=lambda c: c.landed_at)
     return changes

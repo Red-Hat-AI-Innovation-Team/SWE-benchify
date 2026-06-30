@@ -8,7 +8,7 @@ from unidiff import PatchSet
 
 from swebenchify.ground_truth.models import GroundTruthChange
 
-_CHANGE_ID_RE = re.compile(r"^(pr:\d+|commit:[0-9a-f]+|merge:[0-9a-f]+)$")
+_CHANGE_ID_RE = re.compile(r"^(pr:\d+|commit:[0-9a-f]+|merge:[0-9a-f]+|batch:[0-9a-f]+\.\.[0-9a-f]+)$")
 
 
 def check_commits_exist(change: GroundTruthChange, repo_path: str) -> list[str]:
