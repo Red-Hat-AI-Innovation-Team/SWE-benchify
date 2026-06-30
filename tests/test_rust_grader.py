@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from swebenchify.backends import get_backend
+from swebenchify.backends import LanguageBackend, get_backend
 from swebenchify.grader import _parse_f2p_output_generic, compute_f2p, _F2P_PHASE_SEPARATOR
 from swebenchify.models import RustEnvironmentSpec
 from swebenchify.parsers import RustTestParser, normalize_rust_f2p
@@ -17,6 +17,12 @@ from swebenchify.sandbox import RustImageCache
 # ---------------------------------------------------------------------------
 # Fixture helpers
 # ---------------------------------------------------------------------------
+
+def _get_rust_backend() -> LanguageBackend:
+    backend = get_backend("rust")
+    assert backend is not None
+    return backend
+
 
 def _rust_passing(tests: list[str]) -> str:
     lines = [f"test {t} ... ok" for t in tests]
@@ -63,24 +69,24 @@ class TestRustBackendRegistered:
         assert backend is not None
 
     def test_backend_name(self) -> None:
-        backend = get_backend("rust")
+        backend = _get_rust_backend()
         assert backend.name == "rust"
 
     def test_backend_parser_is_rust(self) -> None:
-        backend = get_backend("rust")
+        backend = _get_rust_backend()
         assert isinstance(backend.parser, RustTestParser)
 
     def test_backend_default_timeout(self) -> None:
-        backend = get_backend("rust")
+        backend = _get_rust_backend()
         assert backend.default_timeout == 600
 
     def test_backend_failure_grep(self) -> None:
-        backend = get_backend("rust")
+        backend = _get_rust_backend()
         assert "FAILED" in backend.failure_grep
         assert "error\\[E" in backend.failure_grep
 
     def test_backend_normalize_f2p(self) -> None:
-        backend = get_backend("rust")
+        backend = _get_rust_backend()
         assert backend.normalize_f2p is normalize_rust_f2p
 
 
@@ -90,46 +96,46 @@ class TestRustBackendRegistered:
 
 class TestRustMakeDockerfile:
     def test_contains_rust_base_image(self) -> None:
-        backend = get_backend("rust")
+        backend = _get_rust_backend()
         spec = RustEnvironmentSpec(rust_version="1.84")
         df = backend.make_dockerfile("owner/repo", "abc123", spec)
         assert "rust:1.84-slim" in df
 
     def test_contains_clone_and_checkout(self) -> None:
-        backend = get_backend("rust")
+        backend = _get_rust_backend()
         spec = RustEnvironmentSpec()
         df = backend.make_dockerfile("owner/repo", "abc123", spec)
         assert "owner/repo" in df
         assert "abc123" in df
 
     def test_copies_patches(self) -> None:
-        backend = get_backend("rust")
+        backend = _get_rust_backend()
         spec = RustEnvironmentSpec()
         df = backend.make_dockerfile("owner/repo", "abc123", spec)
         assert "test.patch" in df
         assert "gold.patch" in df
 
     def test_includes_system_deps(self) -> None:
-        backend = get_backend("rust")
+        backend = _get_rust_backend()
         spec = RustEnvironmentSpec(system_dependencies=["libssl-dev", "pkg-config"])
         df = backend.make_dockerfile("owner/repo", "abc123", spec)
         assert "libssl-dev" in df
         assert "pkg-config" in df
 
     def test_includes_features(self) -> None:
-        backend = get_backend("rust")
+        backend = _get_rust_backend()
         spec = RustEnvironmentSpec(features="--all-features")
         df = backend.make_dockerfile("owner/repo", "abc123", spec)
         assert "--all-features" in df
 
     def test_defaults_to_rust_latest(self) -> None:
-        backend = get_backend("rust")
+        backend = _get_rust_backend()
         spec = RustEnvironmentSpec()
         df = backend.make_dockerfile("owner/repo", "abc123", spec)
         assert "rust:latest" in df
 
     def test_uses_archive_fallback(self) -> None:
-        backend = get_backend("rust")
+        backend = _get_rust_backend()
         spec = RustEnvironmentSpec()
         df = backend.make_dockerfile("owner/repo", "abc123", spec)
         assert "archive" in df
@@ -141,12 +147,12 @@ class TestRustMakeDockerfile:
 
 class TestRustMakeTestCmd:
     def test_default_cargo_test(self) -> None:
-        backend = get_backend("rust")
+        backend = _get_rust_backend()
         spec = RustEnvironmentSpec()
         assert backend.make_test_cmd(spec) == "cargo test"
 
     def test_custom_test_cmd(self) -> None:
-        backend = get_backend("rust")
+        backend = _get_rust_backend()
         spec = RustEnvironmentSpec(test_cmd="cargo test --workspace")
         assert backend.make_test_cmd(spec) == "cargo test --workspace"
 
@@ -260,7 +266,7 @@ class TestComputeF2pRust:
         with patch("swebenchify.grader._docker_available", return_value=True):
             result = compute_f2p("owner/repo", "abc123", no_rs_patch, "gold", env_spec=spec)
         assert result.status == "invalid"
-        assert ".rs" in result.error_message
+        assert result.error_message is not None and ".rs" in result.error_message
 
     def test_build_failure_returns_error(self) -> None:
         spec = RustEnvironmentSpec(rust_version="1.84")
@@ -283,7 +289,7 @@ class TestComputeF2pRust:
         ), patch("swebenchify.grader.subprocess.run"):
             result = compute_f2p("owner/repo", "abc123", self._FAKE_TEST_PATCH, "gold", env_spec=spec)
         assert result.status == "error"
-        assert "timed out" in result.error_message
+        assert result.error_message is not None and "timed out" in result.error_message
 
     def test_successful_run(self) -> None:
         spec = RustEnvironmentSpec(rust_version="1.84")

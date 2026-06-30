@@ -106,8 +106,8 @@ async def test_validation(env_spec: EnvironmentSpec):
 
     logger.info(f"Instance: {candidate.instance_id}")
     logger.info(f"Commit: {candidate.base_commit}")
-    logger.info(f"Patch lines: {len(candidate.patch.splitlines())}")
-    logger.info(f"Test patch lines: {len(candidate.test_patch.splitlines())}")
+    logger.info(f"Patch lines: {len((candidate.patch or '').splitlines())}")
+    logger.info(f"Test patch lines: {len((candidate.test_patch or '').splitlines())}")
 
     result = await validate_instance(
         candidate=candidate,

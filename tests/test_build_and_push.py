@@ -8,6 +8,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 from swebenchify.models import GoEnvironmentSpec, compute_env_spec_hash
@@ -28,8 +29,8 @@ main = _mod.main
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _spec(**overrides) -> GoEnvironmentSpec:
-    defaults = dict(
+def _spec(**overrides: Any) -> GoEnvironmentSpec:
+    defaults: dict[str, Any] = dict(
         go_version="1.22",
         build_cmd="",
         test_cmd="",

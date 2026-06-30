@@ -226,9 +226,10 @@ class TestSWEbenchFlaskFixture:
 class TestTaskInstanceFreshnessFields:
     """fix_merge_date, provenance, and link_confidence on TaskInstance."""
 
-    def _make(self, **overrides) -> "TaskInstance":
+    def _make(self, **overrides: object) -> "TaskInstance":
+        from typing import Any
         from swebenchify.models import TaskInstance
-        defaults = dict(
+        defaults: dict[str, Any] = dict(
             repo="pallets/flask",
             instance_id="pallets__flask-1",
             base_commit="abc",
