@@ -53,7 +53,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 # Allow running from the repo root without installing
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -111,7 +111,7 @@ def run_m0(known_good_path: str) -> M0Result:
     Returns M0Result with the agreement rate and per-instance breakdown.
     """
     from swebenchify.parsers import GoJSONParser
-    from swebenchify.validator import _compute_f2p_p2p
+    from swebenchify.grader import _compute_f2p_p2p
 
     parser = GoJSONParser()
     instances = []
@@ -323,7 +323,7 @@ def run_m2(
         access_token=config.github_tokens.get(repo, config.github_token),
     )
 
-    run_results = []
+    run_results: list[dict[str, Any]] = []
     for attempt in range(2):
         logger.info("M2: stability run %d/2 on %s (%d-run quarantine)", attempt + 1, repo, n_runs)
         cost_tracker = CostTracker()

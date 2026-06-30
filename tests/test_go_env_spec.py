@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 
 from swebenchify.go_registry import GoSpecRegistry
@@ -14,8 +15,8 @@ from swebenchify.models import GoEnvironmentSpec, compute_env_spec_hash
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_spec(**overrides) -> GoEnvironmentSpec:
-    defaults = dict(
+def _make_spec(**overrides: Any) -> GoEnvironmentSpec:
+    defaults: dict[str, Any] = dict(
         language="go",
         go_version="1.22",
         build_cmd="make build",

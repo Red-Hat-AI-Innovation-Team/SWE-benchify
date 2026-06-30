@@ -114,7 +114,6 @@ async def main():
         })
 
     # Summary
-    _ = [r for r in results if not r.get("error") or "SDK" not in str(r.get("error", ""))]
     resolved = sum(1 for r in results if r["resolved"])
     errors = sum(1 for r in results if r.get("error"))
     total = len(results)

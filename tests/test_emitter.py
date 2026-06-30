@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 
 from swebenchify.emitter import emit_dataset, load_dataset
 from swebenchify.models import TaskInstance
 
 
-def _make_instance(**overrides) -> TaskInstance:
+def _make_instance(**overrides: Any) -> TaskInstance:
     """Build a TaskInstance with sensible defaults."""
-    defaults = {
+    defaults: dict[str, Any] = {
         "repo": "owner/repo",
         "instance_id": "owner__repo-1",
         "base_commit": "abc123",

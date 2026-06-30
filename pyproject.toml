@@ -27,6 +27,27 @@ swebenchify = "swebenchify.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.mypy]
+python_version = "3.11"
+mypy_path = "src"
+warn_return_any = false
+
+[[tool.mypy.overrides]]
+module = [
+    "datasets",
+    "datasets.*",
+    "swebench.*",
+    "claude_code_sdk",
+    "claude_code_sdk.*",
+    "unidiff",
+    "unidiff.*",
+    "docker",
+    "docker.*",
+    "requests",
+    "requests.*",
+]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 norecursedirs = ["output", "logs", ".factory", ".git"]

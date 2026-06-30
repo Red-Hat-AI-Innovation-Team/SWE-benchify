@@ -258,6 +258,7 @@ def main() -> None:
     agent_instances = load_jsonl_instances(args.agent_results)
     logger.info("Loaded %d agent-validated instances", len(agent_instances))
 
+    docker_instances: dict[str, list[str]] | None = None
     if args.docker_results:
         docker_instances = load_jsonl_instances(args.docker_results)
         logger.info(

@@ -147,7 +147,7 @@ async def evaluate_quality_batch(
     tasks = [eval_one(inst) for inst in instances]
     raw_results = await asyncio.gather(*tasks, return_exceptions=True)
     for r in raw_results:
-        if isinstance(r, Exception):
+        if isinstance(r, BaseException):
             logger.error("Quality evaluation task failed: %s", r)
             continue
         instance_id, score = r

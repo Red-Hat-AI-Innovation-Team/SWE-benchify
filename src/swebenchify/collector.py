@@ -118,7 +118,7 @@ def compute_link_confidence(
     return best
 
 
-def extract_resolved_issues(text: str) -> list[int]:
+def extract_resolved_issues(text: str | None) -> list[int]:
     """Extract issue numbers that are resolved by keyword references.
 
     Scans *text* for patterns like ``fixes #123`` or ``Closes #456`` and
@@ -145,7 +145,7 @@ def extract_resolved_issues(text: str) -> list[int]:
 
 
 def extract_jira_issues(
-    text: str,
+    text: str | None,
     rh_jira_projects: list[str] | None = None,
 ) -> list[str]:
     """Extract Jira issue keys from text.

@@ -27,6 +27,7 @@ import json
 import textwrap
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 
 from swebenchify.extractor import is_test_file, split_patch
@@ -282,8 +283,8 @@ class TestConformanceSpecSchema:
 # ---------------------------------------------------------------------------
 
 class TestConformanceSchemaValidity:
-    def _make_go_task_instance(self, **overrides) -> TaskInstance:
-        defaults = dict(
+    def _make_go_task_instance(self, **overrides: Any) -> TaskInstance:
+        defaults: dict[str, Any] = dict(
             repo="kubernetes/kubectl",
             instance_id="kubernetes__kubectl-1234",
             base_commit="abc123def456",

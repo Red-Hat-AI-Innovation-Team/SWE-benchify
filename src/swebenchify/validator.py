@@ -184,12 +184,12 @@ async def validate_instance(
         env_spec=json.dumps(
             {
                 "language": env_spec.language,
-                "language_version": env_spec.language_version,
-                "package_manager": env_spec.package_manager,
-                "install_cmd": env_spec.install_cmd,
+                "language_version": getattr(env_spec, "language_version", ""),
+                "package_manager": getattr(env_spec, "package_manager", ""),
+                "install_cmd": getattr(env_spec, "install_cmd", ""),
                 "test_cmd": env_spec.test_cmd,
-                "pre_install": env_spec.pre_install,
-                "system_dependencies": env_spec.system_dependencies,
+                "pre_install": getattr(env_spec, "pre_install", []),
+                "system_dependencies": getattr(env_spec, "system_dependencies", []),
             },
             indent=2,
         ),
@@ -368,7 +368,7 @@ async def validate_instances(
     tasks = [validate_one(c) for c in candidates]
     raw_results = await asyncio.gather(*tasks, return_exceptions=True)
     for r in raw_results:
-        if isinstance(r, Exception):
+        if isinstance(r, BaseException):
             logger.error("Validation task failed: %s", r)
             continue
         instance_id, vr = r

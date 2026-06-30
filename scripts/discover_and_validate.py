@@ -264,7 +264,7 @@ def build_env_spec(
 
 def has_tests(language: str, test_patch: str) -> bool:
     backend = get_backend(language)
-    if backend and backend.test_scope:
+    if backend:
         return bool(backend.test_scope(test_patch))
     if language == "rust":
         return any(
