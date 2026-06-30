@@ -10,7 +10,21 @@ import pytest
 from swebenchify.synthesizer import (
     BugSpec,
     SynthesisResult,
+    _collect_repo_context,
+    _edge_case_score,
+    _find_existing_test_file,
+    _find_file_commits,
+    _find_related_files,
+    _format_new_test_patch,
+    _normalize_test_whitespace,
     _parse_bug_response,
+    _parse_incidental_changes,
+    _parse_secondary_changes,
+    _strip_strategy_labels,
+    _strip_issue_shas,
+    _validate_mutation_parses,
+    _validate_rst_references,
+    _validate_test_code,
     build_candidate,
     find_mutation_targets,
     generate_patch,
@@ -378,15 +392,17 @@ def test_build_candidate_fields() -> None:
         base_commit="abc123",
     )
 
-    candidate = build_candidate("owner/repo", "abc123", synthesis_result)
+    candidate = build_candidate(
+        "owner/repo", "abc123", synthesis_result, test_patch="diff --git ...",
+    )
 
     assert candidate.repo == "owner/repo"
     assert candidate.base_commit == "abc123"
     assert candidate.patch == "--- a/src/core.py\n+++ b/src/core.py\n..."
-    assert candidate.test_patch == ""
+    assert candidate.test_patch == "diff --git ..."
     assert candidate.problem_statement == "Calculate returns wrong results"
     assert candidate.hints_text == ""
-    assert candidate.pr_number == 0
+    assert 90000 <= candidate.pr_number <= 99999
     assert candidate.created_at  # non-empty ISO timestamp
 
 
@@ -409,10 +425,10 @@ def test_build_candidate_instance_id_format() -> None:
 
     candidate = build_candidate("myorg/myrepo", "def456", synthesis_result)
 
-    assert candidate.instance_id.startswith("myorg__myrepo-synth-")
-    parts = candidate.instance_id.split("-synth-")
-    assert len(parts) == 2
-    assert len(parts[1]) == 8  # short SHA-256 hash
+    assert candidate.instance_id.startswith("myorg__myrepo-")
+    pr_num = candidate.instance_id.split("-")[-1]
+    assert pr_num.isdigit()
+    assert 90000 <= int(pr_num) < 100000
 
 
 def test_build_candidate_provenance() -> None:
@@ -605,3 +621,699 @@ def test_cli_synthesize_language_choices() -> None:
         parser.parse_args([
             "synthesize", "--repo", "o/r", "--language", "cobol",
         ])
+
+
+# ---------------------------------------------------------------------------
+# generate_test_patch — format & helpers
+# ---------------------------------------------------------------------------
+
+def test_generate_test_patch_format() -> None:
+    """Verify the test_patch is a valid unified diff with proper git headers."""
+    test_content = "import pytest\n\ndef test_example():\n    assert 1 + 1 == 2\n"
+    test_path = "tests/test_synth_add.py"
+
+    patch = _format_new_test_patch(test_content, test_path)
+
+    assert patch.startswith("diff --git a/tests/test_synth_add.py b/tests/test_synth_add.py")
+    assert "new file mode 100644" in patch
+    assert "--- a/tests/test_synth_add.py" in patch
+    assert "+++ b/tests/test_synth_add.py" in patch
+    assert "+import pytest" in patch
+    assert "+def test_example():" in patch
+
+
+def test_build_candidate_with_test_patch() -> None:
+    """Verify test_patch is set correctly on CandidateInstance."""
+    bug_spec = BugSpec(
+        file="src/util.py",
+        function_name="parse",
+        original_code="def parse(s):\n    return int(s)",
+        buggy_code="def parse(s):\n    return float(s)",
+        bug_description="Returns float instead of int",
+        bug_category="wrong-type",
+    )
+    sr = SynthesisResult(
+        bug_spec=bug_spec,
+        patch="diff...",
+        problem_statement="issue",
+        instance_id="",
+        base_commit="aaa",
+    )
+
+    tp = "diff --git a/tests/test_synth_parse.py b/tests/test_synth_parse.py\n+test"
+    candidate = build_candidate("o/r", "aaa", sr, test_patch=tp)
+    assert candidate.test_patch == tp
+
+    candidate_empty = build_candidate("o/r", "aaa", sr)
+    assert candidate_empty.test_patch == ""
+
+
+# ---------------------------------------------------------------------------
+# _validate_mutation_parses
+# ---------------------------------------------------------------------------
+
+def test_validate_mutation_parses_python_valid() -> None:
+    code = "def hello():\n    return 42\n"
+    assert _validate_mutation_parses(code, "python") is True
+
+
+def test_validate_mutation_parses_python_invalid() -> None:
+    code = "def hello(\n    return 42\n"
+    assert _validate_mutation_parses(code, "python") is False
+
+
+def test_validate_mutation_parses_go() -> None:
+    code = "this is not valid go but we don't validate it"
+    assert _validate_mutation_parses(code, "go") is True
+
+
+# ---------------------------------------------------------------------------
+# issue description — no file/function leak
+# ---------------------------------------------------------------------------
+
+def test_issue_description_no_file_leak() -> None:
+    """Verify the prompt template doesn't contain file paths or function names."""
+    from unittest.mock import MagicMock, patch
+
+    bug_spec = BugSpec(
+        file="src/internal/processor.py",
+        function_name="process_data",
+        original_code="def process_data(x):\n    return x + 1",
+        buggy_code="def process_data(x):\n    return x - 1",
+        bug_description="Returns wrong result for positive inputs",
+        bug_category="incorrect-operator",
+    )
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield  # make it an async generator
+
+    with patch("swebenchify.synthesizer.query", fake_query), \
+         patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import generate_issue_description
+        result = asyncio.run(generate_issue_description(bug_spec))
+
+    assert "src/internal/processor.py" not in captured_prompts[0]
+    assert "process_data" not in captured_prompts[0]
+    assert "Seeing an issue with" in result
+    assert "src/internal/processor.py" not in result
+    assert "process_data" not in result
+
+
+# ---------------------------------------------------------------------------
+# _find_existing_test_file
+# ---------------------------------------------------------------------------
+
+def test_find_existing_test_file_python(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "foo.py").write_text("def foo(): pass\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_foo.py").write_text("def test_foo(): pass\n")
+
+    result = _find_existing_test_file(str(tmp_path), "src/foo.py", "python")
+    assert result == "tests/test_foo.py"
+
+
+def test_find_existing_test_file_python_subdir(tmp_path: Path) -> None:
+    (tmp_path / "src" / "bar").mkdir(parents=True)
+    (tmp_path / "src" / "bar" / "baz.py").write_text("pass\n")
+    (tmp_path / "src" / "bar" / "test_baz.py").write_text("pass\n")
+
+    result = _find_existing_test_file(str(tmp_path), "src/bar/baz.py", "python")
+    assert result == "src/bar/test_baz.py"
+
+
+def test_find_existing_test_file_go(tmp_path: Path) -> None:
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "foo.go").write_text("package pkg\n")
+    (tmp_path / "pkg" / "foo_test.go").write_text("package pkg\n")
+
+    result = _find_existing_test_file(str(tmp_path), "pkg/foo.go", "go")
+    assert result == "pkg/foo_test.go"
+
+
+def test_find_existing_test_file_not_found(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "foo.py").write_text("pass\n")
+
+    result = _find_existing_test_file(str(tmp_path), "src/foo.py", "python")
+    assert result is None
+
+
+def test_test_patch_modifies_existing_file(tmp_path: Path) -> None:
+    """When an existing test file is found, the patch should modify it, not create a new file."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+    (tmp_path / "tests").mkdir()
+    existing_test = "import pytest\n\ndef test_add_basic():\n    assert add(1, 2) == 3\n"
+    (tmp_path / "tests" / "test_calc.py").write_text(existing_test)
+
+    modified_test = existing_test + "\ndef test_add_negative():\n    assert add(-1, -2) == -3\n"
+
+    class FakeResult:
+        content = [type("B", (), {"text": f"```python\n{modified_test}\n```"})()]
+
+    async def fake_query(prompt: str, options: object = None):
+        yield FakeResult()
+
+    bug_spec = BugSpec(
+        file="src/calc.py",
+        function_name="add",
+        original_code="def add(a, b):\n    return a + b",
+        buggy_code="def add(a, b):\n    return a - b",
+        bug_description="Changed + to -",
+        bug_category="incorrect-operator",
+    )
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()), \
+         mock_patch("swebenchify.synthesizer.ResultMessage", FakeResult):
+        import asyncio
+        from swebenchify.synthesizer import generate_test_patch
+        result = asyncio.run(generate_test_patch(bug_spec, str(tmp_path), "python"))
+
+    assert result is not None
+    assert "new file mode" not in result
+    assert "tests/test_calc.py" in result
+    assert "+def test_add_negative" in result
+
+
+# ---------------------------------------------------------------------------
+# _parse_incidental_changes
+# ---------------------------------------------------------------------------
+
+def test_parse_incidental_changes() -> None:
+    text = """Here are some changes:
+<change>
+<file>CHANGELOG.md</file>
+<original>
+## 1.2.0
+</original>
+<modified>
+## 1.2.1
+
+- Fixed calculation bug
+
+## 1.2.0
+</modified>
+</change>
+<change>
+<file>src/util.py</file>
+<original>EMPTY</original>
+<modified>
+# end of file marker
+</modified>
+</change>"""
+
+    changes = _parse_incidental_changes(text)
+    assert len(changes) == 2
+    assert changes[0][0] == "CHANGELOG.md"
+    assert "## 1.2.0" in changes[0][1]
+    assert "## 1.2.1" in changes[0][2]
+    assert changes[1][0] == "src/util.py"
+    assert changes[1][1] == "EMPTY"
+
+
+# ---------------------------------------------------------------------------
+# _collect_repo_context
+# ---------------------------------------------------------------------------
+
+def test_collect_repo_context(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "mypackage"\nversion = "2.3.1"\n'
+        '\n[project.requires-python]\npython_requires = ">=3.9"\n'
+    )
+
+    ctx = _collect_repo_context(str(tmp_path))
+    assert ctx["version"] == "2.3.1"
+    assert ctx["os_info"]  # should be one of the OS choices
+
+
+def test_collect_repo_context_empty(tmp_path: Path) -> None:
+    ctx = _collect_repo_context(str(tmp_path))
+    assert ctx["version"] == ""
+    assert ctx["os_info"]
+    assert ctx["recent_issues"] == [] or isinstance(ctx["recent_issues"], list)
+
+
+# ---------------------------------------------------------------------------
+# issue description — context in prompt
+# ---------------------------------------------------------------------------
+
+def test_issue_description_has_context(tmp_path: Path) -> None:
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nversion = "1.5.0"\n')
+
+    bug_spec = BugSpec(
+        file="src/foo.py",
+        function_name="foo",
+        original_code="def foo(): return 1",
+        buggy_code="def foo(): return 0",
+        bug_description="Returns wrong value",
+        bug_category="wrong-return",
+    )
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import generate_issue_description
+        asyncio.run(generate_issue_description(
+            bug_spec, repo_path=str(tmp_path),
+        ))
+
+    assert len(captured_prompts) == 2
+    # First call is _bug_to_symptom, second is the issue generation
+    symptom_prompt = captured_prompts[0]
+    assert "user-facing symptom" in symptom_prompt
+    issue_prompt = captured_prompts[1]
+    assert "1.5.0" in issue_prompt
+    assert "OS:" in issue_prompt
+
+
+# ---------------------------------------------------------------------------
+# _validate_test_code
+# ---------------------------------------------------------------------------
+
+def test_validate_test_code_valid_python() -> None:
+    code = textwrap.dedent("""\
+        def test_parse_config():
+            result = parse_config("key=val")
+            assert result["key"] == "val"
+    """)
+    assert _validate_test_code(code, "python") is True
+
+
+def test_validate_test_code_tautology_assert_true() -> None:
+    code = textwrap.dedent("""\
+        def test_something():
+            assert True
+    """)
+    assert _validate_test_code(code, "python") is False
+
+
+def test_validate_test_code_tautology_one_equals_one() -> None:
+    code = textwrap.dedent("""\
+        def test_something():
+            assert 1 == 1
+    """)
+    assert _validate_test_code(code, "python") is False
+
+
+def test_validate_test_code_no_assertions() -> None:
+    code = textwrap.dedent("""\
+        def test_something():
+            result = compute(42)
+            print(result)
+    """)
+    assert _validate_test_code(code, "python") is False
+
+
+def test_validate_test_code_syntax_error() -> None:
+    code = "def test_broken(:\n    pass"
+    assert _validate_test_code(code, "python") is False
+
+
+def test_validate_test_code_non_python_passes() -> None:
+    """Non-Python languages skip validation (always True)."""
+    code = "fn test_something() { }"
+    assert _validate_test_code(code, "rust") is True
+
+
+def test_validate_test_code_pytest_raises() -> None:
+    code = textwrap.dedent("""\
+        def test_raises():
+            with pytest.raises(ValueError):
+                parse_config("")
+    """)
+    assert _validate_test_code(code, "python") is True
+
+
+def test_validate_test_code_self_assert() -> None:
+    code = textwrap.dedent("""\
+        class TestParser(unittest.TestCase):
+            def test_parse(self):
+                self.assertEqual(parse("x"), "x")
+    """)
+    assert _validate_test_code(code, "python") is True
+
+
+# ---------------------------------------------------------------------------
+# _find_related_files
+# ---------------------------------------------------------------------------
+
+def test_find_related_files(tmp_path: Path) -> None:
+    """Find files that reference the target function."""
+    (tmp_path / ".git").mkdir()
+    src = tmp_path / "core.py"
+    src.write_text("def calculate(x):\n    return x + 1\n")
+    caller = tmp_path / "api.py"
+    caller.write_text("from core import calculate\n\ndef handle():\n    return calculate(42)\n")
+    unrelated = tmp_path / "utils.py"
+    unrelated.write_text("def helper():\n    return 0\n")
+
+    target = {"function_name": "calculate", "file": "core.py"}
+    related = _find_related_files(str(tmp_path), target, "python")
+    assert len(related) == 1
+    assert related[0]["file"] == "api.py"
+    assert "calculate" in related[0]["snippet"]
+
+
+def test_find_related_files_excludes_target(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    src = tmp_path / "core.py"
+    src.write_text("def foo():\n    return foo()\n")
+
+    target = {"function_name": "foo", "file": "core.py"}
+    related = _find_related_files(str(tmp_path), target, "python")
+    assert len(related) == 0
+
+
+# ---------------------------------------------------------------------------
+# _parse_secondary_changes
+# ---------------------------------------------------------------------------
+
+def test_parse_secondary_changes_valid() -> None:
+    text = """<buggy_code>...</buggy_code>
+
+<secondary_change>
+<sec_file>api.py</sec_file>
+<sec_original>
+result = calculate(x)
+if result is None:
+    raise ValueError("calculation failed")
+</sec_original>
+<sec_buggy>
+result = calculate(x)
+</sec_buggy>
+<sec_description>Remove None check to match primary bug</sec_description>
+</secondary_change>"""
+
+    changes = _parse_secondary_changes(text)
+    assert len(changes) == 1
+    assert changes[0].file == "api.py"
+    assert "ValueError" in changes[0].original_snippet
+    assert "calculate(x)" in changes[0].buggy_snippet
+    assert "None check" in changes[0].description
+
+
+def test_parse_secondary_changes_falls_back_to_sec_fixed() -> None:
+    """Old format with sec_fixed should still parse."""
+    text = """<secondary_change>
+<sec_file>api.py</sec_file>
+<sec_original>result = calculate(x)</sec_original>
+<sec_fixed>result = calculate(x, strict=True)</sec_fixed>
+<sec_description>Add strict mode</sec_description>
+</secondary_change>"""
+
+    changes = _parse_secondary_changes(text)
+    assert len(changes) == 1
+    assert changes[0].buggy_snippet == "result = calculate(x, strict=True)"
+
+
+def test_parse_secondary_changes_empty() -> None:
+    text = "<buggy_code>def foo(): pass</buggy_code>"
+    changes = _parse_secondary_changes(text)
+    assert changes == []
+
+
+def test_parse_secondary_changes_identical_rejected() -> None:
+    text = """<secondary_change>
+<sec_file>api.py</sec_file>
+<sec_original>same code</sec_original>
+<sec_buggy>same code</sec_buggy>
+<sec_description>no-op</sec_description>
+</secondary_change>"""
+
+    changes = _parse_secondary_changes(text)
+    assert changes == []
+
+
+def test_parse_bug_response_with_secondary() -> None:
+    target = {
+        "file": "core.py",
+        "function_name": "calc",
+        "source": "def calc(x):\n    return x + 1",
+        "language": "python",
+    }
+    text = """<bug_category>off-by-one</bug_category>
+<bug_description>Returns x instead of x+1 for zero</bug_description>
+<buggy_code>
+def calc(x):
+    return x
+</buggy_code>
+<secondary_change>
+<sec_file>api.py</sec_file>
+<sec_original>val = calc(n)\n    assert val > 0</sec_original>
+<sec_buggy>val = calc(n)</sec_buggy>
+<sec_description>Remove assertion that catches the bug</sec_description>
+</secondary_change>"""
+
+    spec = _parse_bug_response(text, target)
+    assert spec is not None
+    assert len(spec.secondary_changes) == 1
+    assert spec.secondary_changes[0].file == "api.py"
+
+
+# ---------------------------------------------------------------------------
+# BugSpec with secondary_changes
+# ---------------------------------------------------------------------------
+
+def test_bugspec_default_secondary_changes() -> None:
+    spec = BugSpec(
+        file="f.py",
+        function_name="fn",
+        original_code="def fn(): pass",
+        buggy_code="def fn(): return None",
+        bug_description="returns None",
+        bug_category="wrong-return",
+    )
+    assert spec.secondary_changes == []
+
+
+# ---------------------------------------------------------------------------
+# _edge_case_score
+# ---------------------------------------------------------------------------
+
+def test_edge_case_score_error_handling() -> None:
+    target = {"source": "def handle():\n    try:\n        x()\n    except ValueError:\n        raise RuntimeError()"}
+    assert _edge_case_score(target) >= 2
+
+
+def test_edge_case_score_happy_path() -> None:
+    target = {"source": "def add(a, b):\n    return a + b"}
+    assert _edge_case_score(target) == 0
+
+
+def test_edge_case_score_null_check() -> None:
+    target = {"source": "def safe(x):\n    if x is None:\n        return default"}
+    assert _edge_case_score(target) >= 1
+
+
+def test_find_mutation_targets_sorted_by_score(tmp_path: Path) -> None:
+    """Functions with error handling should sort before simple functions."""
+    simple = tmp_path / "simple.py"
+    simple.write_text("def add(a, b):\n    result = a + b\n    return result\n")
+    complex_f = tmp_path / "handler.py"
+    complex_f.write_text(textwrap.dedent("""\
+        def process(data):
+            try:
+                result = parse(data)
+            except ValueError:
+                raise RuntimeError("bad data")
+            if result is None:
+                return fallback()
+            return result
+    """))
+
+    targets = find_mutation_targets(str(tmp_path), "python")
+    assert len(targets) == 2
+    assert targets[0]["function_name"] == "process"
+    assert targets[1]["function_name"] == "add"
+
+
+# ---------------------------------------------------------------------------
+# _find_file_commits
+# ---------------------------------------------------------------------------
+
+def test_find_file_commits(tmp_path: Path) -> None:
+    """Find commits that touched a specific file in a real git repo."""
+    import subprocess
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=True)
+
+    f = tmp_path / "core.py"
+    f.write_text("v1")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "initial core"], cwd=tmp_path, capture_output=True, check=True)
+
+    f.write_text("v2")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "update core"], cwd=tmp_path, capture_output=True, check=True)
+
+    commits = _find_file_commits(str(tmp_path), "core.py")
+    assert len(commits) == 2
+    assert commits[0]["subject"] == "update core"
+    assert commits[0]["file"] == "core.py"
+    assert len(commits[0]["sha"]) >= 7
+
+
+def test_find_file_commits_no_repo(tmp_path: Path) -> None:
+    commits = _find_file_commits(str(tmp_path), "nonexistent.py")
+    assert commits == []
+
+
+# ---------------------------------------------------------------------------
+# _strip_strategy_labels
+# ---------------------------------------------------------------------------
+
+def test_strip_strategy_labels_removes_strategy_a() -> None:
+    code = textwrap.dedent("""\
+        def test_foo():
+            # Strategy A: modify existing test
+            assert foo() == 1
+    """)
+    result = _strip_strategy_labels(code)
+    assert "Strategy A" not in result
+    assert "assert foo() == 1" in result
+
+
+def test_strip_strategy_labels_removes_approach_step() -> None:
+    code = textwrap.dedent("""\
+        # Approach 1: check edge case
+        def test_edge():
+            pass
+        # Step 2: add assertion
+        def test_more():
+            pass
+    """)
+    result = _strip_strategy_labels(code)
+    assert "Approach 1" not in result
+    assert "Step 2" not in result
+    assert "def test_edge():" in result
+    assert "def test_more():" in result
+
+
+def test_strip_strategy_labels_removes_modify_existing() -> None:
+    code = "# MODIFY existing test function\ndef test_x():\n    pass\n"
+    result = _strip_strategy_labels(code)
+    assert "MODIFY existing" not in result
+    assert "def test_x():" in result
+
+
+def test_strip_strategy_labels_preserves_normal_comments() -> None:
+    code = "# This is a normal comment\ndef test_x():\n    pass\n"
+    result = _strip_strategy_labels(code)
+    assert "# This is a normal comment" in result
+
+
+def test_strip_strategy_labels_collapses_blank_lines() -> None:
+    code = "line1\n\n\n\n\nline2\n"
+    result = _strip_strategy_labels(code)
+    assert "\n\n\n" not in result
+    assert "line1" in result
+    assert "line2" in result
+
+
+# ---------------------------------------------------------------------------
+# _validate_rst_references
+# ---------------------------------------------------------------------------
+
+def test_validate_rst_references_keeps_real() -> None:
+    content = "Fixed bug :issue:`1234` and :pr:`5678`."
+    result = _validate_rst_references(content, ["#1234", "#5678"])
+    assert ":issue:`1234`" in result
+    assert ":pr:`5678`" in result
+
+
+def test_validate_rst_references_strips_fabricated() -> None:
+    content = "Fixed bug :issue:`9999` and :pr:`8888`."
+    result = _validate_rst_references(content, ["#1234"])
+    assert ":issue:`9999`" not in result
+    assert ":pr:`8888`" not in result
+    assert "Fixed bug" in result
+
+
+def test_validate_rst_references_mixed() -> None:
+    content = "See :issue:`100` and :issue:`999`."
+    result = _validate_rst_references(content, ["#100"])
+    assert ":issue:`100`" in result
+    assert ":issue:`999`" not in result
+
+
+def test_validate_rst_references_empty_real_list() -> None:
+    content = "See :issue:`42`."
+    result = _validate_rst_references(content, [])
+    assert ":issue:`42`" not in result
+
+
+def test_validate_rst_references_no_refs() -> None:
+    content = "No references here."
+    result = _validate_rst_references(content, ["#100"])
+    assert result == content
+
+
+# ---------------------------------------------------------------------------
+# _normalize_test_whitespace
+# ---------------------------------------------------------------------------
+
+def test_normalize_test_whitespace_matches_def_separator() -> None:
+    original = "def test_a():\n    pass\n\n\ndef test_b():\n    pass\n"
+    generated = "def test_a():\n    pass\n\ndef test_b():\n    pass\n"
+    result = _normalize_test_whitespace(generated, original)
+    # Original has 2 blank lines between functions; generated had 1
+    # Normalization should enforce 2
+    assert "\n\n\ndef test_b" in result
+
+
+def test_normalize_test_whitespace_strips_trailing() -> None:
+    original = "line1\nline2\n"
+    generated = "line1   \nline2  \n"
+    result = _normalize_test_whitespace(generated, original)
+    assert "line1   " not in result
+    assert "line1\n" in result
+
+
+def test_normalize_test_whitespace_ensures_trailing_newline() -> None:
+    original = "line1\n"
+    generated = "line1"
+    result = _normalize_test_whitespace(generated, original)
+    assert result.endswith("\n")
+
+
+# ---------------------------------------------------------------------------
+# _strip_issue_shas
+# ---------------------------------------------------------------------------
+
+def test_strip_issue_shas_strips_all_hex() -> None:
+    text = "See commit abcdef1234567 for details."
+    result = _strip_issue_shas(text)
+    assert "abcdef1234567" not in result
+
+
+def test_strip_issue_shas_strips_parenthesized() -> None:
+    text = "the recent merge from stable (3a9d54f) broke things"
+    result = _strip_issue_shas(text)
+    assert "3a9d54f" not in result
+
+
+def test_strip_issue_shas_preserves_short_hex() -> None:
+    text = "Error code abc12 returned."
+    result = _strip_issue_shas(text)
+    assert result == text
