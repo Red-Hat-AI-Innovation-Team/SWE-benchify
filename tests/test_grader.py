@@ -9,6 +9,7 @@ synthetic go test -json fixture output.
 from __future__ import annotations
 
 import json
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -273,7 +274,7 @@ class TestGradeInputFormats:
         assert isinstance(result, GradeResult)
 
     def test_accepts_list_f2p_p2p(self) -> None:
-        inst = dict(_INSTANCE)
+        inst: dict[str, Any] = dict(_INSTANCE)
         inst["FAIL_TO_PASS"] = ["TestHTTPSubPath", "TestLearnerReadyCheck"]
         inst["PASS_TO_PASS"] = ["TestServeHealth"]
         with _mock_grade(_GOLD_OUTPUT):
@@ -586,7 +587,7 @@ class TestComputeF2PFunction:
         ):
             result = compute_f2p("etcd-io/etcd", "abc123", self._FAKE_TEST_PATCH, "gold")
         assert result.status == "error"
-        assert "timed out" in result.error_message
+        assert result.error_message is not None and "timed out" in result.error_message
 
     def test_successful_run(self) -> None:
         pre = _failing_output(_PKG, "TestHTTPSubPath")

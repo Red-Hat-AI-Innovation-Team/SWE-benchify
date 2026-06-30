@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from swebenchify.models import RustEnvironmentSpec, compute_rust_env_spec_hash
 from swebenchify.rust_registry import RustSpecRegistry
 
@@ -10,8 +12,8 @@ from swebenchify.rust_registry import RustSpecRegistry
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_spec(**overrides) -> RustEnvironmentSpec:
-    defaults = dict(
+def _make_spec(**overrides: Any) -> RustEnvironmentSpec:
+    defaults: dict[str, Any] = dict(
         language="rust",
         rust_version="1.84",
         build_cmd="cargo build",

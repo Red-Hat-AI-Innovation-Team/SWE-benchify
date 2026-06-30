@@ -81,7 +81,7 @@ def is_test_file(path: str) -> bool:
     return False
 
 
-def split_patch(diff_text: str) -> tuple[str | None, str | None]:
+def split_patch(diff_text: str | None) -> tuple[str | None, str | None]:
     """Split a unified diff into a gold patch and a test patch.
 
     Hunks from test files (identified by :func:`is_test_file`) go into the

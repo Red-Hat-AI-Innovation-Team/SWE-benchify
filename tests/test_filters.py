@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 
 from swebenchify.config import FilterConfig
@@ -16,9 +17,9 @@ from swebenchify.filters import (
 from swebenchify.models import TaskInstance
 
 
-def _make_instance(**overrides) -> TaskInstance:
+def _make_instance(**overrides: Any) -> TaskInstance:
     """Build a TaskInstance with sensible defaults that pass all filters."""
-    defaults = {
+    defaults: dict[str, Any] = {
         "repo": "owner/repo",
         "instance_id": "owner__repo-1",
         "base_commit": "abc123",

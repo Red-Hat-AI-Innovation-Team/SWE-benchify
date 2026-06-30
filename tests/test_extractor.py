@@ -416,6 +416,7 @@ class TestRustInlineTestSplitting:
     def test_extracts_inline_test_hunk(self) -> None:
         from swebenchify.backends import get_backend, refine_patch_split
         backend = get_backend("rust")
+        assert backend is not None
         new_gold, new_test = refine_patch_split(self.MIXED_RS_DIFF, None, backend)
         assert new_gold is not None
         assert new_test is not None
@@ -435,7 +436,9 @@ class TestRustInlineTestSplitting:
             +fn test_integration() {}
         """)
         backend = get_backend("rust")
+        assert backend is not None
         new_gold, new_test = refine_patch_split(self.MIXED_RS_DIFF, existing_test, backend)
+        assert new_test is not None
         assert "integration.rs" in new_test
         assert "test_add" in new_test
 
@@ -452,6 +455,7 @@ class TestRustInlineTestSplitting:
              }
         """)
         backend = get_backend("rust")
+        assert backend is not None
         new_gold, new_test = refine_patch_split(gold, None, backend)
         assert new_gold is not None
         assert new_test is None
@@ -469,6 +473,7 @@ class TestRustInlineTestSplitting:
              z = 3
         """)
         backend = get_backend("rust")
+        assert backend is not None
         new_gold, new_test = refine_patch_split(gold, None, backend)
         assert new_gold is not None
         assert new_test is None
@@ -476,6 +481,7 @@ class TestRustInlineTestSplitting:
     def test_no_backend_callback_passthrough(self) -> None:
         from swebenchify.backends import get_backend, refine_patch_split
         go_backend = get_backend("go")
+        assert go_backend is not None
         new_gold, new_test = refine_patch_split(self.MIXED_RS_DIFF, None, go_backend)
         assert new_gold == self.MIXED_RS_DIFF
         assert new_test is None
@@ -502,6 +508,7 @@ class TestRustInlineTestSplitting:
              }
         """)
         backend = get_backend("rust")
+        assert backend is not None
         new_gold, new_test = refine_patch_split(gold, None, backend)
         assert new_gold is not None
         assert new_test is not None
