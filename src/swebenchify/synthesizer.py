@@ -118,6 +118,16 @@ class BugSpec:
 
 
 @dataclasses.dataclass
+class BugPlan:
+    """Plan for a coordinated multi-file bug."""
+
+    primary_description: str
+    secondary_descriptions: list[dict[str, str]] = dataclasses.field(
+        default_factory=list,
+    )
+
+
+@dataclasses.dataclass
 class SynthesisResult:
     """Result of synthesizing a single bug instance."""
 
@@ -392,7 +402,13 @@ def _find_related_files(
     language: str,
     max_files: int = 3,
 ) -> list[dict[str, str]]:
-    """Find source files that reference the target function.
+    """Find source files related to the target by imports, importers, and tests.
+
+    Scans for:
+    - Files that import the target module
+    - Files that the target module imports
+    - Test files for the target module
+    - Files that reference the target function by name
 
     Returns a list of dicts with 'file' (relative path) and 'snippet'
     (the lines around each reference).
@@ -402,50 +418,181 @@ def _find_related_files(
     root = Path(repo_path)
     extensions = _LANGUAGE_EXTENSIONS.get(language, [])
     related: list[dict[str, str]] = []
-
-    try:
-        result = subprocess.run(
-            ["grep", "-rn", "--include=*" + extensions[0], func_name, "."],
-            cwd=repo_path, capture_output=True, text=True, timeout=10,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return []
-
     seen_files: set[str] = set()
-    for line in result.stdout.splitlines():
-        if not line.startswith("./"):
-            continue
-        parts = line.split(":", 2)
-        if len(parts) < 3:
-            continue
-        rel_path = parts[0][2:]  # strip leading ./
-        if rel_path == target_file:
-            continue
-        if _should_exclude(rel_path, language):
-            continue
-        if rel_path in seen_files:
-            continue
-        seen_files.add(rel_path)
 
+    def _add_file_snippet(
+        rel_path: str, context_line: int = 0,
+    ) -> None:
+        if rel_path in seen_files or rel_path == target_file:
+            return
         full_path = root / rel_path
         if not full_path.is_file():
-            continue
+            return
         try:
             content = full_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
-            continue
-
-        line_num = int(parts[1]) - 1
+            return
+        seen_files.add(rel_path)
         lines = content.splitlines()
-        start = max(0, line_num - 5)
-        end = min(len(lines), line_num + 15)
+        start = max(0, context_line - 5)
+        end = min(len(lines), context_line + 15)
         snippet = "\n".join(lines[start:end])
-
         related.append({"file": rel_path, "snippet": snippet})
-        if len(related) >= max_files:
-            break
+
+    if language == "python":
+        target_module = _source_to_module_name(target_file)
+        if target_module:
+            target_parts = target_module.split(".")
+
+            try:
+                target_content = (root / target_file).read_text(
+                    encoding="utf-8", errors="replace",
+                )
+                for m in re.finditer(
+                    r"^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))",
+                    target_content, re.MULTILINE,
+                ):
+                    imported = m.group(1) or m.group(2)
+                    imp_parts = imported.split(".")
+                    if _is_repo_module(
+                        imp_parts, root, _discover_repo_modules(repo_path),
+                    ):
+                        imp_path = "/".join(imp_parts) + ".py"
+                        for prefix in ("", "src/"):
+                            candidate = prefix + imp_path
+                            if (root / candidate).is_file():
+                                _add_file_snippet(candidate)
+                                break
+                    if len(related) >= max_files:
+                        break
+            except OSError:
+                pass
+
+            for test_dir_name in ("tests", "test"):
+                test_dir = root / test_dir_name
+                if not test_dir.is_dir():
+                    continue
+                for f in sorted(test_dir.rglob("test_*.py")):
+                    if len(related) >= max_files:
+                        break
+                    try:
+                        content = f.read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        continue
+                    if any(
+                        p in content
+                        for p in (target_module, ".".join(target_parts[:-1]))
+                        if p
+                    ):
+                        _add_file_snippet(str(f.relative_to(root)))
+
+    if len(related) < max_files:
+        try:
+            result = subprocess.run(
+                ["grep", "-rn", "--include=*" + extensions[0], func_name, "."],
+                cwd=repo_path, capture_output=True, text=True, timeout=10,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return related
+
+        for line in result.stdout.splitlines():
+            if len(related) >= max_files:
+                break
+            if not line.startswith("./"):
+                continue
+            parts = line.split(":", 2)
+            if len(parts) < 3:
+                continue
+            rel_path = parts[0][2:]
+            if _should_exclude(rel_path, language):
+                continue
+            line_num = int(parts[1]) - 1
+            _add_file_snippet(rel_path, line_num)
 
     return related
+
+
+async def _plan_multi_file_mutation(
+    target_func_code: str,
+    related_files: list[dict[str, str]],
+    model: str = "sonnet",
+) -> BugPlan | None:
+    """Plan a coordinated bug that spans multiple files.
+
+    Uses an LLM call to analyze the target function and related files,
+    then plans a bug that requires changes in at least 2 files.
+
+    Returns a BugPlan, or None if the LLM call fails.
+    """
+    if not related_files:
+        return None
+
+    related_context = "\n\n".join(
+        f"File `{rf['file']}`:\n```\n{rf['snippet']}\n```"
+        for rf in related_files[:3]
+    )
+
+    prompt = f"""You are planning a bug that spans multiple files. The primary bug is in the target function, but it MUST also require a corresponding change in at least one related file. Examples of cross-file bugs: function A changes its return type but caller B still expects the old type; module C removes a validation that module D depends on; a config default changes in one file but the code using it in another file assumes the old default.
+
+Target function:
+```
+{target_func_code}
+```
+
+Related files:
+{related_context}
+
+Plan a coordinated bug. Return your plan in this format:
+
+<primary>
+One sentence describing the primary bug to introduce in the target function.
+</primary>
+
+For each related file that should also be changed:
+<secondary>
+<sec_file>relative/path/to/file</sec_file>
+<sec_plan>One sentence describing the corresponding change needed in this file.</sec_plan>
+</secondary>
+
+The bug must be COORDINATED: fixing only the primary file should leave the codebase in an inconsistent state. The gold patch must fix ALL files."""
+
+    resolved_model = MODEL_MAP.get(model, model)
+    options = ClaudeCodeOptions(max_turns=1, model=resolved_model)
+
+    result_text: str | None = None
+    try:
+        async for message in query(prompt=prompt, options=options):
+            if isinstance(message, ResultMessage):
+                result_text = _extract_text_from_result(message)
+    except Exception:
+        logger.warning("LLM call failed for multi-file mutation planning")
+        return None
+
+    if not result_text:
+        return None
+
+    primary_match = re.search(
+        r"<primary>\s*(.*?)\s*</primary>", result_text, re.DOTALL,
+    )
+    if not primary_match:
+        return None
+
+    plan = BugPlan(primary_description=primary_match.group(1).strip())
+
+    for m in re.finditer(
+        r"<secondary>\s*"
+        r"<sec_file>\s*(.*?)\s*</sec_file>\s*"
+        r"<sec_plan>\s*(.*?)\s*</sec_plan>\s*"
+        r"</secondary>",
+        result_text,
+        re.DOTALL,
+    ):
+        plan.secondary_descriptions.append({
+            "file": m.group(1).strip(),
+            "plan": m.group(2).strip(),
+        })
+
+    return plan
 
 
 def _validate_mutation_parses(code: str, language: str) -> bool:
@@ -1152,14 +1299,20 @@ async def generate_issue_from_symptom(
     if test_output:
         test_context = f"\n\nTest output that may be relevant:\n```\n{test_output[:2000]}\n```"
 
+    char_budget = random.randint(300, 1000)
+
     style_section = ""
     if style_examples:
         examples_text = "\n".join(f"  - {t}" for t in style_examples[:3])
-        style_section = f"\n\nHere are real issue titles from this project for style reference:\n{examples_text}\nMatch this project's tone and terminology.\n"
+        style_section = f"\n\nHere are real issues from this project. Match their length and tone exactly:\n{examples_text}\n"
+    else:
+        style_section = "\n\nWrite a short, frustrated bug report. No headers. No structured format. Just describe the problem like a developer posting quickly.\n"
 
     general_area = symptom.split(".")[0] if "." in symptom else symptom
 
     prompt = f"""Write a GitHub issue report for a bug. A user observed this symptom: {symptom}
+
+Your ENTIRE response must be under {char_budget} characters. Be CONCISE — real bug reports are short.
 
 You are a frustrated user who hit this problem. You do NOT know the root cause, the specific code involved, or the fix. You only know what broke from the outside.
 {test_context}
@@ -1168,30 +1321,7 @@ Environment context:
 - Python/language version: {lang_version}
 - OS: {os_info}
 {style_section}
-CRITICAL REQUIREMENTS — read carefully:
-
-1. Describe DOWNSTREAM SYMPTOMS ONLY. You do NOT know the root cause — you know ONLY what broke from the outside: wrong output, unexpected error, corrupted data, broken rendering. Do NOT walk through the source code, do NOT trace the logic, do NOT identify which function or condition is wrong. A developer reading this issue should have to investigate to find the bug.
-
-2. Include 1-2 WRONG GUESSES about the cause that you DON'T resolve. Real reporters guess wrong. Example: "maybe it's a caching issue?" or "could be related to the recent dependency update" — and then NEVER follow up on whether those guesses are right. Leave them dangling.
-
-3. Do NOT include any EDIT, UPDATE, or temporal sections. Write a single post. No "---" separators, no follow-ups, no "EDIT: I found..." sections. These temporal structures are a strong synthetic signal.
-
-4. Pick ONE messy structure — do NOT follow problem→debug→reproduce→diagnose:
-   - ERROR FIRST: Start with the raw error/traceback, THEN provide context
-   - QUESTION FIRST: Open with a question ("Is this expected?"), then details
-   - REPRODUCTION FIRST: Jump into "Steps: 1. ..." with minimal preamble
-   - RAMBLING: Start one symptom, digress, circle back, mention another symptom
-   Do NOT start with a clean problem description. Lead with whatever's most salient: the error, a question, or the reproduction steps.
-
-5. Include realistic error output — a partial stack trace, log snippet, or test failure. Copy-paste style from a terminal, not clean markdown. Truncate with "..." like a real user would.
-
-6. Sound like a frustrated real person. Mix prose and code naturally. Don't use perfect Expected/Actual/Steps headers. Include typos, half-finished thoughts, or informal language. Do NOT write a well-organized technical report.
-
-7. Do NOT invent issue numbers, contributor names, commit SHAs, or external links. Do NOT reference any specific commits at all — real bug reporters rarely know specific commit hashes.
-
-8. Do NOT mention specific source file names, function names, line numbers, or the exact code fix. The issue must NOT predict or map to the patch. A reader should NOT be able to guess the one-line fix from reading the issue.
-
-9. Do NOT use the EXACT version number "{version}" if it looks like a future/unreleased version. Reference it vaguely ("latest release", "current main", "3.x").
+Do NOT mention specific source file names, function names, line numbers, or the exact code fix. Do NOT invent issue numbers, contributor names, commit SHAs, or external links.
 
 Format: start with "## " title, then the body."""
 
@@ -1220,94 +1350,93 @@ Format: start with "## " title, then the body."""
 
     result_text = _strip_issue_shas(result_text)
 
-    # Critique-rewrite loop: detect and fix synthetic tells
-    result_text = await _critique_and_rewrite_issue(result_text, model=model)
+    result_text = _enforce_banned_openers(result_text)
+
+    if len(result_text) > 1500:
+        result_text = _truncate_issue(result_text)
 
     return result_text
 
 
-async def _critique_and_rewrite_issue(
-    issue_text: str,
-    model: str = "sonnet",
-) -> str:
-    """Run a critique-rewrite loop on a generated issue description.
+_BANNED_OPENERS = [
+    'is this expected',
+    "here's what i'm seeing",
+    'i noticed that',
+    "i'm experiencing",
+    'i was trying to',
+]
 
-    Makes a second LLM call to detect synthetic tells, and if flags are
-    found, a third call to rewrite the flagged sections.
-    """
-    resolved_model = MODEL_MAP.get(model, model)
-    options = ClaudeCodeOptions(max_turns=1, model=resolved_model)
+_REPLACEMENT_OPENERS = [
+    'Has anyone else hit this?',
+    'Bug:',
+    'This broke after',
+    'Getting a weird',
+    'Not sure if this is right but',
+]
 
-    critique_prompt = f"""You are a synthetic-content detector. Analyze this GitHub issue and flag any phrases that:
-1. Reveal the reporter knows the root cause (e.g., identifying specific functions, conditions, or operators)
-2. Follow a perfect problem → diagnosis → solution arc
-3. Use developer terminology a typical user wouldn't know (e.g., specific exception class names, internal API details)
-4. Reference specific function names, file names, or line numbers
-5. Have an unnaturally clean structure (perfect headers, organized sections)
-6. Sound like technical documentation rather than a frustrated user
 
-Issue to analyze:
----
-{issue_text}
----
+def _enforce_banned_openers(text: str) -> str:
+    """Replace formulaic openers with more natural alternatives."""
+    lines = text.split('\n')
+    first_content_idx = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped and not stripped.startswith('## '):
+            first_content_idx = i
+            break
 
-If you find ANY flags, return them in this format:
-<flags>
-<flag>exact quoted phrase that is suspicious</flag>
-<flag>another suspicious phrase</flag>
-</flags>
+    first_line = lines[first_content_idx] if first_content_idx < len(lines) else ''
+    first_lower = first_line.strip().lower()
 
-If the issue reads like a genuine user report with no synthetic tells, return:
-<no_flags/>"""
+    for banned in _BANNED_OPENERS:
+        if first_lower.startswith(banned):
+            replacement = random.choice(_REPLACEMENT_OPENERS)
+            rest = first_line.strip()[len(banned):].lstrip(' ,.-:')
+            lines[first_content_idx] = f"{replacement} {rest}" if rest else replacement
+            break
 
-    critique_text: str | None = None
-    try:
-        async for message in query(prompt=critique_prompt, options=options):
-            if isinstance(message, ResultMessage):
-                critique_text = _extract_text_from_result(message)
-    except Exception:
-        logger.warning("Critique LLM call failed, keeping original issue")
-        return issue_text
+    return '\n'.join(lines)
 
-    if not critique_text or "<no_flags/>" in critique_text:
-        return issue_text
 
-    flags = re.findall(r"<flag>(.*?)</flag>", critique_text, re.DOTALL)
-    if not flags:
-        return issue_text
+def _truncate_issue(text: str) -> str:
+    """Keep only the first paragraph and first code block."""
+    lines = text.split('\n')
+    result_lines: list[str] = []
+    found_paragraph = False
+    in_code_block = False
+    found_code_block = False
 
-    flags_text = "\n".join(f"- {f.strip()}" for f in flags)
-    logger.info("  Critique found %d flags, rewriting issue", len(flags))
+    for line in lines:
+        if line.strip().startswith('## '):
+            result_lines.append(line)
+            continue
 
-    rewrite_prompt = f"""Rewrite this GitHub issue to fix the flagged synthetic tells. The reporter is a CONFUSED user who does NOT know the root cause.
+        if line.strip().startswith('```') and not in_code_block and not found_code_block:
+            in_code_block = True
+            result_lines.append(line)
+            continue
 
-Original issue:
----
-{issue_text}
----
+        if in_code_block:
+            result_lines.append(line)
+            if line.strip().startswith('```'):
+                in_code_block = False
+                found_code_block = True
+            continue
 
-Flagged phrases (these betray root-cause knowledge or sound synthetic):
-{flags_text}
+        if not found_paragraph:
+            result_lines.append(line)
+            if line.strip() == '' and any(rl.strip() for rl in result_lines):
+                found_paragraph = True
+            continue
 
-For each flagged phrase:
-- If it reveals root-cause knowledge: replace with genuine confusion, a wrong guess, or just remove it
-- If it uses developer jargon: replace with user-level language ("it crashes", "gives wrong output", "breaks")
-- If it's too structured: make it messier — interrupt the thought, add a tangent, or merge sections
+        if found_paragraph and not found_code_block:
+            if line.strip().startswith('```'):
+                in_code_block = True
+                result_lines.append(line)
+                continue
+            continue
 
-Return ONLY the rewritten issue text. Keep the "## " title format."""
-
-    rewritten: str | None = None
-    try:
-        async for message in query(prompt=rewrite_prompt, options=options):
-            if isinstance(message, ResultMessage):
-                rewritten = _extract_text_from_result(message)
-    except Exception:
-        logger.warning("Rewrite LLM call failed, keeping original issue")
-        return issue_text
-
-    if rewritten:
-        return _strip_issue_shas(rewritten)
-    return issue_text
+    return '\n'.join(result_lines)
 
 
 async def generate_issue_description(
@@ -2115,6 +2244,12 @@ async def synthesize_repo(
         if related_files:
             logger.info("  Found %d related files", len(related_files))
 
+        bug_plan = await _plan_multi_file_mutation(
+            target["source"], related_files, model=model,
+        )
+        if bug_plan:
+            logger.info("  Multi-file plan: %s", bug_plan.primary_description[:80])
+
         # H2: retry introduce_bug up to 2 times if patch is too simple
         bug_spec = None
         patch = ""
@@ -2168,18 +2303,23 @@ async def synthesize_repo(
                 break
 
             changed = _count_changed_lines(patch)
-            if changed >= 3:
+            if changed >= 8 and len(patch) >= 1000:
                 break
             if attempt < 2:
+                reason = []
+                if changed < 8:
+                    reason.append(f"{changed} changed lines < 8")
+                if len(patch) < 1000:
+                    reason.append(f"{len(patch)} chars < 1000")
                 logger.info(
-                    "  Patch too simple (%d changed lines), retrying (%d/2)",
-                    changed, attempt + 1,
+                    "  Patch too simple (%s), retrying (%d/2)",
+                    ", ".join(reason), attempt + 1,
                 )
                 bug_spec = None
             else:
                 logger.warning(
-                    "  Patch still too simple after retries (%d changed lines), accepting",
-                    changed,
+                    "  Patch still below targets after retries (%d lines, %d chars), accepting",
+                    changed, len(patch),
                 )
 
         if bug_spec is None:
@@ -2201,13 +2341,33 @@ async def synthesize_repo(
             if sc.original_snippet not in sec_content:
                 logger.warning("  Secondary snippet not found in %s", sc.file)
                 continue
-            # Replace correct code with buggy version in secondary file
             sec_buggy = sec_content.replace(sc.original_snippet, sc.buggy_snippet, 1)
             if sec_buggy != sec_content:
-                # Gold patch: buggy → correct (same direction as primary)
                 patch += generate_patch(sec_content, sec_buggy, sc.file)
                 buggy_files[sc.file] = sec_buggy
                 logger.info("  Secondary change in %s: %s", sc.file, sc.description)
+
+        if len(buggy_files) < 2 and related_files:
+            logger.info("  Only %d file changed, retrying with explicit multi-file instruction", len(buggy_files))
+            retry_spec = await introduce_bug(
+                target, model=model, related_files=related_files,
+            )
+            if retry_spec and retry_spec.secondary_changes:
+                for sc in retry_spec.secondary_changes:
+                    sec_path = Path(repo_path) / sc.file
+                    if not sec_path.is_file():
+                        continue
+                    try:
+                        sec_content = sec_path.read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        continue
+                    if sc.original_snippet not in sec_content:
+                        continue
+                    sec_buggy = sec_content.replace(sc.original_snippet, sc.buggy_snippet, 1)
+                    if sec_buggy != sec_content:
+                        patch += generate_patch(sec_content, sec_buggy, sc.file)
+                        buggy_files[sc.file] = sec_buggy
+                        logger.info("  Retry secondary change in %s", sc.file)
 
         patched_files: set[str] = {bug_spec.file} | set(buggy_files.keys())
         ctx = _collect_repo_context(repo_path)

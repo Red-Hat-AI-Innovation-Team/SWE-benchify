@@ -8,12 +8,14 @@ from pathlib import Path
 import pytest
 
 from swebenchify.synthesizer import (
+    BugPlan,
     BugSpec,
     SynthesisResult,
     _collect_repo_context,
     _count_changed_lines,
     _discover_repo_modules,
     _edge_case_score,
+    _enforce_banned_openers,
     _find_existing_test_file,
     _find_file_commits,
     _find_related_files,
@@ -29,6 +31,7 @@ from swebenchify.synthesizer import (
     _source_to_module_name,
     _strip_strategy_labels,
     _strip_issue_shas,
+    _truncate_issue,
     _validate_mutation_parses,
     _validate_rst_references,
     _validate_test_code,
@@ -962,8 +965,7 @@ def test_issue_description_has_context(tmp_path: Path) -> None:
             bug_spec, repo_path=str(tmp_path),
         ))
 
-    # First call is _bug_to_symptom, second is issue generation,
-    # third is critique (may or may not happen depending on fallback path)
+    # First call is _bug_to_symptom, second is issue generation
     assert len(captured_prompts) >= 2
     symptom_prompt = captured_prompts[0]
     assert "user-facing symptom" in symptom_prompt
@@ -1473,65 +1475,7 @@ def test_count_changed_lines_empty() -> None:
     assert _count_changed_lines("") == 0
 
 
-# ---------------------------------------------------------------------------
-# _critique_and_rewrite_issue
-# ---------------------------------------------------------------------------
-
-def test_critique_rewrite_no_flags() -> None:
-    """If critique finds no flags, issue is returned unchanged."""
-    from unittest.mock import MagicMock, patch as mock_patch
-
-    call_count = 0
-
-    async def fake_query(prompt: str, options: object = None):
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            # Critique returns no flags
-            result = MagicMock()
-            result.content = [type("B", (), {"text": "<no_flags/>"})()]
-            yield result
-        return
-
-    with mock_patch("swebenchify.synthesizer.query", fake_query), \
-         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()), \
-         mock_patch("swebenchify.synthesizer.ResultMessage", MagicMock()):
-        import asyncio
-        from swebenchify.synthesizer import _critique_and_rewrite_issue
-        result = asyncio.run(_critique_and_rewrite_issue("## Bug\nSomething is broken"))
-
-    assert result == "## Bug\nSomething is broken"
-
-
-def test_critique_rewrite_with_flags() -> None:
-    """If critique finds flags, rewrite call is made."""
-    from unittest.mock import MagicMock, patch as mock_patch
-
-    call_count = 0
-
-    class FakeResult:
-        pass
-
-    async def fake_query(prompt: str, options: object = None):
-        nonlocal call_count
-        call_count += 1
-        msg = FakeResult()
-        if call_count == 1:
-            msg.content = [type("B", (), {"text": "<flags>\n<flag>the process_data function</flag>\n</flags>"})()]
-        elif call_count == 2:
-            msg.content = [type("B", (), {"text": "## Bug\nSomething is broken and I have no idea why"})()]
-        yield msg
-        return
-
-    with mock_patch("swebenchify.synthesizer.query", fake_query), \
-         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()), \
-         mock_patch("swebenchify.synthesizer.ResultMessage", FakeResult):
-        import asyncio
-        from swebenchify.synthesizer import _critique_and_rewrite_issue
-        result = asyncio.run(_critique_and_rewrite_issue("## Bug\nthe process_data function is broken"))
-
-    assert call_count == 2
-    assert "no idea why" in result
+    # (critique-rewrite tests removed: _critique_and_rewrite_issue was deleted in H1)
 
 
 # ---------------------------------------------------------------------------
@@ -1789,3 +1733,287 @@ def test_run_tests_on_buggy_code_captures_failure(tmp_path: Path) -> None:
 def test_run_tests_on_buggy_code_no_repo(tmp_path: Path) -> None:
     result = _run_tests_on_buggy_code(str(tmp_path), "fake_sha", "python")
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# H1: _critique_and_rewrite_issue is removed
+# ---------------------------------------------------------------------------
+
+def test_critique_and_rewrite_issue_is_removed() -> None:
+    """Verify _critique_and_rewrite_issue no longer exists."""
+    import swebenchify.synthesizer as mod
+    assert not hasattr(mod, "_critique_and_rewrite_issue")
+
+
+# ---------------------------------------------------------------------------
+# H1: _enforce_banned_openers
+# ---------------------------------------------------------------------------
+
+def test_enforce_banned_openers_replaces() -> None:
+    text = "## Title\nIs this expected behavior when parsing configs?"
+    result = _enforce_banned_openers(text)
+    assert not result.split("\n")[1].lower().startswith("is this expected")
+
+
+def test_enforce_banned_openers_no_match() -> None:
+    text = "## Title\nSomething completely different happened."
+    result = _enforce_banned_openers(text)
+    assert "Something completely different happened." in result
+
+
+def test_enforce_banned_openers_case_insensitive() -> None:
+    text = "I noticed that the output is wrong."
+    result = _enforce_banned_openers(text)
+    assert not result.lower().startswith("i noticed that")
+
+
+def test_enforce_banned_openers_im_experiencing() -> None:
+    text = "## Bug\nI'm experiencing crashes when loading data"
+    result = _enforce_banned_openers(text)
+    assert not result.split("\n")[1].lower().startswith("i'm experiencing")
+
+
+def test_enforce_banned_openers_i_was_trying_to() -> None:
+    text = "I was trying to import the module and it failed"
+    result = _enforce_banned_openers(text)
+    assert not result.lower().startswith("i was trying to")
+
+
+# ---------------------------------------------------------------------------
+# H1: _truncate_issue
+# ---------------------------------------------------------------------------
+
+def test_truncate_issue_keeps_first_paragraph_and_code() -> None:
+    text = (
+        "## Bug report\n"
+        "First paragraph of text.\n"
+        "\n"
+        "Second paragraph should be dropped.\n"
+        "\n"
+        "```python\nprint('hello')\n```\n"
+        "\n"
+        "Third paragraph also dropped."
+    )
+    result = _truncate_issue(text)
+    assert "First paragraph" in result
+    assert "print('hello')" in result
+    assert "Third paragraph" not in result
+
+
+def test_truncate_issue_keeps_title() -> None:
+    text = "## Title\nSome text.\n\nMore text.\n\nEven more."
+    result = _truncate_issue(text)
+    assert "## Title" in result
+    assert "Some text." in result
+
+
+# ---------------------------------------------------------------------------
+# H1: generate_issue_from_symptom — character budget in prompt
+# ---------------------------------------------------------------------------
+
+def test_generate_issue_from_symptom_has_char_budget() -> None:
+    """Verify char budget instruction appears in the prompt."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import generate_issue_from_symptom
+        asyncio.run(generate_issue_from_symptom(
+            symptom="parsing breaks on unicode",
+        ))
+
+    assert len(captured_prompts) >= 1
+    prompt = captured_prompts[0]
+    assert "characters" in prompt.lower()
+    assert "CONCISE" in prompt
+
+
+def test_generate_issue_from_symptom_no_critical_requirements() -> None:
+    """Verify the CRITICAL REQUIREMENTS block is gone from the prompt."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import generate_issue_from_symptom
+        asyncio.run(generate_issue_from_symptom(
+            symptom="test symptom",
+        ))
+
+    prompt = captured_prompts[0]
+    assert "CRITICAL REQUIREMENTS" not in prompt
+
+
+def test_generate_issue_from_symptom_no_structure_templates() -> None:
+    """Verify the 4 structure options (ERROR FIRST etc.) are gone."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import generate_issue_from_symptom
+        asyncio.run(generate_issue_from_symptom(
+            symptom="test symptom",
+        ))
+
+    prompt = captured_prompts[0]
+    assert "ERROR FIRST" not in prompt
+    assert "QUESTION FIRST" not in prompt
+    assert "REPRODUCTION FIRST" not in prompt
+    assert "RAMBLING" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# H2: _find_related_files — import scanning
+# ---------------------------------------------------------------------------
+
+def test_find_related_files_finds_importers(tmp_path: Path) -> None:
+    """Finds files that import the target module."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "mypackage").mkdir()
+    (tmp_path / "mypackage" / "__init__.py").write_text("")
+    (tmp_path / "mypackage" / "core.py").write_text(
+        "def process(x):\n    return x + 1\n"
+    )
+    (tmp_path / "mypackage" / "api.py").write_text(
+        "from mypackage.core import process\n\ndef handle():\n    return process(42)\n"
+    )
+
+    target = {
+        "function_name": "process",
+        "file": "mypackage/core.py",
+    }
+    related = _find_related_files(str(tmp_path), target, "python")
+    files = [r["file"] for r in related]
+    assert "mypackage/api.py" in files
+
+
+def test_find_related_files_finds_imports_of_target(tmp_path: Path) -> None:
+    """Finds files imported by the target module."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "mypackage").mkdir()
+    (tmp_path / "mypackage" / "__init__.py").write_text("")
+    (tmp_path / "mypackage" / "utils.py").write_text(
+        "def helper():\n    return 0\n"
+    )
+    (tmp_path / "mypackage" / "core.py").write_text(
+        "from mypackage.utils import helper\n\ndef process(x):\n    return helper() + x\n"
+    )
+
+    target = {
+        "function_name": "process",
+        "file": "mypackage/core.py",
+    }
+    related = _find_related_files(str(tmp_path), target, "python")
+    files = [r["file"] for r in related]
+    assert "mypackage/utils.py" in files
+
+
+def test_find_related_files_finds_test_files(tmp_path: Path) -> None:
+    """Finds test files for the target module."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "mypackage").mkdir()
+    (tmp_path / "mypackage" / "__init__.py").write_text("")
+    (tmp_path / "mypackage" / "core.py").write_text(
+        "def process(x):\n    return x + 1\n"
+    )
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_core.py").write_text(
+        "from mypackage.core import process\n\ndef test_process():\n    assert process(1) == 2\n"
+    )
+
+    target = {
+        "function_name": "process",
+        "file": "mypackage/core.py",
+    }
+    related = _find_related_files(str(tmp_path), target, "python")
+    files = [r["file"] for r in related]
+    assert "tests/test_core.py" in files
+
+
+# ---------------------------------------------------------------------------
+# H2: _plan_multi_file_mutation — prompt construction
+# ---------------------------------------------------------------------------
+
+def test_plan_multi_file_mutation_prompt() -> None:
+    """Verify prompt is constructed correctly with target and related files."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import _plan_multi_file_mutation
+        result = asyncio.run(_plan_multi_file_mutation(
+            target_func_code="def process(x):\n    return x + 1",
+            related_files=[
+                {"file": "api.py", "snippet": "from core import process"},
+            ],
+        ))
+
+    assert len(captured_prompts) == 1
+    prompt = captured_prompts[0]
+    assert "def process(x)" in prompt
+    assert "api.py" in prompt
+    assert "spans multiple files" in prompt
+    assert result is None  # fake_query returns nothing
+
+
+def test_plan_multi_file_mutation_returns_none_without_related() -> None:
+    """Returns None when no related files are provided."""
+    import asyncio
+    from swebenchify.synthesizer import _plan_multi_file_mutation
+    result = asyncio.run(_plan_multi_file_mutation(
+        target_func_code="def foo(): pass",
+        related_files=[],
+    ))
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# H2: BugPlan dataclass
+# ---------------------------------------------------------------------------
+
+def test_bugplan_defaults() -> None:
+    plan = BugPlan(primary_description="change return type")
+    assert plan.primary_description == "change return type"
+    assert plan.secondary_descriptions == []
+
+
+def test_bugplan_with_secondaries() -> None:
+    plan = BugPlan(
+        primary_description="primary bug",
+        secondary_descriptions=[
+            {"file": "api.py", "plan": "update caller"},
+        ],
+    )
+    assert len(plan.secondary_descriptions) == 1
+    assert plan.secondary_descriptions[0]["file"] == "api.py"
