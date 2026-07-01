@@ -3661,3 +3661,54 @@ def test_align_indentation_noop_when_matching() -> None:
 def test_align_indentation_empty_code() -> None:
     assert _align_indentation("", "def foo(): pass") == "def foo(): pass"
     assert _align_indentation("def foo(): pass", "") == ""
+
+
+def test_align_indentation_normalizes_blank_lines() -> None:
+    original = "    def foo():\n        x = 1\n\n        return x"
+    buggy = "def foo():\n    x = 2\n    \n    return x"
+    result = _align_indentation(original, buggy)
+    lines = result.split('\n')
+    assert lines[2] == ''
+
+
+def test_synthesize_repo_skips_candidate_without_test_failures() -> None:
+    """Candidates without valid test output are skipped (data-first path required)."""
+    from unittest.mock import AsyncMock, patch
+    import asyncio
+
+    target = {
+        "file": "src/foo.py",
+        "function_name": "bar",
+        "source": "def bar():\n    return 1\n",
+        "start_line": 1,
+        "end_line": 2,
+        "language": "python",
+    }
+
+    from swebenchify.synthesizer import synthesize_repo
+
+    with (
+        patch("swebenchify.synthesizer.find_mutation_targets", return_value=[target]),
+        patch("swebenchify.synthesizer._find_existing_test_file", return_value="tests/test_foo.py"),
+        patch("swebenchify.synthesizer._find_related_files", return_value=[]),
+        patch("swebenchify.synthesizer._plan_multi_file_mutation", new_callable=AsyncMock, return_value=BugPlan(primary_description="change return value")),
+        patch("swebenchify.synthesizer.introduce_bug", new_callable=AsyncMock, return_value=BugSpec(
+            file="src/foo.py",
+            function_name="bar",
+            original_code="def bar():\n    return 1\n",
+            buggy_code="def bar():\n    return 0\n",
+            bug_description="returns wrong value",
+            bug_category="logic",
+        )),
+        patch("swebenchify.synthesizer._create_buggy_commit_multi", return_value="abc123"),
+        patch("swebenchify.synthesizer._run_tests_on_buggy_code", return_value=None),
+        patch("swebenchify.synthesizer._load_dataset_examples", return_value=[]),
+    ):
+        result = asyncio.run(synthesize_repo(
+            repo_path="/tmp/fake",
+            repo_slug="test/repo",
+            base_commit="abc123",
+            language="python",
+            max_mutations=1,
+        ))
+        assert len(result) == 0
