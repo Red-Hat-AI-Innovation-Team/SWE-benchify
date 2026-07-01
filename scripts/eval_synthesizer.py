@@ -40,6 +40,7 @@ EVAL_TARGETS = [
         "repo_url": "https://github.com/pallets/flask.git",
         "repo_path": "/tmp/flask-synth-test",
         "language": "python",
+        "base_commit": "735a4701d6d5e848241e7d7535db898efb62d400",
         "n_synthetic": 3,
         "n_real": 3,
     },
@@ -48,6 +49,7 @@ EVAL_TARGETS = [
         "repo_url": "https://github.com/psf/requests.git",
         "repo_path": "/tmp/requests-synth-test",
         "language": "python",
+        "base_commit": "0106aced5faa299e6ede89d1230bd6784f2c3660",
         "n_synthetic": 3,
         "n_real": 3,
     },
@@ -418,7 +420,7 @@ def main():
 
         repo_path = ensure_repo(target)
 
-        base_commit = pick_base_commit(repo_slug, all_real)
+        base_commit = target.get('base_commit') or pick_base_commit(repo_slug, all_real)
         err(f"  Base commit: {base_commit[:12]}")
 
         subprocess.run(
