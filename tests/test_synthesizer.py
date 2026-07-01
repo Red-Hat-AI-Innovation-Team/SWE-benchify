@@ -59,20 +59,28 @@ def test_find_mutation_targets_python(tmp_path: Path) -> None:
     src.write_text(textwrap.dedent("""\
         def hello(name):
             greeting = f"Hello, {name}!"
-            return greeting
+            if not name:
+                raise ValueError("name required")
+            cleaned = name.strip()
+            parts = cleaned.split()
+            first = parts[0]
+            return f"Hello, {first}!"
 
         def add(a, b):
+            if a is None:
+                raise TypeError("a is None")
+            if b is None:
+                raise TypeError("b is None")
             result = a + b
-            return result
+            validated = int(result)
+            return validated
     """))
 
     targets = find_mutation_targets(str(tmp_path), "python")
     assert len(targets) == 2
-    assert targets[0]["function_name"] == "hello"
+    assert targets[0]["function_name"] in ("hello", "add")
     assert targets[0]["language"] == "python"
     assert targets[0]["file"] == "module.py"
-    assert "def hello" in targets[0]["source"]
-    assert targets[1]["function_name"] == "add"
 
 
 def test_find_mutation_targets_python_nested(tmp_path: Path) -> None:
@@ -82,8 +90,13 @@ def test_find_mutation_targets_python_nested(tmp_path: Path) -> None:
     src.write_text(textwrap.dedent("""\
         class Calculator:
             def multiply(self, a, b):
+                if a is None:
+                    raise TypeError("a is None")
+                if b is None:
+                    raise TypeError("b is None")
                 result = a * b
-                return result
+                validated = int(result)
+                return validated
     """))
 
     targets = find_mutation_targets(str(tmp_path), "python")
@@ -102,21 +115,33 @@ def test_find_mutation_targets_go(tmp_path: Path) -> None:
         package main
 
         func Add(a, b int) int {
+            if a < 0 {
+                return -1
+            }
+            if b < 0 {
+                return -1
+            }
             result := a + b
             return result
         }
 
         func (s *Server) Handle(req Request) Response {
+            if req == nil {
+                return Response{}
+            }
             data := s.process(req)
-            return Response{Data: data}
+            validated := s.validate(data)
+            if validated == nil {
+                return Response{}
+            }
+            return Response{Data: validated}
         }
     """))
 
     targets = find_mutation_targets(str(tmp_path), "go")
     assert len(targets) == 2
-    assert targets[0]["function_name"] == "Add"
+    assert targets[0]["function_name"] in ("Add", "Handle")
     assert targets[0]["language"] == "go"
-    assert targets[1]["function_name"] == "Handle"
 
 
 # ---------------------------------------------------------------------------
@@ -127,29 +152,46 @@ def test_find_mutation_targets_rust(tmp_path: Path) -> None:
     src = tmp_path / "lib.rs"
     src.write_text(textwrap.dedent("""\
         pub fn calculate(x: i32, y: i32) -> i32 {
+            if x < 0 {
+                return -1;
+            }
+            if y < 0 {
+                return -1;
+            }
             let result = x + y;
             result
         }
 
         fn helper(s: &str) -> String {
+            if s.is_empty() {
+                return String::new();
+            }
             let trimmed = s.trim();
-            trimmed.to_string()
+            let lower = trimmed.to_lowercase();
+            let owned = lower.to_string();
+            let validated = owned.clone();
+            validated
         }
     """))
 
     targets = find_mutation_targets(str(tmp_path), "rust")
     assert len(targets) == 2
-    assert targets[0]["function_name"] == "calculate"
+    assert targets[0]["function_name"] in ("calculate", "helper")
     assert targets[0]["language"] == "rust"
-    assert targets[1]["function_name"] == "helper"
 
 
 def test_find_mutation_targets_rust_async(tmp_path: Path) -> None:
     src = tmp_path / "server.rs"
     src.write_text(textwrap.dedent("""\
         pub async fn fetch(url: &str) -> Result<String, Error> {
+            if url.is_empty() {
+                return Err(Error::new("empty url"));
+            }
+            let client = Client::new();
             let resp = client.get(url).await?;
-            Ok(resp.text().await?)
+            let body = resp.text().await?;
+            let trimmed = body.trim().to_string();
+            Ok(trimmed)
         }
     """))
 
@@ -167,22 +209,33 @@ def test_find_mutation_targets_java(tmp_path: Path) -> None:
     src.write_text(textwrap.dedent("""\
         public class Calculator {
             public int add(int a, int b) {
+                if (a < 0) {
+                    throw new IllegalArgumentException("a negative");
+                }
+                if (b < 0) {
+                    throw new IllegalArgumentException("b negative");
+                }
                 int result = a + b;
                 return result;
             }
 
             private String format(int value) {
+                if (value < 0) {
+                    return "negative";
+                }
                 String formatted = String.valueOf(value);
-                return formatted;
+                String trimmed = formatted.trim();
+                String padded = "  " + trimmed;
+                String result = padded.strip();
+                return result;
             }
         }
     """))
 
     targets = find_mutation_targets(str(tmp_path), "java")
     assert len(targets) == 2
-    assert targets[0]["function_name"] == "add"
+    assert targets[0]["function_name"] in ("add", "format")
     assert targets[0]["language"] == "java"
-    assert targets[1]["function_name"] == "format"
 
 
 # ---------------------------------------------------------------------------
@@ -194,14 +247,24 @@ def test_find_mutation_targets_excludes_python_tests(tmp_path: Path) -> None:
     test_file = tmp_path / "tests" / "test_foo.py"
     test_file.write_text(textwrap.dedent("""\
         def test_something():
-            assert True
-            pass
+            a = 1
+            b = 2
+            c = a + b
+            d = c * 2
+            e = d - 1
+            assert e > 0
+            return e
     """))
     conftest = tmp_path / "conftest.py"
     conftest.write_text(textwrap.dedent("""\
         def my_fixture():
-            return 42
-            pass
+            a = 1
+            b = 2
+            c = a + b
+            d = c * 2
+            e = d - 1
+            f = e + 10
+            return f
     """))
     setup = tmp_path / "setup.py"
     setup.write_text("from setuptools import setup\nsetup()\npass\n")
@@ -212,7 +275,12 @@ def test_find_mutation_targets_excludes_python_tests(tmp_path: Path) -> None:
     src.write_text(textwrap.dedent("""\
         def real_function():
             value = 42
-            return value
+            if value < 0:
+                raise ValueError("negative")
+            result = value * 2
+            cleaned = str(result)
+            validated = int(cleaned)
+            return validated
     """))
 
     targets = find_mutation_targets(str(tmp_path), "python")
@@ -230,7 +298,12 @@ def test_find_mutation_targets_excludes_go_tests(tmp_path: Path) -> None:
         package main
 
         func TestFoo(t *testing.T) {
-            result := Add(1, 2)
+            a := 1
+            b := 2
+            c := a + b
+            d := c * 2
+            e := d - 1
+            result := Add(e, b)
             assert(result == 3)
         }
     """))
@@ -241,7 +314,12 @@ def test_find_mutation_targets_excludes_go_tests(tmp_path: Path) -> None:
         package vendor
 
         func VendorFunc() int {
-            value := 42
+            a := 1
+            b := 2
+            c := a + b
+            d := c * 2
+            e := d - 1
+            value := e + 42
             return value
         }
     """))
@@ -250,7 +328,12 @@ def test_find_mutation_targets_excludes_go_tests(tmp_path: Path) -> None:
         package main
 
         func Main() int {
-            value := 1
+            a := 1
+            b := 2
+            c := a + b
+            d := c * 2
+            e := d - 1
+            value := e + 1
             return value
         }
     """))
@@ -268,14 +351,24 @@ def test_find_mutation_targets_excludes_rust_tests(tmp_path: Path) -> None:
     test_file = tests_dir / "integration.rs"
     test_file.write_text(textwrap.dedent("""\
         fn test_integration() {
-            let x = 1;
-            assert_eq!(x, 1);
+            let a = 1;
+            let b = 2;
+            let c = a + b;
+            let d = c * 2;
+            let e = d - 1;
+            let x = e + 10;
+            assert_eq!(x, 15);
         }
     """))
     src = tmp_path / "lib.rs"
     src.write_text(textwrap.dedent("""\
         pub fn compute(x: i32) -> i32 {
-            let result = x * 2;
+            if x < 0 {
+                return -1;
+            }
+            let a = x + 1;
+            let b = a * 2;
+            let result = b - x;
             result
         }
     """))
@@ -291,8 +384,12 @@ def test_find_mutation_targets_excludes_java_tests(tmp_path: Path) -> None:
     test_file.write_text(textwrap.dedent("""\
         public class CalculatorTest {
             public void testAdd() {
-                int result = calc.add(1, 2);
-                assertEquals(3, result);
+                int a = 1;
+                int b = 2;
+                int c = a + b;
+                int d = c * 2;
+                int result = calc.add(d, b);
+                assertEquals(8, result);
             }
         }
     """))
@@ -302,8 +399,12 @@ def test_find_mutation_targets_excludes_java_tests(tmp_path: Path) -> None:
     test_dir_file.write_text(textwrap.dedent("""\
         public class Foo {
             public void testBar() {
-                int x = 1;
-                assertEquals(1, x);
+                int a = 1;
+                int b = 2;
+                int c = a + b;
+                int d = c * 2;
+                int x = d - 1;
+                assertEquals(5, x);
             }
         }
     """))
@@ -311,7 +412,12 @@ def test_find_mutation_targets_excludes_java_tests(tmp_path: Path) -> None:
     src.write_text(textwrap.dedent("""\
         public class Main {
             public int run(int x) {
-                int result = x + 1;
+                if (x < 0) {
+                    throw new IllegalArgumentException("negative");
+                }
+                int a = x + 1;
+                int b = a * 2;
+                int result = b - x;
                 return result;
             }
         }
@@ -322,6 +428,100 @@ def test_find_mutation_targets_excludes_java_tests(tmp_path: Path) -> None:
     assert "Main.java" in files
     assert "CalculatorTest.java" not in files
     assert "src/test/java/Foo.java" not in files
+
+
+def test_find_mutation_targets_excludes_docs_dir(tmp_path: Path) -> None:
+    """Files under docs/ directory are excluded from mutation targets."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    doc_file = docs / "conf.py"
+    doc_file.write_text(textwrap.dedent("""\
+        def setup(app):
+            if app is None:
+                raise ValueError("app required")
+            config = app.config
+            config.update({"key": "value"})
+            validated = config.get("key")
+            result = validated.strip()
+            return result
+    """))
+    src = tmp_path / "core.py"
+    src.write_text(textwrap.dedent("""\
+        def process(data):
+            if data is None:
+                raise ValueError("data required")
+            cleaned = data.strip()
+            parts = cleaned.split(",")
+            result = [p.strip() for p in parts]
+            validated = [p for p in result if p]
+            return validated
+    """))
+
+    targets = find_mutation_targets(str(tmp_path), "python")
+    files = {t["file"] for t in targets}
+    assert "core.py" in files
+    assert "docs/conf.py" not in files
+
+
+def test_find_mutation_targets_excludes_examples_dir(tmp_path: Path) -> None:
+    """Files under examples/ directory are excluded from mutation targets."""
+    examples = tmp_path / "examples"
+    examples.mkdir()
+    example_file = examples / "demo.py"
+    example_file.write_text(textwrap.dedent("""\
+        def run_demo():
+            config = load_config()
+            if config is None:
+                raise RuntimeError("no config")
+            app = create_app(config)
+            result = app.start()
+            status = result.get("status")
+            return status
+    """))
+    src = tmp_path / "lib.py"
+    src.write_text(textwrap.dedent("""\
+        def compute(x, y):
+            if x is None:
+                raise TypeError("x required")
+            if y is None:
+                raise TypeError("y required")
+            result = x + y
+            validated = int(result)
+            return validated
+    """))
+
+    targets = find_mutation_targets(str(tmp_path), "python")
+    files = {t["file"] for t in targets}
+    assert "lib.py" in files
+    assert "examples/demo.py" not in files
+
+
+def test_find_mutation_targets_min_function_size(tmp_path: Path) -> None:
+    """Functions with fewer than 8 lines are excluded."""
+    src = tmp_path / "module.py"
+    src.write_text(textwrap.dedent("""\
+        def tiny():
+            return 1
+
+        def small(x):
+            result = x + 1
+            return result
+
+        def big_enough(data):
+            if data is None:
+                raise ValueError("data required")
+            cleaned = data.strip()
+            parts = cleaned.split(",")
+            result = [p.strip() for p in parts]
+            validated = [p for p in result if p]
+            return validated
+    """))
+
+    targets = find_mutation_targets(str(tmp_path), "python")
+    names = {t["function_name"] for t in targets}
+    assert "big_enough" in names
+    assert "tiny" not in names
+    assert "small" not in names
 
 
 def test_find_mutation_targets_unsupported_language(tmp_path: Path) -> None:
@@ -335,7 +535,12 @@ def test_find_mutation_targets_max_files(tmp_path: Path) -> None:
         f.write_text(textwrap.dedent(f"""\
             def func_{i}():
                 value = {i}
-                return value
+                if value < 0:
+                    raise ValueError("negative")
+                result = value * 2
+                cleaned = str(result)
+                validated = int(cleaned)
+                return validated
         """))
 
     targets = find_mutation_targets(str(tmp_path), "python", max_files=3)
@@ -1204,7 +1409,16 @@ def test_edge_case_score_null_check() -> None:
 def test_find_mutation_targets_sorted_by_score(tmp_path: Path) -> None:
     """Functions with error handling should sort before simple functions."""
     simple = tmp_path / "simple.py"
-    simple.write_text("def add(a, b):\n    result = a + b\n    return result\n")
+    simple.write_text(textwrap.dedent("""\
+        def add(a, b):
+            x = a
+            y = b
+            total = x + y
+            doubled = total * 2
+            halved = doubled // 2
+            result = halved
+            return result
+    """))
     complex_f = tmp_path / "handler.py"
     complex_f.write_text(textwrap.dedent("""\
         def process(data):

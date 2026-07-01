@@ -43,6 +43,8 @@ _LANGUAGE_EXTENSIONS: dict[str, list[str]] = {
 _EXCLUDE_DIRS: set[str] = {
     "__pycache__", ".git", ".tox", ".mypy_cache", ".pytest_cache",
     "node_modules", "vendor", ".eggs", "build", "dist", "target",
+    "docs", "doc", "examples", "example", "benchmarks", "benchmark",
+    "demo", "demos", "scripts", "tools", ".github", ".ci",
 }
 
 _LANGUAGE_EXCLUDE_PATTERNS: dict[str, list[re.Pattern[str]]] = {
@@ -51,6 +53,10 @@ _LANGUAGE_EXCLUDE_PATTERNS: dict[str, list[re.Pattern[str]]] = {
         re.compile(r"(^|/)__init__\.py$"),
         re.compile(r"(^|/)setup\.py$"),
         re.compile(r"(^|/)conftest\.py$"),
+        re.compile(r"(^|/)conf\.py$"),
+        re.compile(r"(^|/)manage\.py$"),
+        re.compile(r"(^|/)wsgi\.py$"),
+        re.compile(r"(^|/)asgi\.py$"),
     ],
     "go": [
         re.compile(r"_test\.go$"),
@@ -394,6 +400,9 @@ def find_mutation_targets(
             functions = extractor(lines)
 
             for func in functions[:max_functions]:
+                source_lines = func["source"].strip().splitlines()
+                if len(source_lines) < 8:
+                    continue
                 targets.append({
                     "file": rel_path,
                     "function_name": func["function_name"],
