@@ -19,6 +19,7 @@ import random
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import asdict
 
 # ── Configuration ────────────────────────────────────────────────────────
@@ -142,7 +143,7 @@ def pick_base_commit(repo_slug: str, all_real: list[dict]) -> str:
     return chosen["base_commit"]
 
 
-# ── Structural validation ───────────────────────────────────────────────
+# ── Validation tiers (ordered cheapest → most expensive) ───────────────
 
 def count_changed_lines(patch: str) -> int:
     """Count semantic +/- lines in a unified diff (excluding headers)."""
@@ -153,8 +154,8 @@ def count_changed_lines(patch: str) -> int:
     return count
 
 
-def structural_check(instance: dict) -> tuple[bool, str]:
-    """Returns (passed, reason). All must pass or round scores 0."""
+def _check_strings(instance: dict) -> tuple[bool, str]:
+    """Tier 0: instant string-level checks."""
     patch = instance.get("patch", "") or ""
     if not patch.strip():
         return False, "empty patch"
@@ -174,6 +175,50 @@ def structural_check(instance: dict) -> tuple[bool, str]:
     if "--- " not in patch:
         return False, "patch missing diff headers"
 
+    return True, "ok"
+
+
+def _check_patch_applies(instance: dict, repo_path: str) -> tuple[bool, str]:
+    """Tier 1: verify patches apply cleanly via git apply --check."""
+    for field, label in [("patch", "patch"), ("test_patch", "test_patch")]:
+        content = instance.get(field, "") or ""
+        if not content.strip():
+            continue
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".diff", delete=False
+        ) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        try:
+            result = subprocess.run(
+                ["git", "apply", "--check", tmp_path],
+                cwd=repo_path,
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                detail = result.stderr.strip().split("\n")[0][:120]
+                return False, f"{label} does not apply: {detail}"
+        finally:
+            os.unlink(tmp_path)
+
+    return True, "ok"
+
+
+VALIDATION_TIERS = [
+    ("strings", _check_strings, False),
+    ("patch_applies", _check_patch_applies, True),
+]
+
+
+def validate_instance(instance: dict, repo_path: str) -> tuple[bool, str]:
+    """Run all validation tiers in order, short-circuiting on first failure."""
+    for tier_name, check_fn, needs_repo in VALIDATION_TIERS:
+        if needs_repo:
+            passed, reason = check_fn(instance, repo_path)
+        else:
+            passed, reason = check_fn(instance)
+        if not passed:
+            return False, f"[{tier_name}] {reason}"
     return True, "ok"
 
 
@@ -328,24 +373,21 @@ def main():
     all_real_samples = []
     structural_failures = []
 
+    # ── Phase 1: Synthesize + structural check per repo (bail early) ──
     for target in EVAL_TARGETS:
         repo_slug = target["repo_slug"]
         err(f"\n── {repo_slug} ──")
 
-        # Ensure repo is cloned
         repo_path = ensure_repo(target)
 
-        # Pick a validated base commit
         base_commit = pick_base_commit(repo_slug, all_real)
         err(f"  Base commit: {base_commit[:12]}")
 
-        # Reset repo to base commit
         subprocess.run(
             ["git", "checkout", "--quiet", "--force", base_commit],
             cwd=repo_path, check=True,
         )
 
-        # Synthesize
         err(f"  Synthesizing {target['n_synthetic']} instances...")
         candidates = asyncio.run(synth_mod.synthesize_repo(
             repo_path=repo_path,
@@ -358,17 +400,20 @@ def main():
         synth_instances = [asdict(c) for c in candidates]
         err(f"  {len(synth_instances)} synthetic instances generated")
 
-        # Structural validation — fail fast
         for inst in synth_instances:
-            passed, reason = structural_check(inst)
+            passed, reason = validate_instance(inst, repo_path)
             if not passed:
                 iid = inst.get("instance_id", "unknown")
                 structural_failures.append((iid, reason))
-                err(f"  STRUCTURAL FAIL: {iid} — {reason}")
+                err(f"  VALIDATION FAIL: {iid} — {reason}")
 
         all_synth_instances.extend(synth_instances)
 
-        # Sample real instances
+        # Bail before synthesizing remaining repos
+        if structural_failures:
+            err("\n  Structural gate failed — skipping remaining repos")
+            break
+
         repo_real = [i for i in all_real if i["repo"] == repo_slug]
         n_real = min(target["n_real"], len(repo_real))
         real_samples = random.sample(repo_real, n_real)
@@ -384,18 +429,15 @@ def main():
         print(json.dumps({"score": 0.0, "details": f"R{round_num}: no synthetic instances generated"}))
         sys.exit(0)
 
-    # ── Structural gate ──
+    # ── Phase 2 (fast): Structural gate ──
     if structural_failures:
         err(f"\n  STRUCTURAL GATE FAILED — {len(structural_failures)} instance(s):")
         for iid, reason in structural_failures:
             err(f"    {iid}: {reason}")
-        err("  Score: 0.0 (fail fast)")
+        err("  Score: 0.0 (skipping diversity and judge)")
 
-        # Still write round doc for paper trail
-        diversity = compute_diversity(all_synth_instances)
         _write_round_doc(round_num, commit, n_s, n_r,
-                         structural_failures=structural_failures,
-                         diversity=diversity)
+                         structural_failures=structural_failures)
 
         print(json.dumps({
             "score": 0.0,
@@ -409,7 +451,7 @@ def main():
 
     err("  Structural validation: all passed ✓")
 
-    # ── Diversity ──
+    # ── Phase 3 (fast): Diversity gate ──
     diversity = compute_diversity(all_synth_instances)
     err("\n── Diversity ──")
     err(f"  Files touched: {diversity['unique_files']} unique")
@@ -417,7 +459,21 @@ def main():
     err(f"  Issue length CV: {diversity['issue_length_cv']}")
     err(f"  Diversity score: {diversity['overall']}")
 
-    # ── Build eval set ──
+    if diversity["overall"] == 0.0:
+        err("  Diversity score is 0.0 — skipping judge")
+
+        _write_round_doc(round_num, commit, n_s, n_r, diversity=diversity)
+
+        print(json.dumps({
+            "score": 0.0,
+            "details": (
+                f"R{round_num} ({commit}): DIVERSITY GATE FAILED. "
+                f"Score 0.0 — all subscores zero."
+            ),
+        }))
+        return
+
+    # ── Phase 4 (slow): Build eval set + judge ──
     eval_set = []
     for inst in all_synth_instances:
         eval_set.append({"instance": inst, "label": "SYNTHETIC"})
