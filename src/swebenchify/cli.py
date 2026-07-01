@@ -30,6 +30,8 @@ def _cmd_run(args: argparse.Namespace) -> None:
 
     _setup_logging()
     config = load_config(args.config)
+    if args.harbor_output:
+        config.harbor.emit = True
     asyncio.run(run_pipeline(config, resume=args.resume))
 
 
@@ -428,6 +430,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Resume from existing stage outputs instead of re-running",
+    )
+    run_parser.add_argument(
+        "--harbor-output",
+        action="store_true",
+        default=False,
+        help="Emit Harbor task format alongside JSONL output",
     )
 
     # collect

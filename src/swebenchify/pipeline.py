@@ -445,3 +445,14 @@ async def run_repo_pipeline(
     logger.info("Stage 6: Emitting dataset")
     emit_dataset(filtered, config.output.dir, repo_slug=repo.slug)
     logger.info("  %d instances emitted for %s", len(filtered), repo.full_name)
+
+    # Stage 6b: Harbor emission (if configured)
+    if config.harbor.emit and filtered:
+        from swebenchify.harbor_emitter import emit_harbor_dataset
+
+        logger.info("Stage 6b: Emitting Harbor tasks")
+        emit_harbor_dataset(
+            filtered,
+            config.output.dir,
+            registry_url=config.harbor.registry_url or None,
+        )

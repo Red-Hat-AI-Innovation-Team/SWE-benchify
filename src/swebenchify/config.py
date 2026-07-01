@@ -89,6 +89,15 @@ class DockerConfig:
 
 
 @dataclass
+class HarborConfig:
+    """Configuration for Harbor task emission."""
+
+    registry_url: str = ""
+    org_name: str = "swebenchify"
+    emit: bool = False
+
+
+@dataclass
 class Config:
     """Top-level configuration for SWE-benchify."""
 
@@ -100,6 +109,7 @@ class Config:
     filters: FilterConfig = field(default_factory=FilterConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     docker: DockerConfig = field(default_factory=DockerConfig)
+    harbor: HarborConfig = field(default_factory=HarborConfig)
     go_repos: list[str] = field(default_factory=list)
     rust_repos: list[str] = field(default_factory=list)
     rh_jira_projects: list[str] = field(default_factory=lambda: ["STOR", "MGMT"])
@@ -237,6 +247,16 @@ def _build_docker_config(data: dict | None) -> DockerConfig:
     )
 
 
+def _build_harbor_config(data: dict | None) -> HarborConfig:
+    if data is None:
+        return HarborConfig()
+    return HarborConfig(
+        registry_url=data.get("registry_url", HarborConfig.registry_url),
+        org_name=data.get("org_name", HarborConfig.org_name),
+        emit=data.get("emit", HarborConfig.emit),
+    )
+
+
 def load_config(path: str) -> Config:
     """Load and validate a SWE-benchify configuration from a YAML file.
 
@@ -286,6 +306,7 @@ def load_config(path: str) -> Config:
         filters=_build_filter_config(raw.get("filters")),
         output=_build_output_config(raw.get("output")),
         docker=_build_docker_config(raw.get("docker")),
+        harbor=_build_harbor_config(raw.get("harbor")),
         go_repos=raw.get("go_repos", []) or [],
         rust_repos=raw.get("rust_repos", []) or [],
         rh_jira_projects=raw.get("rh_jira_projects", ["STOR", "MGMT"]) or ["STOR", "MGMT"],
