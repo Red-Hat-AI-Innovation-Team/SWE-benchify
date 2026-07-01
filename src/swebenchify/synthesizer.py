@@ -658,6 +658,35 @@ def _strip_issue_shas(text: str) -> str:
     return _BARE_SHA_PATTERN.sub("", text)
 
 
+_FAKE_USERNAMES = ["alex", "sarah", "dev", "mike", "jenny"]
+
+
+def _humanize_traceback(test_output: str, repo_path: str) -> str:
+    """Transform raw test output paths to look like a user's environment."""
+    if not test_output:
+        return ""
+
+    repo_name = Path(repo_path).name
+    username = random.choice(_FAKE_USERNAMES)
+    home_path = f"/home/{username}/projects/{repo_name}/"
+
+    result = test_output
+    result = re.sub(r"/tmp/[a-zA-Z0-9_-]+/", home_path, result)
+    result = re.sub(r"\.?/?\.venv/[^\s]+/site-packages/", home_path, result)
+
+    lines = result.split("\n")
+    cleaned: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r"^={3,}\s.*\s={3,}$", stripped):
+            continue
+        if re.match(r"^collected\s+\d+\s+items?", stripped):
+            continue
+        cleaned.append(line)
+
+    return "\n".join(cleaned)
+
+
 def _strip_strategy_labels(code: str) -> str:
     """Remove instructional strategy labels that the LLM echoed from the prompt."""
     for pat in _STRATEGY_LABEL_PATTERNS:
@@ -1204,6 +1233,92 @@ def _mine_issue_style_examples(
     return titles
 
 
+def _mine_social_artifacts(repo_path: str) -> dict[str, list[str]]:
+    """Extract real social artifacts from git history."""
+    artifacts: dict[str, list[str]] = {
+        "contributors": [],
+        "shas": [],
+        "issues": [],
+        "branches": [],
+    }
+
+    try:
+        result = subprocess.run(
+            ["git", "log", "--format=%aN", "-50"],
+            cwd=repo_path, capture_output=True, text=True, check=True,
+        )
+        seen: set[str] = set()
+        for name in result.stdout.strip().splitlines():
+            name = name.strip()
+            if name and name not in seen:
+                seen.add(name)
+                artifacts["contributors"].append(name)
+            if len(artifacts["contributors"]) >= 20:
+                break
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    try:
+        result = subprocess.run(
+            ["git", "log", "--oneline", "-50"],
+            cwd=repo_path, capture_output=True, text=True, check=True,
+        )
+        for line in result.stdout.strip().splitlines():
+            parts = line.split()
+            if parts:
+                artifacts["shas"].append(parts[0])
+        issue_nums = re.findall(r"#(\d+)", result.stdout)
+        seen_issues: set[str] = set()
+        for n in issue_nums:
+            if n not in seen_issues:
+                seen_issues.add(n)
+                artifacts["issues"].append(n)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    try:
+        result = subprocess.run(
+            ["git", "branch", "-r"],
+            cwd=repo_path, capture_output=True, text=True, check=True,
+        )
+        for line in result.stdout.strip().splitlines():
+            branch = line.strip().replace("origin/", "", 1)
+            if branch and "->" not in branch:
+                artifacts["branches"].append(branch)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    return artifacts
+
+
+def _build_social_context(artifacts: dict[str, list[str]]) -> str:
+    """Build social context string from mined artifacts."""
+    templates: list[str] = []
+
+    if artifacts.get("shas"):
+        sha = random.choice(artifacts["shas"])
+        templates.append(f"I first noticed this after {sha} landed")
+    if artifacts.get("contributors"):
+        contributor = random.choice(artifacts["contributors"])
+        templates.append(f"@{contributor} might know more")
+    if artifacts.get("issues"):
+        issue_num = random.choice(artifacts["issues"])
+        templates.append(f"Possibly related to #{issue_num}")
+    if artifacts.get("branches"):
+        branch = random.choice(artifacts["branches"])
+        templates.append(f"Seeing this on the {branch} branch")
+
+    if not templates:
+        return ""
+
+    count = random.choices([0, 1, 2], weights=[1, 3, 1])[0]
+    if count == 0:
+        return ""
+
+    selected = random.sample(templates, min(count, len(templates)))
+    return "\n\n" + "\n".join(selected)
+
+
 def _find_file_commits(
     repo_path: str, file_path: str, max_commits: int = 3,
 ) -> list[dict[str, str]]:
@@ -1276,6 +1391,7 @@ async def generate_issue_from_symptom(
     repo_context: dict | None = None,
     style_examples: list[str] | None = None,
     model: str = "sonnet",
+    social_context: str = "",
 ) -> str:
     """Generate a realistic GitHub issue description from a symptom only.
 
@@ -1284,8 +1400,10 @@ async def generate_issue_from_symptom(
     name, or any code. This prevents the issue from betraying root-cause
     knowledge.
 
-    Uses a character budget and style-conditioned generation to produce
-    concise, natural-sounding issue text in a single LLM call.
+    When test_output is available, uses a data-first approach: the LLM
+    writes only a brief title + intro, and the issue body is constructed
+    programmatically from real test output. This makes the issue ~80%
+    pasted data and ~20% LLM framing, matching real issue patterns.
 
     Args:
         symptom: One-sentence user-facing symptom from _bug_to_symptom().
@@ -1293,6 +1411,7 @@ async def generate_issue_from_symptom(
         repo_context: Dict with version, lang_version, os_info keys.
         style_examples: Real issue titles from git history for style.
         model: Claude model shortname.
+        social_context: Optional social references from _build_social_context().
 
     Returns:
         Issue description text.
@@ -1305,9 +1424,47 @@ async def generate_issue_from_symptom(
     lang_version = ctx.get("lang_version", "") or "3.11"
     os_info = ctx.get("os_info", "") or random.choice(_OS_CHOICES)
 
-    test_context = ""
+    general_area = symptom.split(".")[0] if "." in symptom else symptom
+
     if test_output:
-        test_context = f"\n\nTest output that may be relevant:\n```\n{test_output[:2000]}\n```"
+        prompt = (
+            "Write ONLY a title and 1-2 sentence intro for a GitHub issue. "
+            "A user hit this error. Be brief and frustrated. "
+            "Output format: Title on the first line, then a blank line, "
+            "then 1-2 sentences.\n\n"
+            f"Symptom: {symptom}"
+        )
+
+        resolved_model = MODEL_MAP.get(model, model)
+        options = ClaudeCodeOptions(max_turns=1, model=resolved_model)
+
+        result_text: str | None = None
+        try:
+            async for message in query(prompt=prompt, options=options):
+                if isinstance(message, ResultMessage):
+                    result_text = _extract_text_from_result(message)
+        except Exception:
+            logger.warning("LLM call failed for data-first issue, using fallback")
+
+        if result_text:
+            lines = result_text.strip().split("\n")
+            title = lines[0].strip().lstrip("#").strip()
+            framing = "\n".join(ln for ln in lines[1:] if ln.strip()).strip()
+        else:
+            title = f"Bug: {symptom}"
+            framing = "Hit this error and not sure what's going on."
+
+        issue = (
+            f"## {title}\n\n"
+            f"{framing}\n\n"
+            f"```\n{test_output}\n```\n\n"
+            f"Environment: {version}, Python {lang_version}"
+        )
+
+        if social_context:
+            issue += social_context
+
+        return issue
 
     char_budget = random.randint(300, 1000)
 
@@ -1318,20 +1475,18 @@ async def generate_issue_from_symptom(
     else:
         style_section = "\n\nWrite a short, frustrated bug report. No headers. No structured format. Just describe the problem like a developer posting quickly.\n"
 
-    general_area = symptom.split(".")[0] if "." in symptom else symptom
-
     prompt = f"""Write a GitHub issue report for a bug. A user observed this symptom: {symptom}
 
 Your ENTIRE response must be under {char_budget} characters. Be CONCISE — real bug reports are short.
 
 You are a frustrated user who hit this problem. You do NOT know the root cause, the specific code involved, or the fix. You only know what broke from the outside.
-{test_context}
+
 Environment context:
 - Package version: {version}
 - Python/language version: {lang_version}
 - OS: {os_info}
 {style_section}
-Do NOT mention specific source file names, function names, line numbers, or the exact code fix. Do NOT invent issue numbers, contributor names, commit SHAs, or external links.
+Do NOT mention specific source file names, function names, line numbers, or the exact code fix.
 
 Format: start with "## " title, then the body."""
 
@@ -1342,30 +1497,34 @@ Format: start with "## " title, then the body."""
         model=resolved_model,
     )
 
-    result_text: str | None = None
+    result_text_full: str | None = None
     try:
         async for message in query(prompt=prompt, options=options):
             if isinstance(message, ResultMessage):
-                result_text = _extract_text_from_result(message)
+                result_text_full = _extract_text_from_result(message)
     except Exception:
         logger.warning(
             "LLM call failed for issue description, using fallback"
         )
 
-    if not result_text:
-        return (
+    if not result_text_full:
+        fallback = (
             f"Seeing an issue with {general_area} — {symptom}. "
             f"Running on {os_info}, version {version}. Anyone else hit this?"
         )
+        if social_context:
+            fallback += social_context
+        return fallback
 
-    result_text = _strip_issue_shas(result_text)
+    result_text_full = _enforce_banned_openers(result_text_full)
 
-    result_text = _enforce_banned_openers(result_text)
+    if len(result_text_full) > 1500:
+        result_text_full = _truncate_issue(result_text_full)
 
-    if len(result_text) > 1500:
-        result_text = _truncate_issue(result_text)
+    if social_context:
+        result_text_full += social_context
 
-    return result_text
+    return result_text_full
 
 
 _BANNED_OPENERS = [
@@ -2320,14 +2479,14 @@ async def synthesize_repo(
                 break
 
             changed = _count_changed_lines(patch)
-            if changed >= 8 and len(patch) >= 1000:
+            if changed >= 5 and len(patch) >= 500:
                 break
             if attempt < 2:
                 reason = []
-                if changed < 8:
-                    reason.append(f"{changed} changed lines < 8")
-                if len(patch) < 1000:
-                    reason.append(f"{len(patch)} chars < 1000")
+                if changed < 5:
+                    reason.append(f"{changed} changed lines < 5")
+                if len(patch) < 500:
+                    reason.append(f"{len(patch)} chars < 500")
                 logger.info(
                     "  Patch too simple (%s), retrying (%d/2)",
                     ", ".join(reason), attempt + 1,
@@ -2456,6 +2615,11 @@ async def synthesize_repo(
         )
         if test_output:
             logger.info("  Captured %d chars of test output", len(test_output))
+            test_output = _humanize_traceback(test_output, repo_path)
+
+        # H2: Mine social artifacts and build social context
+        social_artifacts = _mine_social_artifacts(repo_path)
+        social_context = _build_social_context(social_artifacts)
 
         # H1: Information firewall — generate issue from symptom only
         symptom = await _bug_to_symptom(bug_spec.bug_description, model=model)
@@ -2466,6 +2630,7 @@ async def synthesize_repo(
             repo_context=ctx,
             style_examples=style_examples,
             model=model,
+            social_context=social_context,
         )
 
         test_patch = await generate_test_patch(

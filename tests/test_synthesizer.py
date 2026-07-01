@@ -11,6 +11,7 @@ from swebenchify.synthesizer import (
     BugPlan,
     BugSpec,
     SynthesisResult,
+    _build_social_context,
     _collect_repo_context,
     _count_changed_lines,
     _discover_repo_modules,
@@ -21,8 +22,10 @@ from swebenchify.synthesizer import (
     _find_related_files,
     _find_test_file_importing,
     _format_new_test_patch,
+    _humanize_traceback,
     _is_stdlib_or_installed,
     _mine_issue_style_examples,
+    _mine_social_artifacts,
     _normalize_test_whitespace,
     _parse_bug_response,
     _parse_incidental_changes,
@@ -2087,3 +2090,232 @@ def test_introduce_bug_receives_bug_plan() -> None:
     assert "MULTI-FILE BUG PLAN: Change return type from int to str" in prompt
     assert "Secondary change needed in api.py: Update caller to handle str" in prompt
     assert "Your bug MUST include the secondary changes" in prompt
+
+
+# ---------------------------------------------------------------------------
+# H1: _humanize_traceback
+# ---------------------------------------------------------------------------
+
+def test_humanize_traceback_replaces_tmp_paths(tmp_path: Path) -> None:
+    test_output = (
+        "FAILED tests/test_core.py::test_add\n"
+        "  File \"/tmp/pytest-abc123/test_core.py\", line 5\n"
+        "    assert add(1, 2) == 3\n"
+        "AssertionError: -1 != 3"
+    )
+    result = _humanize_traceback(test_output, str(tmp_path))
+    assert "/tmp/pytest-abc123/" not in result
+    assert "/home/" in result
+    assert "AssertionError" in result
+
+
+def test_humanize_traceback_strips_headers(tmp_path: Path) -> None:
+    test_output = (
+        "============================= test session starts =============================\n"
+        "collected 5 items\n"
+        "FAILED tests/test_core.py::test_add - AssertionError\n"
+        "============================== 1 failed ==============================="
+    )
+    result = _humanize_traceback(test_output, str(tmp_path))
+    assert "test session starts" not in result
+    assert "collected 5 items" not in result
+    assert "1 failed" not in result
+    assert "FAILED" in result
+
+
+def test_humanize_traceback_empty_input(tmp_path: Path) -> None:
+    assert _humanize_traceback("", str(tmp_path)) == ""
+    assert _humanize_traceback(None, str(tmp_path)) == ""
+
+
+def test_humanize_traceback_preserves_error_data(tmp_path: Path) -> None:
+    test_output = (
+        "TypeError: unsupported operand type(s) for +: 'int' and 'str'\n"
+        "  File \"module.py\", line 42"
+    )
+    result = _humanize_traceback(test_output, str(tmp_path))
+    assert "TypeError" in result
+    assert "line 42" in result
+
+
+# ---------------------------------------------------------------------------
+# H2: _mine_social_artifacts
+# ---------------------------------------------------------------------------
+
+def test_mine_social_artifacts(tmp_path: Path) -> None:
+    import subprocess
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "Alice Dev"], cwd=tmp_path, capture_output=True, check=True)
+
+    f = tmp_path / "a.py"
+    f.write_text("v1")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "Fix #42: initial commit"], cwd=tmp_path, capture_output=True, check=True)
+
+    f.write_text("v2")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "Closes #99: second commit"], cwd=tmp_path, capture_output=True, check=True)
+
+    artifacts = _mine_social_artifacts(str(tmp_path))
+    assert "Alice Dev" in artifacts["contributors"]
+    assert len(artifacts["shas"]) == 2
+    assert "42" in artifacts["issues"]
+    assert "99" in artifacts["issues"]
+
+
+def test_mine_social_artifacts_no_repo(tmp_path: Path) -> None:
+    artifacts = _mine_social_artifacts(str(tmp_path))
+    assert artifacts["contributors"] == []
+    assert artifacts["shas"] == []
+    assert artifacts["issues"] == []
+    assert artifacts["branches"] == []
+
+
+# ---------------------------------------------------------------------------
+# H2: _build_social_context
+# ---------------------------------------------------------------------------
+
+def test_build_social_context_produces_references() -> None:
+    import random as _random
+    _random.seed(42)
+    artifacts = {
+        "contributors": ["Alice", "Bob"],
+        "shas": ["abc1234"],
+        "issues": ["42"],
+        "branches": ["main", "develop"],
+    }
+    results = set()
+    for _ in range(50):
+        ctx = _build_social_context(artifacts)
+        if ctx:
+            lines = [ln for ln in ctx.strip().split("\n") if ln.strip()]
+            assert len(lines) <= 2
+            results.add(len(lines))
+    assert 1 in results or 2 in results
+
+
+def test_build_social_context_empty_artifacts() -> None:
+    artifacts: dict[str, list[str]] = {
+        "contributors": [],
+        "shas": [],
+        "issues": [],
+        "branches": [],
+    }
+    result = _build_social_context(artifacts)
+    assert result == ""
+
+
+# ---------------------------------------------------------------------------
+# H1: generate_issue_from_symptom with test_output (data-first path)
+# ---------------------------------------------------------------------------
+
+def test_generate_issue_from_symptom_data_first() -> None:
+    """When test_output is provided, the issue contains the traceback text."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    async def fake_query(prompt: str, options: object = None):
+        class FakeResult:
+            content = [type("B", (), {"text": "Broken parsing\n\nThis is completely broken."})()]
+        yield FakeResult()
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()), \
+         mock_patch("swebenchify.synthesizer.ResultMessage", type("FR", (), {})):
+        import asyncio
+        from swebenchify.synthesizer import generate_issue_from_symptom
+        result = asyncio.run(generate_issue_from_symptom(
+            symptom="parsing fails on unicode",
+            test_output="FAILED test_parse - UnicodeDecodeError: 'utf-8' codec",
+            repo_context={"version": "2.0", "lang_version": "3.11", "os_info": "Ubuntu 22.04"},
+        ))
+
+    assert "FAILED test_parse" in result
+    assert "UnicodeDecodeError" in result
+    assert "```" in result
+    assert "Environment:" in result
+
+
+def test_generate_issue_from_symptom_data_first_fallback() -> None:
+    """Data-first path produces reasonable output even when LLM fails."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    async def fake_query(prompt: str, options: object = None):
+        return
+        yield
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import generate_issue_from_symptom
+        result = asyncio.run(generate_issue_from_symptom(
+            symptom="broken feature",
+            test_output="AssertionError: expected 3 got -1",
+        ))
+
+    assert "AssertionError" in result
+    assert "Bug:" in result
+
+
+def test_generate_issue_from_symptom_with_social_context() -> None:
+    """Social context is appended to the issue."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    async def fake_query(prompt: str, options: object = None):
+        return
+        yield
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import generate_issue_from_symptom
+        result = asyncio.run(generate_issue_from_symptom(
+            symptom="broken feature",
+            social_context="\n\n@alice might know more",
+        ))
+
+    assert "@alice might know more" in result
+
+
+def test_generate_issue_from_symptom_no_strip_shas() -> None:
+    """Verify _strip_issue_shas is no longer applied to issue text."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    class FakeResult:
+        content = [type("B", (), {"text": "## Bug\nSee commit abcdef1234567 for context."})()]
+
+    async def fake_query(prompt: str, options: object = None):
+        yield FakeResult()
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()), \
+         mock_patch("swebenchify.synthesizer.ResultMessage", FakeResult):
+        import asyncio
+        from swebenchify.synthesizer import generate_issue_from_symptom
+        result = asyncio.run(generate_issue_from_symptom(
+            symptom="test symptom",
+        ))
+
+    assert "abcdef1234567" in result
+
+
+# ---------------------------------------------------------------------------
+# H3: Patch floor thresholds
+# ---------------------------------------------------------------------------
+
+def test_patch_floor_accepts_5_lines_500_chars() -> None:
+    """Verify new thresholds: 5 changed lines, 500 chars."""
+    import swebenchify.synthesizer as mod
+    import inspect
+    source = inspect.getsource(mod.synthesize_repo)
+    assert "changed >= 5" in source
+    assert 'len(patch) >= 500' in source
+
+
+def test_patch_floor_log_messages_updated() -> None:
+    """Verify log messages reflect new thresholds."""
+    import swebenchify.synthesizer as mod
+    import inspect
+    source = inspect.getsource(mod.synthesize_repo)
+    assert 'changed lines < 5' in source
+    assert 'chars < 500' in source
