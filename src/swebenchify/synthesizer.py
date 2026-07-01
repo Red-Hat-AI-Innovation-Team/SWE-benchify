@@ -2843,6 +2843,7 @@ async def synthesize_repo(
 
         # Apply secondary changes from multi-file mutation
         buggy_files: dict[str, str] = {bug_spec.file: mutated_content}
+        test_patch_parts: list[str] = []
         for sc in bug_spec.secondary_changes:
             sec_path = Path(repo_path) / sc.file
             if not sec_path.is_file():
@@ -2857,7 +2858,11 @@ async def synthesize_repo(
                 continue
             sec_buggy = sec_content.replace(sc.original_snippet, sc.buggy_snippet, 1)
             if sec_buggy != sec_content:
-                patch += generate_patch(sec_content, sec_buggy, sc.file)
+                sec_diff = generate_patch(sec_content, sec_buggy, sc.file)
+                if sc.file.startswith(('tests/', 'test/')) or '/test_' in sc.file or sc.file.startswith('test_'):
+                    test_patch_parts.append(sec_diff)
+                else:
+                    patch += sec_diff
                 buggy_files[sc.file] = sec_buggy
                 logger.info("  Secondary change in %s: %s", sc.file, sc.description)
 
@@ -2879,7 +2884,11 @@ async def synthesize_repo(
                         continue
                     sec_buggy = sec_content.replace(sc.original_snippet, sc.buggy_snippet, 1)
                     if sec_buggy != sec_content:
-                        patch += generate_patch(sec_content, sec_buggy, sc.file)
+                        sec_diff = generate_patch(sec_content, sec_buggy, sc.file)
+                        if sc.file.startswith(('tests/', 'test/')) or '/test_' in sc.file or sc.file.startswith('test_'):
+                            test_patch_parts.append(sec_diff)
+                        else:
+                            patch += sec_diff
                         buggy_files[sc.file] = sec_buggy
                         logger.info("  Retry secondary change in %s", sc.file)
 
@@ -2978,7 +2987,7 @@ async def synthesize_repo(
             dataset_examples=dataset_examples,
         )
 
-        test_patch = ''
+        test_patch = ''.join(test_patch_parts)
 
         synthesis_result = SynthesisResult(
             bug_spec=bug_spec,
