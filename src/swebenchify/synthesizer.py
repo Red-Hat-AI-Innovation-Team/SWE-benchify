@@ -12,6 +12,7 @@ import ast
 import dataclasses
 import difflib
 import hashlib
+import json
 import logging
 import os
 import random
@@ -85,6 +86,42 @@ MODEL_MAP: dict[str, str] = {
     "haiku": "claude-haiku-4-5-20251001",
     "opus": "claude-opus-4-20250514",
 }
+
+DATASET_PATH = os.environ.get(
+    "SWEBENCHIFY_DATASET",
+    "/Users/aaye/Documents/code/SWE-benchify/output/swebenchify-dataset.jsonl",
+)
+
+
+def _load_dataset_examples(
+    dataset_path: str, repo_slug: str, n: int = 5,
+) -> list[str]:
+    """Load real issue examples from the SWE-benchify dataset JSONL file.
+
+    Filters to instances matching the target repo_slug and randomly
+    samples n problem_statement texts.
+    """
+    try:
+        path = Path(dataset_path)
+        if not path.is_file():
+            return []
+        matching: list[str] = []
+        with path.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("repo") == repo_slug and record.get("problem_statement"):
+                    matching.append(record["problem_statement"])
+        if not matching:
+            return []
+        return random.sample(matching, min(n, len(matching)))
+    except OSError:
+        return []
 
 
 @dataclasses.dataclass
@@ -1408,6 +1445,7 @@ async def generate_issue_from_symptom(
     style_examples: list[str] | None = None,
     model: str = "sonnet",
     social_context: str = "",
+    dataset_examples: list[str] | None = None,
 ) -> str:
     """Generate a realistic GitHub issue description from a symptom only.
 
@@ -1421,6 +1459,10 @@ async def generate_issue_from_symptom(
     programmatically from real test output. This makes the issue ~80%
     pasted data and ~20% LLM framing, matching real issue patterns.
 
+    When dataset_examples are provided (real issues from the same repo),
+    uses few-shot conditioning: the LLM sees real examples and matches
+    their style, length, and tone instead of following template instructions.
+
     Args:
         symptom: One-sentence user-facing symptom from _bug_to_symptom().
         test_output: Optional test output showing the failure.
@@ -1428,6 +1470,8 @@ async def generate_issue_from_symptom(
         style_examples: Real issue titles from git history for style.
         model: Claude model shortname.
         social_context: Optional social references from _build_social_context().
+        dataset_examples: Real problem_statement texts from the dataset for
+            few-shot conditioning.
 
     Returns:
         Issue description text.
@@ -1486,16 +1530,36 @@ async def generate_issue_from_symptom(
 
         return issue
 
-    char_budget = random.randint(300, 1000)
+    if dataset_examples:
+        examples_text = "\n\n".join(
+            f"--- Example {i + 1} ---\n{ex}" for i, ex in enumerate(dataset_examples)
+        )
+        prompt = f"""Here are {len(dataset_examples)} real GitHub issues from this project:
 
-    style_section = ""
-    if style_examples:
-        examples_text = "\n".join(f"  - {t}" for t in style_examples[:3])
-        style_section = f"\n\nHere are real issues from this project. Match their length and tone exactly:\n{examples_text}\n"
+{examples_text}
+
+Write a GitHub issue for a bug matching the style, length, and tone of the examples above EXACTLY.
+
+The bug manifests as: {symptom}
+{social_context}
+
+RULES:
+- Match the examples' writing style precisely — if they're technical and direct, be technical and direct
+- Match the examples' length — most are 200-800 characters
+- Include code snippets if the examples do
+- Do NOT use phrases like 'I've been banging my head', 'Is this expected?', 'Has anyone else hit this?', or other frustrated-developer language unless the examples use it
+- Start with a title line starting with '## '"""
     else:
-        style_section = "\n\nWrite a short, frustrated bug report. No headers. No structured format. Just describe the problem like a developer posting quickly.\n"
+        char_budget = random.randint(300, 1000)
 
-    prompt = f"""Write a GitHub issue report for a bug. A user observed this symptom: {symptom}
+        style_section = ""
+        if style_examples:
+            examples_text = "\n".join(f"  - {t}" for t in style_examples[:3])
+            style_section = f"\n\nHere are real issues from this project. Match their length and tone exactly:\n{examples_text}\n"
+        else:
+            style_section = "\n\nWrite a short, frustrated bug report. No headers. No structured format. Just describe the problem like a developer posting quickly.\n"
+
+        prompt = f"""Write a GitHub issue report for a bug. A user observed this symptom: {symptom}
 
 Your ENTIRE response must be under {char_budget} characters. Be CONCISE — real bug reports are short.
 
@@ -2434,6 +2498,12 @@ async def synthesize_repo(
     Returns:
         List of CandidateInstance objects.
     """
+    dataset_examples = _load_dataset_examples(DATASET_PATH, repo_slug)
+    if dataset_examples:
+        logger.info(
+            "Loaded %d dataset examples for few-shot conditioning", len(dataset_examples),
+        )
+
     logger.info(
         "Finding mutation targets in %s (%s)", repo_path, language,
     )
@@ -2681,6 +2751,7 @@ async def synthesize_repo(
             style_examples=style_examples,
             model=model,
             social_context=social_context,
+            dataset_examples=dataset_examples,
         )
 
         test_patch = await generate_test_patch(
