@@ -1584,44 +1584,17 @@ async def generate_issue_from_symptom(
         test_output = None
 
     if test_output:
-        prompt = (
-            "Write ONLY a title and 1-2 sentence intro for a GitHub issue. "
-            "A user hit this error. Be brief and matter-of-fact, like a developer filing a quick bug report. "
-            "Output format: Title on the first line, then a blank line, "
-            "then 1-2 sentences.\n\n"
-            f"Symptom: {symptom}"
-        )
-
-        resolved_model = MODEL_MAP.get(model, model)
-        options = ClaudeCodeOptions(max_turns=1, model=resolved_model)
-
-        result_text: str | None = None
-        try:
-            async for message in query(prompt=prompt, options=options):
-                if isinstance(message, ResultMessage):
-                    result_text = _extract_text_from_result(message)
-        except Exception:
-            logger.warning("LLM call failed for data-first issue, using fallback")
-
-        if result_text:
-            lines = result_text.strip().split("\n")
-            title = lines[0].strip().lstrip("#").strip()
-            framing = "\n".join(ln for ln in lines[1:] if ln.strip()).strip()
+        m = _FAILED_TEST_PATTERN.search(test_output)
+        if not m:
+            test_output = None
         else:
-            title = f"Bug: {symptom}"
-            framing = "Hit this error and not sure what's going on."
-
-        issue = (
-            f"## {title}\n\n"
-            f"{framing}\n\n"
-            f"```\n{test_output}\n```\n\n"
-            f"Environment: {version}, Python {lang_version}"
-        )
-
-        if social_context:
-            issue += social_context
-
-        return issue
+            test_id = m.group(1)
+            issue = (
+                f'{test_id}\n\n'
+                f'```\n{test_output}\n```\n\n'
+                f'Environment: {version}, Python {lang_version}'
+            )
+            return issue
 
     if dataset_examples:
         examples_text = "\n\n".join(

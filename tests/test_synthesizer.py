@@ -2517,7 +2517,7 @@ def test_generate_issue_from_symptom_data_first() -> None:
         yield FakeResult()
 
     real_test_output = (
-        "FAILED test_parse - UnicodeDecodeError: 'utf-8' codec\n"
+        "FAILED tests/test_parse.py::test_decode - UnicodeDecodeError: 'utf-8' codec\n"
         "E       UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff\n"
         "tests/test_parse.py:42: UnicodeDecodeError\n"
         "======================== 1 failed, 10 passed ========================\n"
@@ -2535,10 +2535,11 @@ def test_generate_issue_from_symptom_data_first() -> None:
             repo_context={"version": "2.0", "lang_version": "3.11", "os_info": "Ubuntu 22.04"},
         ))
 
-    assert "FAILED test_parse" in result
+    assert result.startswith("tests/test_parse.py::test_decode")
     assert "UnicodeDecodeError" in result
     assert "```" in result
     assert "Environment:" in result
+    assert "##" not in result
 
 
 def test_generate_issue_from_symptom_data_first_fallback() -> None:
@@ -2568,7 +2569,7 @@ def test_generate_issue_from_symptom_data_first_fallback() -> None:
         ))
 
     assert "AssertionError" in result
-    assert "Bug:" in result
+    assert result.startswith("tests/test_core.py::test_add")
 
 
 def test_generate_issue_from_symptom_with_social_context() -> None:
@@ -3449,8 +3450,8 @@ def test_run_tests_no_deselect_when_baseline_clean(tmp_path: Path) -> None:
     assert "FAILED" in output or "assert" in output.lower()
 
 
-def test_data_first_prompt_tone_calibration() -> None:
-    """Data-first path uses matter-of-fact tone, not frustrated."""
+def test_data_first_no_llm_call() -> None:
+    """Data-first path makes NO LLM call — issue is purely programmatic."""
     from unittest.mock import MagicMock, patch as mock_patch
 
     captured_prompts: list[str] = []
@@ -3472,15 +3473,14 @@ def test_data_first_prompt_tone_calibration() -> None:
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
         from swebenchify.synthesizer import generate_issue_from_symptom
-        asyncio.run(generate_issue_from_symptom(
+        result = asyncio.run(generate_issue_from_symptom(
             symptom="calculation fails",
             test_output=real_test_output,
         ))
 
-    assert len(captured_prompts) >= 1
-    prompt = captured_prompts[0]
-    assert "matter-of-fact" in prompt
-    assert "frustrated" not in prompt
+    assert len(captured_prompts) == 0
+    assert result.startswith("tests/test_core.py::test_add")
+    assert "##" not in result
 
 
 # ---------------------------------------------------------------------------
