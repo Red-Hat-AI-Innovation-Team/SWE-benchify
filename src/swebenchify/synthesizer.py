@@ -47,6 +47,8 @@ _EXCLUDE_DIRS: set[str] = {
     "node_modules", "vendor", ".eggs", "build", "dist", "target",
     "docs", "doc", "examples", "example", "benchmarks", "benchmark",
     "demo", "demos", "scripts", "tools", ".github", ".ci",
+    ".venv", "venv", ".synth-venv", ".test-venv", "env", ".env",
+    "site-packages",
 }
 
 _LANGUAGE_EXCLUDE_PATTERNS: dict[str, list[re.Pattern[str]]] = {
@@ -3321,6 +3323,9 @@ async def synthesize_repo(
     venv_cleanup = Path(repo_path) / '.synth-venv'
     if venv_cleanup.is_dir():
         shutil.rmtree(venv_cleanup, ignore_errors=True)
+    test_venv = Path(repo_path) / '.test-venv'
+    if test_venv.is_dir():
+        shutil.rmtree(test_venv, ignore_errors=True)
 
     logger.info(
         "Synthesis complete: %d/%d candidates generated",
