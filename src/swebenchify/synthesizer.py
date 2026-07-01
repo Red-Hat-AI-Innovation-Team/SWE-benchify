@@ -1869,6 +1869,7 @@ def _find_existing_test_file(
         candidates: list[str] = [
             f"tests/test_{stem}.py",
             f"test/test_{stem}.py",
+            f"test_{stem}.py",
             str(source_path.parent / f"test_{stem}.py"),
         ]
         if source_path.parent.parts:
@@ -1878,13 +1879,16 @@ def _find_existing_test_file(
         for c in candidates:
             if (root / c).is_file():
                 return c
-        # Fuzzy match: any test file in tests/ whose name contains the stem
+        # Fuzzy match: any test file in tests/ or repo root whose name contains the stem
         for test_dir_name in ("tests", "test"):
             tests_dir = root / test_dir_name
             if tests_dir.is_dir():
                 for f in tests_dir.rglob("*.py"):
                     if stem in f.stem:
                         return str(f.relative_to(root))
+        for f in sorted(root.glob("test_*.py")):
+            if stem in f.stem:
+                return str(f.relative_to(root))
         # Broader search: find any test_*.py file that imports the same module
         module_name = _source_to_module_name(source_file)
         if module_name:
@@ -1968,6 +1972,12 @@ def _find_test_file_importing(root: Path, module_name: str) -> str | None:
             except OSError:
                 continue
             test_files.append((f, content))
+    for f in sorted(root.glob("test_*.py")):
+        try:
+            content = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        test_files.append((f, content))
 
     for f, content in test_files:
         if specific_pat.search(content):
