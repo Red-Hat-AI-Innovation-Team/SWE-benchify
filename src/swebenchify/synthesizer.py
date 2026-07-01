@@ -2731,18 +2731,23 @@ def _run_tests_on_buggy_code(
     else:
         test_env["PYTHONPATH"] = repo_path + os.pathsep + test_env.get("PYTHONPATH", "")
 
+    # Prefer venv python for test execution if available
+    root = Path(repo_path)
+    venv_py_path = root / '.synth-venv' / 'bin' / 'python'
+    py_exe = str(venv_py_path) if venv_py_path.is_file() else sys.executable
+
     # Build the test command — use targeted test file if possible
     test_cmd: list[str] | None = None
     if target_file and language == "python":
         test_file = _find_existing_test_file(repo_path, target_file, language)
         if test_file:
-            test_cmd = [sys.executable, "-m", "pytest", test_file, "--tb=long", "-q"]
+            test_cmd = [py_exe, "-m", "pytest", test_file, "--tb=long", "-q"]
             logger.debug("  Running targeted tests: %s", test_file)
 
     # Run baseline on clean code to identify pre-existing failures
     baseline_deselects: list[str] = []
     if language == "python":
-        baseline_cmd = [sys.executable, "-m", "pytest", "--tb=no", "-q"]
+        baseline_cmd = [py_exe, "-m", "pytest", "--tb=no", "-q"]
         if test_cmd:
             baseline_cmd = test_cmd[:] + ["--tb=no"]
             baseline_cmd = [c for c in baseline_cmd if c != "-x"]
@@ -2766,88 +2771,24 @@ def _run_tests_on_buggy_code(
     except subprocess.CalledProcessError:
         return None
 
-    # Install the target package in an ISOLATED venv so it doesn't pollute
-    # the host Python (e.g. psf/requests would shadow the system 'requests').
-    root = Path(repo_path)
-    venv_dir = root / '.synth-venv'
-    if any((root / cfg).is_file() for cfg in ("pyproject.toml", "setup.py", "setup.cfg")):
+    # Add venv site-packages to PYTHONPATH if venv exists
+    if venv_py_path.is_file():
         try:
-            subprocess.run(
-                [sys.executable, '-m', 'venv', str(venv_dir)],
-                capture_output=True, text=True, timeout=60,
-            )
-            venv_pip = str(venv_dir / 'bin' / 'pip')
-            subprocess.run(
-                [venv_pip, 'install', '-e', '.', '--quiet'],
-                cwd=repo_path, capture_output=True, text=True, timeout=120,
-            )
-            subprocess.run(
-                [venv_pip, 'install', 'pytest', '--quiet'],
-                capture_output=True, text=True, timeout=60,
-            )
-            # Install test dependencies if a requirements file exists
-            for req_file in [
-                'requirements/tests.txt', 'requirements/test.txt',
-                'requirements-test.txt', 'test-requirements.txt',
-                'requirements/dev.txt', 'requirements-dev.txt',
-            ]:
-                req_path = root / req_file
-                if req_path.is_file():
-                    subprocess.run(
-                        [venv_pip, 'install', '-r', str(req_path), '--quiet'],
-                        capture_output=True, text=True, timeout=120,
-                    )
-                    break
-            # Verify the installed package actually imports; if not,
-            # try downgrading deps that are known to break old releases.
-            venv_py = str(venv_dir / 'bin' / 'python')
-            pkg_name = Path(repo_path).name.replace('-', '_')
-            for candidate in [pkg_name, pkg_name.split('_')[0]]:
-                _imp = subprocess.run(
-                    [venv_py, '-c', f'import {candidate}'],
-                    capture_output=True, text=True, timeout=10,
-                )
-                if _imp.returncode == 0:
-                    break
-            else:
-                imp_stderr = _imp.stderr if _imp else ''
-                compat_pins: list[str] = []
-                if 'jinja2' in imp_stderr.lower() or 'markup' in imp_stderr.lower():
-                    compat_pins.extend(['jinja2<3.1', 'markupsafe<2.1'])
-                if 'werkzeug' in imp_stderr.lower():
-                    compat_pins.append('Werkzeug<2.0')
-                if 'itsdangerous' in imp_stderr.lower():
-                    compat_pins.append('itsdangerous<2.1')
-                if compat_pins:
-                    subprocess.run(
-                        [venv_pip, 'install'] + compat_pins + ['--quiet'],
-                        capture_output=True, text=True, timeout=60,
-                    )
-                for req_file in ['requirements.txt', 'requirements-dev.txt',
-                                 'test-requirements.txt']:
-                    req_path = root / req_file
-                    if req_path.is_file():
-                        subprocess.run(
-                            [venv_pip, 'install', '-r', str(req_path), '--quiet'],
-                            capture_output=True, text=True, timeout=120,
-                        )
-                        break
             site_pkgs = subprocess.run(
-                [str(venv_dir / 'bin' / 'python'), '-c',
+                [str(venv_py_path), '-c',
                  'import site; print(site.getsitepackages()[0])'],
                 capture_output=True, text=True, timeout=10,
             )
             if site_pkgs.returncode == 0:
                 sp = site_pkgs.stdout.strip()
                 test_env['PYTHONPATH'] = sp + os.pathsep + test_env.get('PYTHONPATH', '')
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
-                FileNotFoundError, OSError):
-            logger.debug('  venv pip install -e . failed, proceeding anyway')
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
 
     repo_package_name = Path(repo_path).name.replace("-", "_")
     try:
         import_check = subprocess.run(
-            [sys.executable, "-c", f"import {repo_package_name}"],
+            [py_exe, "-c", f"import {repo_package_name}"],
             cwd=repo_path, capture_output=True, text=True, timeout=10,
             env=test_env,
         )
@@ -2859,7 +2800,7 @@ def _run_tests_on_buggy_code(
     test_output: str | None = None
     try:
         cmds_to_try = [test_cmd] if test_cmd else [
-            [sys.executable if c == "python" else c for c in t]
+            [py_exe if c == "python" else c for c in t]
             for t in _TEST_COMMANDS.get(language, [])
         ]
         for cmd in cmds_to_try:
@@ -2885,6 +2826,90 @@ def _run_tests_on_buggy_code(
             logger.warning("  Failed to restore branch after test run")
 
     return test_output
+
+
+def _ensure_venv(repo_path: str, language: str) -> Path | None:
+    """Create a reusable venv for Python repos. No-op for other languages.
+
+    Returns the venv directory if created/exists, None otherwise.
+    """
+    if language != "python":
+        return None
+
+    root = Path(repo_path)
+    venv_dir = root / '.synth-venv'
+
+    if (venv_dir / 'bin' / 'python').is_file():
+        logger.debug("  Reusing existing venv at %s", venv_dir)
+        return venv_dir
+
+    if not any((root / cfg).is_file() for cfg in ("pyproject.toml", "setup.py", "setup.cfg")):
+        return None
+
+    try:
+        subprocess.run(
+            [sys.executable, '-m', 'venv', str(venv_dir)],
+            capture_output=True, text=True, timeout=60,
+        )
+        venv_pip = str(venv_dir / 'bin' / 'pip')
+        subprocess.run(
+            [venv_pip, 'install', '-e', '.', '--quiet'],
+            cwd=repo_path, capture_output=True, text=True, timeout=120,
+        )
+        subprocess.run(
+            [venv_pip, 'install', 'pytest', '--quiet'],
+            capture_output=True, text=True, timeout=60,
+        )
+        for req_file in [
+            'requirements/tests.txt', 'requirements/test.txt',
+            'requirements-test.txt', 'test-requirements.txt',
+            'requirements/dev.txt', 'requirements-dev.txt',
+        ]:
+            req_path = root / req_file
+            if req_path.is_file():
+                subprocess.run(
+                    [venv_pip, 'install', '-r', str(req_path), '--quiet'],
+                    capture_output=True, text=True, timeout=120,
+                )
+                break
+        venv_py = str(venv_dir / 'bin' / 'python')
+        pkg_name = Path(repo_path).name.replace('-', '_')
+        for candidate in [pkg_name, pkg_name.split('_')[0]]:
+            _imp = subprocess.run(
+                [venv_py, '-c', f'import {candidate}'],
+                capture_output=True, text=True, timeout=10,
+            )
+            if _imp.returncode == 0:
+                break
+        else:
+            imp_stderr = _imp.stderr if _imp else ''
+            compat_pins: list[str] = []
+            if 'jinja2' in imp_stderr.lower() or 'markup' in imp_stderr.lower():
+                compat_pins.extend(['jinja2<3.1', 'markupsafe<2.1'])
+            if 'werkzeug' in imp_stderr.lower():
+                compat_pins.append('Werkzeug<2.0')
+            if 'itsdangerous' in imp_stderr.lower():
+                compat_pins.append('itsdangerous<2.1')
+            if compat_pins:
+                subprocess.run(
+                    [venv_pip, 'install'] + compat_pins + ['--quiet'],
+                    capture_output=True, text=True, timeout=60,
+                )
+            for req_file in ['requirements.txt', 'requirements-dev.txt',
+                             'test-requirements.txt']:
+                req_path = root / req_file
+                if req_path.is_file():
+                    subprocess.run(
+                        [venv_pip, 'install', '-r', str(req_path), '--quiet'],
+                        capture_output=True, text=True, timeout=120,
+                    )
+                    break
+        logger.info("  Venv ready at %s", venv_dir)
+        return venv_dir
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+            FileNotFoundError, OSError):
+        logger.debug('  venv creation failed, proceeding without venv')
+        return None
 
 
 async def synthesize_repo(
@@ -2937,6 +2962,8 @@ async def synthesize_repo(
     if not targets:
         targets = all_targets
         logger.warning("No targets with test files, falling back to all targets")
+
+    _ensure_venv(repo_path, language)
 
     candidates: list[CandidateInstance] = []
 

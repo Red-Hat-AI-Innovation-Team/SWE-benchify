@@ -37,6 +37,7 @@ from swebenchify.synthesizer import (
     _parse_bug_response,
     _parse_incidental_changes,
     _parse_secondary_changes,
+    _ensure_venv,
     _run_tests_on_buggy_code,
     _sanitize_test_output,
     _source_to_module_name,
@@ -2641,9 +2642,10 @@ def test_patch_floor_log_messages_updated() -> None:
 # Exp-11: _run_tests_on_buggy_code — pip install before test run
 # ---------------------------------------------------------------------------
 
-def test_run_tests_on_buggy_code_installs_package(tmp_path: Path) -> None:
-    """When repo has setup.py, _run_tests_on_buggy_code runs pip install -e ."""
+def test_ensure_venv_creates_venv_for_python(tmp_path: Path) -> None:
+    """_ensure_venv creates a venv with pip install -e . for Python repos."""
     import subprocess
+    from unittest.mock import patch as mock_patch
 
     subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
     subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True)
@@ -2651,20 +2653,8 @@ def test_run_tests_on_buggy_code_installs_package(tmp_path: Path) -> None:
 
     (tmp_path / "setup.py").write_text("from setuptools import setup\nsetup(name='testpkg')\n")
     (tmp_path / "module.py").write_text("def add(a, b):\n    return a + b\n")
-    (tmp_path / "test_module.py").write_text(
-        "from module import add\n\ndef test_add():\n    assert add(1, 2) == 3\n"
-    )
     subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
     subprocess.run(["git", "commit", "-m", "initial"], cwd=tmp_path, capture_output=True, check=True)
-
-    (tmp_path / "module.py").write_text("def add(a, b):\n    return a - b\n")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
-    subprocess.run(["git", "commit", "-m", "buggy"], cwd=tmp_path, capture_output=True, check=True)
-    buggy_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True,
-    ).stdout.strip()
-
-    from unittest.mock import patch as mock_patch
 
     original_run = subprocess.run
     all_calls: list = []
@@ -2675,10 +2665,17 @@ def test_run_tests_on_buggy_code_installs_package(tmp_path: Path) -> None:
         return original_run(cmd, **kwargs)
 
     with mock_patch("swebenchify.synthesizer.subprocess.run", side_effect=tracking_run):
-        _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
+        _ensure_venv(str(tmp_path), "python")
 
     assert any(len(c) >= 3 and c[1:3] == ["-m", "venv"] for c in all_calls), "Expected venv creation"
     assert any("install" in str(c) and "-e" in str(c) for c in all_calls), "Expected pip install in venv"
+
+
+def test_ensure_venv_noop_for_non_python(tmp_path: Path) -> None:
+    """_ensure_venv returns None for non-Python languages."""
+    assert _ensure_venv(str(tmp_path), "go") is None
+    assert _ensure_venv(str(tmp_path), "rust") is None
+    assert _ensure_venv(str(tmp_path), "java") is None
 
 
 # ---------------------------------------------------------------------------
@@ -2908,55 +2905,24 @@ def test_run_tests_on_buggy_code_pythonpath_src_layout(tmp_path: Path) -> None:
     assert parts.index(src_path) < parts.index(str(tmp_path))
 
 
-def test_run_tests_on_buggy_code_venv_install_graceful_failure(tmp_path: Path) -> None:
-    """Venv pip install failure is caught and doesn't crash the function."""
+def test_ensure_venv_graceful_failure(tmp_path: Path) -> None:
+    """_ensure_venv returns None when pip install fails, without crashing."""
     import subprocess
-
-    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
-    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=True)
-
-    (tmp_path / "setup.py").write_text("from setuptools import setup\nsetup(name='testpkg')\n")
-    (tmp_path / "module.py").write_text("def add(a, b):\n    return a + b\n")
-    (tmp_path / "test_module.py").write_text(
-        "from module import add\n\ndef test_add():\n    assert add(1, 2) == 3\n"
-    )
-    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
-    subprocess.run(["git", "commit", "-m", "initial"], cwd=tmp_path, capture_output=True, check=True)
-
-    (tmp_path / "module.py").write_text("def add(a, b):\n    return a - b\n")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
-    subprocess.run(["git", "commit", "-m", "buggy"], cwd=tmp_path, capture_output=True, check=True)
-    buggy_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True,
-    ).stdout.strip()
-
     from unittest.mock import patch as mock_patch
 
-    import sys
-    original_run = subprocess.run
-    calls: list = []
+    (tmp_path / "setup.py").write_text("from setuptools import setup\nsetup(name='testpkg')\n")
 
-    def tracking_run(cmd, **kwargs):
-        if isinstance(cmd, list):
-            calls.append(cmd)
-            if len(cmd) >= 2 and cmd[-1] == "--quiet" and "install" in cmd:
-                raise subprocess.CalledProcessError(1, cmd)
+    original_run = subprocess.run
+
+    def failing_run(cmd, **kwargs):
+        if isinstance(cmd, list) and "install" in cmd:
+            raise subprocess.CalledProcessError(1, cmd)
         return original_run(cmd, **kwargs)
 
-    with mock_patch("swebenchify.synthesizer.subprocess.run", side_effect=tracking_run):
-        result = _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
+    with mock_patch("swebenchify.synthesizer.subprocess.run", side_effect=failing_run):
+        result = _ensure_venv(str(tmp_path), "python")
 
-    venv_calls = [c for c in calls if len(c) >= 3 and c[1:3] == ["-m", "venv"]]
-    assert len(venv_calls) == 1
-    assert venv_calls[0][0] == sys.executable
-
-    pip_calls = [c for c in calls if "install" in c and "-e" in c]
-    assert len(pip_calls) == 1
-    assert pip_calls[0][0] != sys.executable
-    assert "--quiet" in pip_calls[0]
-
-    assert result is not None
+    assert result is None
 
 
 # ---------------------------------------------------------------------------
