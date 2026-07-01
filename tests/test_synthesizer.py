@@ -2370,11 +2370,12 @@ def test_run_tests_on_buggy_code_installs_package(tmp_path: Path) -> None:
 
     from unittest.mock import patch as mock_patch
 
+    import sys
     original_run = subprocess.run
     pip_calls: list = []
 
     def tracking_run(cmd, **kwargs):
-        if cmd and cmd[0] == "pip":
+        if cmd and len(cmd) >= 3 and cmd[1:3] == ["-m", "pip"]:
             pip_calls.append(cmd)
         return original_run(cmd, **kwargs)
 
@@ -2382,6 +2383,7 @@ def test_run_tests_on_buggy_code_installs_package(tmp_path: Path) -> None:
         _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
 
     assert any("pip" in str(c) and "install" in str(c) for c in pip_calls)
+    assert all(c[0] == sys.executable for c in pip_calls)
 
 
 # ---------------------------------------------------------------------------
@@ -2624,11 +2626,12 @@ def test_run_tests_on_buggy_code_pip_install_fallback_order(tmp_path: Path) -> N
 
     from unittest.mock import patch as mock_patch
 
+    import sys
     original_run = subprocess.run
     pip_calls: list = []
 
     def tracking_run(cmd, **kwargs):
-        if isinstance(cmd, list) and cmd and cmd[0] == "pip":
+        if isinstance(cmd, list) and len(cmd) >= 3 and cmd[1:3] == ["-m", "pip"]:
             pip_calls.append(cmd)
             if "--no-deps" not in cmd:
                 raise subprocess.CalledProcessError(1, cmd)
@@ -2638,6 +2641,7 @@ def test_run_tests_on_buggy_code_pip_install_fallback_order(tmp_path: Path) -> N
         _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
 
     assert len(pip_calls) == 2
+    assert pip_calls[0][0] == sys.executable
     assert "--no-deps" not in pip_calls[0]
     assert "--no-deps" in pip_calls[1]
 
@@ -2827,3 +2831,61 @@ def test_generate_issue_from_symptom_few_shot_not_used_for_data_first() -> None:
     assert "FAILED" in result
     assert "AssertionError" in result
     assert "```" in result
+
+
+# ---------------------------------------------------------------------------
+# Exp-14: sys.executable for pip install
+# ---------------------------------------------------------------------------
+
+def test_pip_install_uses_sys_executable() -> None:
+    """Verify pip install commands use sys.executable, not bare 'pip'."""
+    import inspect
+    import swebenchify.synthesizer as mod
+    source = inspect.getsource(mod._run_tests_on_buggy_code)
+    assert "sys.executable" in source
+    assert '["pip"' not in source
+
+
+# ---------------------------------------------------------------------------
+# Exp-14: sys.executable replaces 'python' in test commands
+# ---------------------------------------------------------------------------
+
+def test_test_commands_use_sys_executable(tmp_path: Path) -> None:
+    """Verify 'python' in _TEST_COMMANDS is replaced with sys.executable at runtime."""
+    import subprocess
+    import sys
+
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=True)
+
+    (tmp_path / "module.py").write_text("def add(a, b):\n    return a + b\n")
+    (tmp_path / "test_module.py").write_text(
+        "from module import add\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+    )
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=tmp_path, capture_output=True, check=True)
+
+    (tmp_path / "module.py").write_text("def add(a, b):\n    return a - b\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "buggy"], cwd=tmp_path, capture_output=True, check=True)
+    buggy_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    from unittest.mock import patch as mock_patch
+
+    original_run = subprocess.run
+    test_cmds: list = []
+
+    def tracking_run(cmd, **kwargs):
+        if isinstance(cmd, list) and "pytest" in str(cmd):
+            test_cmds.append(cmd)
+        return original_run(cmd, **kwargs)
+
+    with mock_patch("swebenchify.synthesizer.subprocess.run", side_effect=tracking_run):
+        _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
+
+    assert len(test_cmds) >= 1
+    assert test_cmds[0][0] == sys.executable
+    assert "python" not in test_cmds[0]

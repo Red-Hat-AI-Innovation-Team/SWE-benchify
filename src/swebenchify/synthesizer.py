@@ -18,6 +18,7 @@ import os
 import random
 import re
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -2422,7 +2423,7 @@ def _run_tests_on_buggy_code(
         installed = False
         try:
             subprocess.run(
-                ["pip", "install", "-e", ".", "--quiet"],
+                [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"],
                 cwd=repo_path, capture_output=True, text=True, timeout=120,
             )
             installed = True
@@ -2432,7 +2433,7 @@ def _run_tests_on_buggy_code(
         if not installed:
             try:
                 subprocess.run(
-                    ["pip", "install", "-e", ".", "--quiet", "--no-deps"],
+                    [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet", "--no-deps"],
                     cwd=repo_path, capture_output=True, text=True, timeout=60,
                 )
             except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -2446,10 +2447,23 @@ def _run_tests_on_buggy_code(
     else:
         test_env["PYTHONPATH"] = repo_path + os.pathsep + test_env.get("PYTHONPATH", "")
 
+    repo_package_name = Path(repo_path).name.replace("-", "_")
+    try:
+        import_check = subprocess.run(
+            [sys.executable, "-c", f"import {repo_package_name}"],
+            cwd=repo_path, capture_output=True, text=True, timeout=10,
+            env=test_env,
+        )
+        if import_check.returncode != 0:
+            logger.debug("  Package not importable after install: %s", import_check.stderr[:200])
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+
     test_output: str | None = None
     try:
         commands = _TEST_COMMANDS.get(language, [])
-        for cmd in commands:
+        for cmd_template in commands:
+            cmd = [sys.executable if c == "python" else c for c in cmd_template]
             try:
                 result = subprocess.run(
                     cmd, cwd=repo_path, capture_output=True, text=True,
