@@ -1640,6 +1640,17 @@ async def generate_issue_from_symptom(
             parts.append(f'```\n{test_output}\n```')
             parts.append('')
             parts.append(f'Environment: {version}, Python {lang_version}')
+            recent = (repo_context or {}).get('recent_issues', [])
+            if recent and random.random() < 0.9:
+                ref = random.choice(recent)
+                ref_styles = [
+                    f'Related to {ref}',
+                    f'See {ref}',
+                    f'Might be related to {ref}',
+                    f'cf. {ref}',
+                    f'Possibly a regression from {ref}',
+                ]
+                parts.append(random.choice(ref_styles))
             issue = '\n'.join(parts)
             return issue
 
