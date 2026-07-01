@@ -2009,29 +2009,22 @@ async def _generate_test_patch_existing(
         logger.warning("Could not read existing test file %s", test_file)
         return None
 
-    prompt = f"""You are modifying an existing test file to add regression coverage. Here is the current test file:
+    prompt = f"""You are modifying an existing test file to improve test coverage. Here is the current test file:
 
 ```{language}
 {original_test_content}
 ```
 
-A bug was introduced in the code. Here is the original (correct) function:
+Here is a function in the codebase that could use better test coverage:
 ```{language}
 {bug_spec.original_code}
 ```
-
-Here is the buggy function:
-```{language}
-{bug_spec.buggy_code}
-```
-
-The bug: {bug_spec.bug_description}
 
 HARD CONSTRAINT: You MUST NOT add any new `def test_` functions. You can ONLY modify existing test functions by:
 - Adding 1-2 `assert` statements to an existing test function that already tests related behavior
 - Adding a new case to an existing `@pytest.mark.parametrize` decorator
 
-Find the most closely related existing test function and add assertions there. At least one added assertion must PASS against the original code and FAIL against the buggy code.
+Find the most closely related existing test function and add assertions that test edge cases, boundary values, or error handling for the function above.
 
 Requirements:
 - Follow the existing test style and conventions in the file
@@ -2922,6 +2915,13 @@ async def synthesize_repo(
             except OSError:
                 continue
 
+        patch_change_lines = sum(1 for line in patch.splitlines()
+                                 if line.startswith('+') or line.startswith('-'))
+        patch_change_lines -= 2  # --- and +++ lines
+        if patch_change_lines < 4:
+            logger.warning('  Skipped — patch too small (%d changed lines)', patch_change_lines)
+            continue
+
         buggy_commit = _create_buggy_commit_multi(
             repo_path, buggy_files, bug_spec.bug_description,
         )
@@ -2960,7 +2960,11 @@ async def synthesize_repo(
             dataset_examples=dataset_examples,
         )
 
-        test_patch = ''
+        test_patch = await generate_test_patch(
+            bug_spec, repo_path, language, model=model,
+        )
+        if test_patch is None:
+            test_patch = ''
 
         synthesis_result = SynthesisResult(
             bug_spec=bug_spec,
