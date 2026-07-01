@@ -531,7 +531,12 @@ def _find_related_files(
                         for p in (target_module, ".".join(target_parts[:-1]))
                         if p
                     ):
-                        _add_file_snippet(str(f.relative_to(root)))
+                        func_line = 0
+                        for line_idx, line in enumerate(content.splitlines()):
+                            if func_name in line and not line.strip().startswith('#'):
+                                func_line = line_idx
+                                break
+                        _add_file_snippet(str(f.relative_to(root)), func_line)
 
     if len(related) < max_files:
         try:
