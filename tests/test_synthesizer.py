@@ -24,6 +24,7 @@ from swebenchify.synthesizer import (
     _format_new_test_patch,
     _humanize_traceback,
     _is_stdlib_or_installed,
+    _is_valid_test_output,
     _mine_issue_style_examples,
     _mine_social_artifacts,
     _normalize_test_whitespace,
@@ -2219,6 +2220,14 @@ def test_generate_issue_from_symptom_data_first() -> None:
             content = [type("B", (), {"text": "Broken parsing\n\nThis is completely broken."})()]
         yield FakeResult()
 
+    real_test_output = (
+        "FAILED test_parse - UnicodeDecodeError: 'utf-8' codec\n"
+        "E       UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff\n"
+        "tests/test_parse.py:42: UnicodeDecodeError\n"
+        "======================== 1 failed, 10 passed ========================\n"
+        "Extra padding to ensure output exceeds 200 chars. " * 3
+    )
+
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()), \
          mock_patch("swebenchify.synthesizer.ResultMessage", type("FR", (), {})):
@@ -2226,7 +2235,7 @@ def test_generate_issue_from_symptom_data_first() -> None:
         from swebenchify.synthesizer import generate_issue_from_symptom
         result = asyncio.run(generate_issue_from_symptom(
             symptom="parsing fails on unicode",
-            test_output="FAILED test_parse - UnicodeDecodeError: 'utf-8' codec",
+            test_output=real_test_output,
             repo_context={"version": "2.0", "lang_version": "3.11", "os_info": "Ubuntu 22.04"},
         ))
 
@@ -2244,13 +2253,22 @@ def test_generate_issue_from_symptom_data_first_fallback() -> None:
         return
         yield
 
+    real_test_output = (
+        "FAILED tests/test_core.py::test_add\n"
+        "E       AssertionError: expected 3 got -1\n"
+        "E       assert add(1, 2) == 3\n"
+        "tests/test_core.py:15: AssertionError\n"
+        "======================== 1 failed ========================\n"
+        "Extra padding to ensure output exceeds 200 chars. " * 3
+    )
+
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
         from swebenchify.synthesizer import generate_issue_from_symptom
         result = asyncio.run(generate_issue_from_symptom(
             symptom="broken feature",
-            test_output="AssertionError: expected 3 got -1",
+            test_output=real_test_output,
         ))
 
     assert "AssertionError" in result
@@ -2319,3 +2337,173 @@ def test_patch_floor_log_messages_updated() -> None:
     source = inspect.getsource(mod.synthesize_repo)
     assert 'changed lines < 5' in source
     assert 'chars < 500' in source
+
+
+# ---------------------------------------------------------------------------
+# Exp-11: _run_tests_on_buggy_code — pip install before test run
+# ---------------------------------------------------------------------------
+
+def test_run_tests_on_buggy_code_installs_package(tmp_path: Path) -> None:
+    """When repo has setup.py, _run_tests_on_buggy_code runs pip install -e ."""
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=True)
+
+    (tmp_path / "setup.py").write_text("from setuptools import setup\nsetup(name='testpkg')\n")
+    (tmp_path / "module.py").write_text("def add(a, b):\n    return a + b\n")
+    (tmp_path / "test_module.py").write_text(
+        "from module import add\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+    )
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=tmp_path, capture_output=True, check=True)
+
+    (tmp_path / "module.py").write_text("def add(a, b):\n    return a - b\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "buggy"], cwd=tmp_path, capture_output=True, check=True)
+    buggy_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    from unittest.mock import patch as mock_patch
+
+    original_run = subprocess.run
+    pip_calls: list = []
+
+    def tracking_run(cmd, **kwargs):
+        if cmd and cmd[0] == "pip":
+            pip_calls.append(cmd)
+        return original_run(cmd, **kwargs)
+
+    with mock_patch("swebenchify.synthesizer.subprocess.run", side_effect=tracking_run):
+        _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
+
+    assert any("pip" in str(c) and "install" in str(c) for c in pip_calls)
+
+
+# ---------------------------------------------------------------------------
+# Exp-11: _is_valid_test_output
+# ---------------------------------------------------------------------------
+
+def test_is_valid_test_output_module_not_found_error() -> None:
+    output = (
+        "ModuleNotFoundError: No module named 'flask'\n"
+        "During handling of the above exception, another exception occurred."
+    )
+    assert _is_valid_test_output(output) is False
+
+
+def test_is_valid_test_output_short_output() -> None:
+    output = "ERROR: no tests ran\nexit code: 1"
+    assert len(output.strip()) < 200
+    assert _is_valid_test_output(output) is False
+
+
+def test_is_valid_test_output_real_failure() -> None:
+    output = (
+        "FAILED tests/test_core.py::test_add\n"
+        "E       AssertionError: assert -1 == 3\n"
+        "E       + where -1 = add(1, 2)\n"
+        "tests/test_core.py:5: AssertionError\n"
+        "======================== 1 failed, 4 passed ========================\n"
+        "Some extra padding to make it over 200 chars. " * 5
+    )
+    assert _is_valid_test_output(output) is True
+
+
+def test_is_valid_test_output_import_error_without_failure() -> None:
+    output = (
+        "ImportError: cannot import name 'missing_func' from 'mypackage'\n"
+        "During handling...\n"
+        "Some extra padding to make it over 200 chars. " * 5
+    )
+    assert _is_valid_test_output(output) is False
+
+
+def test_is_valid_test_output_import_error_with_failure() -> None:
+    """ImportError is OK if there are also real FAILED markers."""
+    output = (
+        "ImportError: cannot import name 'func'\n"
+        "FAILED tests/test_core.py::test_import\n"
+        "Some extra padding to make it over 200 chars. " * 5
+    )
+    assert _is_valid_test_output(output) is True
+
+
+# ---------------------------------------------------------------------------
+# Exp-11: generate_issue_from_symptom — broken test_output triggers fallback
+# ---------------------------------------------------------------------------
+
+def test_generate_issue_from_symptom_module_not_found_fallback() -> None:
+    """ModuleNotFoundError in test_output triggers LLM-only fallback."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    async def fake_query(prompt: str, options: object = None):
+        return
+        yield
+
+    broken_output = "ModuleNotFoundError: No module named 'flask'"
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import generate_issue_from_symptom
+        result = asyncio.run(generate_issue_from_symptom(
+            symptom="debug warning inverted",
+            test_output=broken_output,
+        ))
+
+    assert "ModuleNotFoundError" not in result
+    assert "flask" not in result
+
+
+def test_generate_issue_from_symptom_short_output_fallback() -> None:
+    """Short test output (< 200 chars) triggers LLM-only fallback."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    async def fake_query(prompt: str, options: object = None):
+        return
+        yield
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import generate_issue_from_symptom
+        result = asyncio.run(generate_issue_from_symptom(
+            symptom="broken feature",
+            test_output="exit code 1",
+        ))
+
+    assert "exit code 1" not in result
+
+
+def test_generate_issue_from_symptom_real_failure_uses_data_first() -> None:
+    """Real test failure output uses the data-first path."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    async def fake_query(prompt: str, options: object = None):
+        return
+        yield
+
+    real_output = (
+        "FAILED tests/test_core.py::test_add\n"
+        "E       AssertionError: assert -1 == 3\n"
+        "E       + where -1 = add(1, 2)\n"
+        "tests/test_core.py:5: AssertionError\n"
+        "======================== 1 failed, 4 passed ========================\n"
+        "Some extra padding to get over 200 chars. " * 5
+    )
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import generate_issue_from_symptom
+        result = asyncio.run(generate_issue_from_symptom(
+            symptom="calculation returns wrong value",
+            test_output=real_output,
+        ))
+
+    assert "FAILED" in result
+    assert "AssertionError" in result
+    assert "```" in result
