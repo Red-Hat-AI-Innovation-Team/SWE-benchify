@@ -1289,7 +1289,10 @@ def generate_patch(
         fromfile=f"a/{filepath}",
         tofile=f"b/{filepath}",
     )
-    return "".join(diff)
+    raw = "".join(diff)
+    if raw and not raw.startswith("diff --git"):
+        raw = f"diff --git a/{filepath} b/{filepath}\n{raw}"
+    return raw
 
 
 _OS_CHOICES = [
