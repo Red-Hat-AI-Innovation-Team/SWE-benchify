@@ -28,28 +28,55 @@ from dataclasses import asdict
 # ── Configuration ────────────────────────────────────────────────────────
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATASET_PATH = os.path.join(PROJECT_ROOT, "output/swebenchify-dataset.jsonl")
 EVAL_DOCS = os.path.join(PROJECT_ROOT, "docs/synthetic-eval")
 
 SYNTH_MODEL = "claude-opus-4-6"
 JUDGE_MODEL = "claude-opus-4-6"
 
+OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output")
+
+DATASET_PATHS = [
+    os.path.join(OUTPUT_DIR, "swebenchify-dataset.jsonl"),
+    os.path.join(OUTPUT_DIR, "instances-python.jsonl"),
+    os.path.join(OUTPUT_DIR, "instances-go.jsonl"),
+    os.path.join(OUTPUT_DIR, "instances-java.jsonl"),
+    os.path.join(OUTPUT_DIR, "instances-rust.jsonl"),
+]
+
 EVAL_TARGETS = [
     {
-        "repo_slug": "pallets/flask",
-        "repo_url": "https://github.com/pallets/flask.git",
-        "repo_path": "/tmp/flask-synth-test",
+        "repo_slug": "containers/podman-compose",
+        "repo_url": "https://github.com/containers/podman-compose.git",
+        "repo_path": "/tmp/podman-compose-synth-test",
         "language": "python",
-        "base_commit": "735a4701d6d5e848241e7d7535db898efb62d400",
+        "base_commit": "121b5f6ea1b6bc1f8ea4ddf4ebc7ff809d5b876e",
         "n_synthetic": 3,
         "n_real": 3,
     },
     {
-        "repo_slug": "psf/requests",
-        "repo_url": "https://github.com/psf/requests.git",
-        "repo_path": "/tmp/requests-synth-test",
-        "language": "python",
-        "base_commit": "0106aced5faa299e6ede89d1230bd6784f2c3660",
+        "repo_slug": "grpc/grpc-go",
+        "repo_url": "https://github.com/grpc/grpc-go.git",
+        "repo_path": "/tmp/grpc-go-synth-test",
+        "language": "go",
+        "base_commit": "a481b8f755bccf5c0308f1530e785bb58a770150",
+        "n_synthetic": 3,
+        "n_real": 3,
+    },
+    {
+        "repo_slug": "FasterXML/jackson-databind",
+        "repo_url": "https://github.com/FasterXML/jackson-databind.git",
+        "repo_path": "/tmp/jackson-databind-synth-test",
+        "language": "java",
+        "base_commit": "bc1613c765704703ec7385e314fa8b19448e1ddd",
+        "n_synthetic": 3,
+        "n_real": 3,
+    },
+    {
+        "repo_slug": "rayon-rs/rayon",
+        "repo_url": "https://github.com/rayon-rs/rayon.git",
+        "repo_path": "/tmp/rayon-synth-test",
+        "language": "rust",
+        "base_commit": "2de810e97d5ce832ff98023a4a9cf215a86244ea",
         "n_synthetic": 3,
         "n_real": 3,
     },
@@ -90,7 +117,7 @@ class _FakeOptions:
 
 import swebenchify.synthesizer as synth_mod  # noqa: E402
 from swebenchify.grader import compute_f2p  # noqa: E402
-from swebenchify.models import EnvironmentSpec  # noqa: E402
+from swebenchify.models import EnvironmentSpec, GoEnvironmentSpec, RustEnvironmentSpec  # noqa: E402
 
 synth_mod.query = _vertex_query
 synth_mod.ResultMessage = _FakeResultMessage
@@ -150,15 +177,34 @@ def pick_base_commit(repo_slug: str, all_real: list[dict]) -> str:
     return chosen["base_commit"]
 
 
-def _make_env_spec(target: dict) -> EnvironmentSpec:
-    """Build an EnvironmentSpec for Docker-based F2P validation."""
-    return EnvironmentSpec(
-        language=target["language"],
-        language_version="3.11",
-        package_manager="pip",
-        install_cmd="pip install -e .",
-        test_cmd="pytest -xvs",
-    )
+def _make_env_spec(target: dict) -> EnvironmentSpec | GoEnvironmentSpec | RustEnvironmentSpec:
+    """Build a language-appropriate env spec for Docker-based F2P validation."""
+    lang = target["language"]
+    if lang == "python":
+        return EnvironmentSpec(
+            language="python",
+            language_version="3.11",
+            package_manager="pip",
+            install_cmd="pip install -e .",
+            test_cmd="pytest -xvs",
+        )
+    if lang == "go":
+        return GoEnvironmentSpec(
+            test_cmd="go test ./...",
+        )
+    if lang == "rust":
+        return RustEnvironmentSpec(
+            test_cmd="cargo test",
+        )
+    if lang == "java":
+        return EnvironmentSpec(
+            language="java",
+            language_version="17",
+            package_manager="maven",
+            install_cmd="mvn install -DskipTests -q",
+            test_cmd="mvn test -pl .",
+        )
+    return GoEnvironmentSpec()
 
 
 # ── Validation tiers (ordered cheapest → most expensive) ───────────────
@@ -405,9 +451,15 @@ def main():
     err(f"Multi-repo eval: {', '.join(t['repo_slug'] for t in targets)}")
     err("=" * 72)
 
-    # ── Load dataset ──
-    with open(DATASET_PATH) as f:
-        all_real = [json.loads(line) for line in f]
+    # ── Load dataset (merge all instance files) ──
+    all_real = []
+    for ds_path in DATASET_PATHS:
+        if os.path.isfile(ds_path):
+            with open(ds_path) as f:
+                all_real.extend(json.loads(line) for line in f)
+            err(f"  Loaded {ds_path}")
+        else:
+            err(f"  Skipped (not found): {ds_path}")
 
     random.seed(args.seed if args.seed is not None else 42 + round_num)
 
