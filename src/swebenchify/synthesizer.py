@@ -1626,23 +1626,8 @@ async def generate_issue_from_symptom(
             test_output = None
         else:
             test_id = m.group(1)
-            _ISSUE_OPENERS = [
-                'This test started failing after a recent update.',
-                'Getting unexpected test failures.',
-                'Noticed this is broken while working on something else.',
-                'Tests are failing on this branch.',
-                'Ran into this failure, not sure what changed.',
-                '',
-            ]
-            opener = random.choice(_ISSUE_OPENERS)
-            parts = [test_id, '']
-            if opener:
-                parts.append(opener)
-                parts.append('')
-            parts.append(f'```\n{test_output}\n```')
-            parts.append('')
-            parts.append(f'Environment: {version}, Python {lang_version}')
             recent = (repo_context or {}).get('recent_issues', [])
+            ref_line = ''
             if recent and random.random() < 0.9:
                 ref = random.choice(recent)
                 ref_styles = [
@@ -1652,7 +1637,77 @@ async def generate_issue_from_symptom(
                     f'cf. {ref}',
                     f'Possibly a regression from {ref}',
                 ]
-                parts.append(random.choice(ref_styles))
+                ref_line = random.choice(ref_styles)
+
+            template = random.randint(0, 3)
+
+            if template == 0:
+                parts = [test_id, '']
+                openers = [
+                    'This test started failing after a recent update.',
+                    'Getting unexpected test failures.',
+                    'Noticed this is broken while working on something else.',
+                    'Tests are failing on this branch.',
+                    'Ran into this failure, not sure what changed.',
+                    '',
+                ]
+                opener = random.choice(openers)
+                if opener:
+                    parts.append(opener)
+                    parts.append('')
+                parts.append(f'```\n{test_output}\n```')
+                parts.append('')
+                parts.append(f'Environment: {version}, Python {lang_version}')
+                if ref_line:
+                    parts.append(ref_line)
+
+            elif template == 1:
+                parts = [
+                    f'Failing: `{test_id}`',
+                    '',
+                    f'```\n{test_output}\n```',
+                    '',
+                    f'{version} / Python {lang_version}',
+                ]
+                if ref_line:
+                    parts.append('')
+                    parts.append(ref_line)
+
+            elif template == 2:
+                short_name = test_id.rsplit('::', 1)[-1] if '::' in test_id else test_id
+                openers_conv = [
+                    f'Seeing failures in {short_name} — not sure if this is expected?',
+                    f'{short_name} broke, might be related to recent changes.',
+                    f'CI is red because of {short_name}.',
+                    f'Is {short_name} supposed to work like this?',
+                ]
+                parts = [random.choice(openers_conv), '']
+                parts.append(f'```\n{test_output}\n```')
+                parts.append('')
+                parts.append(f'{version}, Python {lang_version}')
+                if ref_line:
+                    parts.append('')
+                    parts.append(ref_line)
+
+            elif template == 3:
+                parts = [
+                    test_id,
+                    '',
+                    '### Steps to reproduce',
+                    '',
+                    f'Run `pytest {test_id}`.',
+                    '',
+                    '### Output',
+                    '',
+                    f'```\n{test_output}\n```',
+                    '',
+                    f'**Version:** {version}',
+                    f'**Python:** {lang_version}',
+                ]
+                if ref_line:
+                    parts.append('')
+                    parts.append(ref_line)
+
             issue = '\n'.join(parts)
             return issue
 
