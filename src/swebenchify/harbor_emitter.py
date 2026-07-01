@@ -76,6 +76,50 @@ def _first_line(text: str) -> str:
     return "Fix issue"
 
 
+def _build_go_test_command(test_patch: str) -> str:
+    """Build go test command, handling multi-module repos.
+
+    In multi-module repos (e.g., etcd), subdirectories have their own go.mod.
+    Running `go test ./server/etcdserver/...` from the repo root fails because
+    the root module doesn't contain that package. Instead we need:
+    `cd server && go test -v -count=1 ./etcdserver/...`
+    """
+    seen: dict[str, list[str]] = {}
+    for line in test_patch.splitlines():
+        if not line.startswith("diff --git"):
+            continue
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        b_path = parts[3]
+        path = b_path[2:] if b_path.startswith("b/") else b_path
+        path_parts = Path(path).parts
+        if len(path_parts) <= 1:
+            top = "."
+            pkg = "./..."
+        else:
+            top = path_parts[0]
+            rel_pkg = str(Path(*path_parts[1:-1])) if len(path_parts) > 2 else "."
+            pkg = f"./{rel_pkg}" if rel_pkg != "." else "./..."
+        if top not in seen:
+            seen[top] = []
+        if pkg not in seen[top]:
+            seen[top].append(pkg)
+
+    if not seen:
+        return "go test -v -count=1 ./..."
+
+    cmds: list[str] = []
+    for root, pkgs in seen.items():
+        pkg_str = " ".join(pkgs)
+        if root == ".":
+            cmds.append(f"go test -v -count=1 {pkg_str}")
+        else:
+            cmds.append(f"(cd {root} && go test -v -count=1 {pkg_str})")
+
+    return " ; ".join(cmds)
+
+
 class HarborTaskGenerator:
     """Generates Harbor task directories from TaskInstance objects."""
 
@@ -297,12 +341,9 @@ class HarborTaskGenerator:
         backend = get_backend(language)
 
         if language == "go":
-            scope = ""
-            if instance.test_patch and backend:
-                scope = backend.test_scope(instance.test_patch)
-            if not scope:
-                scope = "./..."
-            return f"go test -v -count=1 {scope}"
+            if instance.test_patch:
+                return _build_go_test_command(instance.test_patch)
+            return "go test -v -count=1 ./..."
 
         if language == "python":
             scope = ""
