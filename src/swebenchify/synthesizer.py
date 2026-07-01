@@ -1640,17 +1640,6 @@ async def generate_issue_from_symptom(
             parts.append(f'```\n{test_output}\n```')
             parts.append('')
             parts.append(f'Environment: {version}, Python {lang_version}')
-            # Sometimes add a reference to a real issue from the repo
-            recent = (repo_context or {}).get('recent_issues', [])
-            if recent and random.random() < 0.6:
-                ref = random.choice(recent)
-                ref_styles = [
-                    f'Related to {ref}',
-                    f'See {ref}',
-                    f'Might be related to {ref}',
-                    f'cf. {ref}',
-                ]
-                parts.append(random.choice(ref_styles))
             issue = '\n'.join(parts)
             return issue
 
@@ -2339,10 +2328,7 @@ Only suggest changes to files that actually exist in the repo. Keep changes smal
     # Constrain incidental changes to the same file as the fix or project-level files
     # Changelog files disabled — synthetic entries consistently contradict
     # the code direction and are a strong detection signal for judges.
-    _PROJECT_LEVEL: set[str] = {
-        'CHANGES.rst', 'CHANGES', 'CHANGELOG.rst', 'CHANGELOG.md',
-        'HISTORY.rst', 'HISTORY.md',
-    }
+    _PROJECT_LEVEL: set[str] = set()
     # Extract significant keywords from bug description for changelog validation
     _STOP_WORDS = {
         "the", "a", "an", "in", "on", "of", "to", "for", "is", "and", "or",
