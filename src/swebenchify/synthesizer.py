@@ -17,7 +17,9 @@ import logging
 import os
 import random
 import re
+import shutil
 import subprocess
+import tempfile
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +47,8 @@ _EXCLUDE_DIRS: set[str] = {
     "node_modules", "vendor", ".eggs", "build", "dist", "target",
     "docs", "doc", "examples", "example", "benchmarks", "benchmark",
     "demo", "demos", "scripts", "tools", ".github", ".ci",
+    ".venv", "venv", ".synth-venv", ".test-venv", "env", ".env",
+    "site-packages",
 }
 
 _LANGUAGE_EXCLUDE_PATTERNS: dict[str, list[re.Pattern[str]]] = {
@@ -1289,7 +1293,10 @@ def generate_patch(
         fromfile=f"a/{filepath}",
         tofile=f"b/{filepath}",
     )
-    return "".join(diff)
+    raw = "".join(diff)
+    if raw and not raw.startswith("diff --git"):
+        raw = f"diff --git a/{filepath} b/{filepath}\n{raw}"
+    return raw
 
 
 _OS_CHOICES = [
@@ -1561,6 +1568,8 @@ def _is_valid_test_output(test_output: str) -> bool:
         return False
     head = stripped[:500]
     if 'ModuleNotFoundError' in head:
+        return False
+    if 'ImportError while loading conftest' in stripped:
         return False
     failure_signals = ('FAILED', 'AssertionError', 'Error', 'ERRORS', 'Traceback')
     if not any(sig in stripped for sig in failure_signals):
@@ -1869,6 +1878,7 @@ def _find_existing_test_file(
         candidates: list[str] = [
             f"tests/test_{stem}.py",
             f"test/test_{stem}.py",
+            f"test_{stem}.py",
             str(source_path.parent / f"test_{stem}.py"),
         ]
         if source_path.parent.parts:
@@ -1878,13 +1888,16 @@ def _find_existing_test_file(
         for c in candidates:
             if (root / c).is_file():
                 return c
-        # Fuzzy match: any test file in tests/ whose name contains the stem
+        # Fuzzy match: any test file in tests/ or repo root whose name contains the stem
         for test_dir_name in ("tests", "test"):
             tests_dir = root / test_dir_name
             if tests_dir.is_dir():
                 for f in tests_dir.rglob("*.py"):
                     if stem in f.stem:
                         return str(f.relative_to(root))
+        for f in sorted(root.glob("test_*.py")):
+            if stem in f.stem:
+                return str(f.relative_to(root))
         # Broader search: find any test_*.py file that imports the same module
         module_name = _source_to_module_name(source_file)
         if module_name:
@@ -1968,6 +1981,12 @@ def _find_test_file_importing(root: Path, module_name: str) -> str | None:
             except OSError:
                 continue
             test_files.append((f, content))
+    for f in sorted(root.glob("test_*.py")):
+        try:
+            content = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        test_files.append((f, content))
 
     for f, content in test_files:
         if specific_pat.search(content):
@@ -1986,6 +2005,7 @@ async def generate_test_patch(
     repo_path: str,
     language: str,
     model: str = "sonnet",
+    test_output: str | None = None,
 ) -> str | None:
     """Generate a test patch that exposes a synthetic bug.
 
@@ -1998,6 +2018,7 @@ async def generate_test_patch(
     if existing_test:
         return await _generate_test_patch_existing(
             bug_spec, repo_path, existing_test, language, model,
+            test_output=test_output,
         )
     logger.warning(
         "  No existing test file found for %s — skipping test patch generation",
@@ -2011,12 +2032,103 @@ def _count_test_functions(code: str) -> int:
     return len(re.findall(r'^\s*def\s+test_\w+', code, re.MULTILINE))
 
 
+def _extract_test_functions(source: str) -> list[dict[str, str | int]]:
+    """Extract test functions from Python source using AST.
+
+    Returns a list of dicts with keys: name, source, start_line, end_line.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    source_lines = source.splitlines(keepends=True)
+    results: list[dict[str, str | int]] = []
+
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not node.name.startswith("test_"):
+            continue
+        start = node.lineno - 1
+        end = node.end_lineno if node.end_lineno else start + 1
+        func_source = "".join(source_lines[start:end])
+        results.append({
+            "name": node.name,
+            "source": func_source,
+            "start_line": start,
+            "end_line": end,
+        })
+
+    return results
+
+
+def _find_best_test_function(
+    test_functions: list[dict[str, str | int]],
+    bug_spec: BugSpec,
+) -> dict[str, str | int] | None:
+    """Pick the test function most relevant to the bug."""
+    ranked = _rank_test_functions(test_functions, bug_spec)
+    return ranked[0] if ranked else None
+
+
+def _rank_test_functions(
+    test_functions: list[dict[str, str | int]],
+    bug_spec: BugSpec,
+    limit: int = 3,
+) -> list[dict[str, str | int]]:
+    """Return test functions ranked by relevance to the bug, up to *limit*."""
+    if not test_functions:
+        return []
+
+    targets = {bug_spec.function_name}
+    module_stem = Path(bug_spec.file).stem
+    if module_stem:
+        targets.add(module_stem)
+
+    scored: list[tuple[int, int, dict[str, str | int]]] = []
+    for idx, tf in enumerate(test_functions):
+        body = str(tf["source"]).lower()
+        score = sum(1 for t in targets if t.lower() in body)
+        scored.append((score, -idx, tf))
+
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return [tf for _, _, tf in scored[:limit]]
+
+
+def _extract_file_imports(source: str) -> str:
+    """Extract import lines from the top of a Python file."""
+    lines: list[str] = []
+    for line in source.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("import ", "from ")) or stripped == "":
+            lines.append(line)
+        elif lines and not stripped:
+            lines.append(line)
+        elif stripped.startswith("#"):
+            lines.append(line)
+        elif lines:
+            break
+    return "\n".join(lines).rstrip() + "\n" if lines else ""
+
+
+def _test_output_section(test_output: str | None) -> str:
+    if not test_output:
+        return ""
+    return (
+        "Here is what happens when existing tests run against the buggy code "
+        "(use this to understand what inputs trigger the bug):\n"
+        + test_output
+    )
+
+
 async def _generate_test_patch_existing(
     bug_spec: BugSpec,
     repo_path: str,
     test_file: str,
     language: str,
     model: str,
+    test_output: str | None = None,
 ) -> str | None:
     """Generate a test patch by adding tests to an existing test file."""
     try:
@@ -2027,10 +2139,35 @@ async def _generate_test_patch_existing(
         logger.warning("Could not read existing test file %s", test_file)
         return None
 
-    prompt = f"""You are modifying an existing test file to add regression coverage. Here is the current test file:
+    if language != "python":
+        return None
 
+    test_functions = _extract_test_functions(original_test_content)
+    if not test_functions:
+        logger.warning("  No test functions found in %s", test_file)
+        return None
+
+    ranked = _rank_test_functions(test_functions, bug_spec)
+    if not ranked:
+        return None
+
+    file_imports = _extract_file_imports(original_test_content)
+    resolved_model = MODEL_MAP.get(model, model)
+    options = ClaudeCodeOptions(max_turns=1, model=resolved_model)
+
+    for attempt, target in enumerate(ranked):
+        target_source = str(target["source"])
+
+        prompt = f"""You are modifying a single test function to add regression coverage for a bug.
+
+Here is the test function to modify:
 ```{language}
-{original_test_content}
+{target_source}
+```
+
+Context — imports used in the test file:
+```{language}
+{file_imports}
 ```
 
 A bug was introduced in the code. Here is the original (correct) function:
@@ -2044,68 +2181,74 @@ Here is the buggy function:
 ```
 
 The bug: {bug_spec.bug_description}
+{_test_output_section(test_output)}
+HARD CONSTRAINT: Return ONLY the modified function. Do NOT return the complete file.
 
-HARD CONSTRAINT: You MUST NOT add any new `def test_` functions. You can ONLY modify existing test functions by:
-- Adding 1-2 `assert` statements to an existing test function that already tests related behavior
-- Adding a new case to an existing `@pytest.mark.parametrize` decorator
-
-Find the most closely related existing test function and add assertions there. At least one added assertion must PASS against the original code and FAIL against the buggy code.
+Add 1-2 `assert` statements to this function. At least one must PASS against the original code and FAIL against the buggy code.
 
 Requirements:
-- Follow the existing test style and conventions in the file
-- Use the same imports, fixtures, and test patterns already present
+- Keep the same function name and signature
+- Follow the existing test style
 - Do NOT add comments explaining your changes
-- Do NOT add new test functions — this will be validated and rejected
+- Do NOT add new test functions
+- Return ONLY the function starting from `def {target["name"]}` — nothing else"""
 
-Return the COMPLETE modified test file."""
-
-    resolved_model = MODEL_MAP.get(model, model)
-    options = ClaudeCodeOptions(max_turns=1, model=resolved_model)
-
-    modified_content: str | None = None
-    try:
-        async for message in query(prompt=prompt, options=options):
-            if isinstance(message, ResultMessage):
-                text = _extract_text_from_result(message)
-                if text:
-                    extracted = _extract_code_block(text)
-                    modified_content = extracted if extracted else text
-    except Exception:
-        logger.warning("LLM call failed for existing-file test generation")
-        return None
-
-    if not modified_content or modified_content.strip() == original_test_content.strip():
-        return None
-
-    if len(modified_content) < len(original_test_content) * 0.5:
-        logger.warning(
-            "  Generated test code too short (%d chars vs %d original) — likely truncated",
-            len(modified_content), len(original_test_content),
-        )
-        return None
-
-    modified_content = _strip_strategy_labels(modified_content)
-    modified_content = _normalize_test_whitespace(modified_content, original_test_content)
-
-    if not _validate_test_code(modified_content, language):
-        logger.warning("  Generated test code failed validation")
-        return None
-
-    if language == "python" and not _validate_test_imports(modified_content, repo_path):
-        return None
-
-    if language == 'python':
-        original_test_count = _count_test_functions(original_test_content)
-        modified_test_count = _count_test_functions(modified_content)
-        if modified_test_count > original_test_count:
+        modified_func: str | None = None
+        try:
+            async for message in query(prompt=prompt, options=options):
+                if isinstance(message, ResultMessage):
+                    text = _extract_text_from_result(message)
+                    if text:
+                        extracted = _extract_code_block(text)
+                        modified_func = extracted if extracted else text
+        except Exception:
             logger.warning(
-                '  Test patch adds %d new test function(s) — rejecting to avoid detection',
-                modified_test_count - original_test_count,
+                "LLM call failed for test function %s (attempt %d/%d)",
+                target["name"], attempt + 1, len(ranked),
             )
-            return None
+            continue
 
-    # generate_patch diffs mutated→original; swap args so we get original→modified
-    return generate_patch(modified_content, original_test_content, test_file)
+        if not modified_func or modified_func.strip() == target_source.strip():
+            logger.debug(
+                "  No change produced for %s (attempt %d/%d)",
+                target["name"], attempt + 1, len(ranked),
+            )
+            continue
+
+        modified_func = _strip_strategy_labels(modified_func)
+        func_prefix = f"def {target['name']}"
+        idx = modified_func.find(func_prefix)
+        if idx > 0:
+            modified_func = modified_func[idx:]
+        elif idx < 0:
+            logger.warning(
+                "  LLM response missing function definition for %s (attempt %d/%d)",
+                target["name"], attempt + 1, len(ranked),
+            )
+            continue
+
+        modified_content = original_test_content.replace(target_source.rstrip(), modified_func.rstrip())
+
+        if modified_content == original_test_content:
+            logger.warning(
+                "  Splice failed for %s (attempt %d/%d)",
+                target["name"], attempt + 1, len(ranked),
+            )
+            continue
+
+        modified_content = _normalize_test_whitespace(modified_content, original_test_content)
+
+        if not _validate_test_code(modified_content, language):
+            logger.warning(
+                "  Validation failed for %s (attempt %d/%d)",
+                target["name"], attempt + 1, len(ranked),
+            )
+            continue
+
+        return generate_patch(modified_content, original_test_content, test_file)
+
+    logger.warning("  All %d test function attempts failed", len(ranked))
+    return None
 
 
 async def _generate_test_patch_new(
@@ -2623,27 +2766,83 @@ def _run_tests_on_buggy_code(
     except subprocess.CalledProcessError:
         return None
 
-    # Install the target package so imports resolve during test runs
+    # Install the target package in an ISOLATED venv so it doesn't pollute
+    # the host Python (e.g. psf/requests would shadow the system 'requests').
     root = Path(repo_path)
+    venv_dir = root / '.synth-venv'
     if any((root / cfg).is_file() for cfg in ("pyproject.toml", "setup.py", "setup.cfg")):
-        installed = False
         try:
             subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"],
+                [sys.executable, '-m', 'venv', str(venv_dir)],
+                capture_output=True, text=True, timeout=60,
+            )
+            venv_pip = str(venv_dir / 'bin' / 'pip')
+            subprocess.run(
+                [venv_pip, 'install', '-e', '.', '--quiet'],
                 cwd=repo_path, capture_output=True, text=True, timeout=120,
             )
-            installed = True
+            subprocess.run(
+                [venv_pip, 'install', 'pytest', '--quiet'],
+                capture_output=True, text=True, timeout=60,
+            )
+            # Install test dependencies if a requirements file exists
+            for req_file in [
+                'requirements/tests.txt', 'requirements/test.txt',
+                'requirements-test.txt', 'test-requirements.txt',
+                'requirements/dev.txt', 'requirements-dev.txt',
+            ]:
+                req_path = root / req_file
+                if req_path.is_file():
+                    subprocess.run(
+                        [venv_pip, 'install', '-r', str(req_path), '--quiet'],
+                        capture_output=True, text=True, timeout=120,
+                    )
+                    break
+            # Verify the installed package actually imports; if not,
+            # try downgrading deps that are known to break old releases.
+            venv_py = str(venv_dir / 'bin' / 'python')
+            pkg_name = Path(repo_path).name.replace('-', '_')
+            for candidate in [pkg_name, pkg_name.split('_')[0]]:
+                _imp = subprocess.run(
+                    [venv_py, '-c', f'import {candidate}'],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if _imp.returncode == 0:
+                    break
+            else:
+                imp_stderr = _imp.stderr if _imp else ''
+                compat_pins: list[str] = []
+                if 'jinja2' in imp_stderr.lower() or 'markup' in imp_stderr.lower():
+                    compat_pins.extend(['jinja2<3.1', 'markupsafe<2.1'])
+                if 'werkzeug' in imp_stderr.lower():
+                    compat_pins.append('Werkzeug<2.0')
+                if 'itsdangerous' in imp_stderr.lower():
+                    compat_pins.append('itsdangerous<2.1')
+                if compat_pins:
+                    subprocess.run(
+                        [venv_pip, 'install'] + compat_pins + ['--quiet'],
+                        capture_output=True, text=True, timeout=60,
+                    )
+                for req_file in ['requirements.txt', 'requirements-dev.txt',
+                                 'test-requirements.txt']:
+                    req_path = root / req_file
+                    if req_path.is_file():
+                        subprocess.run(
+                            [venv_pip, 'install', '-r', str(req_path), '--quiet'],
+                            capture_output=True, text=True, timeout=120,
+                        )
+                        break
+            site_pkgs = subprocess.run(
+                [str(venv_dir / 'bin' / 'python'), '-c',
+                 'import site; print(site.getsitepackages()[0])'],
+                capture_output=True, text=True, timeout=10,
+            )
+            if site_pkgs.returncode == 0:
+                sp = site_pkgs.stdout.strip()
+                test_env['PYTHONPATH'] = sp + os.pathsep + test_env.get('PYTHONPATH', '')
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
                 FileNotFoundError, OSError):
-            pass
-        if not installed:
-            try:
-                subprocess.run(
-                    [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet", "--no-deps"],
-                    cwd=repo_path, capture_output=True, text=True, timeout=60,
-                )
-            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-                logger.debug("  pip install -e . failed, proceeding anyway")
+            logger.debug('  venv pip install -e . failed, proceeding anyway')
 
     repo_package_name = Path(repo_path).name.replace("-", "_")
     try:
@@ -2978,7 +3177,127 @@ async def synthesize_repo(
             dataset_examples=dataset_examples,
         )
 
-        test_patch = ''
+        test_patch = await generate_test_patch(
+            bug_spec, repo_path, language, model=model,
+            test_output=test_output,
+        ) or ''
+
+        if not test_patch.strip():
+            logger.warning("  Skipped -- no valid test patch generated")
+            continue
+
+        # Checkout buggy commit so pre-flight F2P tests see the mutation
+        try:
+            subprocess.run(
+                ['git', 'checkout', '--quiet', buggy_commit],
+                cwd=repo_path, capture_output=True, text=True, check=True,
+            )
+        except subprocess.CalledProcessError:
+            logger.warning('  Skipped — could not checkout buggy commit for pre-flight F2P')
+            continue
+
+        # Pre-validate: test_patch must cause failures on buggy code
+        test_file_for_patch = None
+        for line in test_patch.splitlines():
+            if line.startswith('diff --git'):
+                parts = line.split()
+                if len(parts) >= 4:
+                    test_file_for_patch = parts[3].lstrip('b/')
+                    break
+
+        if test_file_for_patch:
+            patch_file = Path(tempfile.mktemp(suffix='.patch'))
+            try:
+                patch_file.write_text(test_patch, encoding='utf-8')
+                apply_result = subprocess.run(
+                    ['git', 'apply', '--check', str(patch_file)],
+                    cwd=repo_path, capture_output=True, text=True,
+                )
+                if apply_result.returncode != 0:
+                    logger.warning('  Skipped — test_patch does not apply cleanly')
+                    patch_file.unlink(missing_ok=True)
+                    subprocess.run(
+                        ['git', 'checkout', '--quiet', base_commit],
+                        cwd=repo_path, capture_output=True, text=True,
+                    )
+                    continue
+
+                # Build env with venv site-packages
+                venv_dir = Path(repo_path) / '.synth-venv'
+                if venv_dir.is_dir():
+                    venv_python = str(venv_dir / 'bin' / 'python')
+                    preflight_env = dict(os.environ)
+                else:
+                    venv_python = sys.executable
+                    preflight_env = dict(os.environ)
+                    pp_parts = [repo_path]
+                    src_dir = Path(repo_path) / 'src'
+                    if src_dir.is_dir():
+                        pp_parts.append(str(src_dir))
+                    preflight_env['PYTHONPATH'] = os.pathsep.join(pp_parts)
+
+                # Baseline: run tests WITHOUT test_patch
+                baseline_run = subprocess.run(
+                    [venv_python, '-m', 'pytest', '--tb=line', '-q', test_file_for_patch],
+                    cwd=repo_path, capture_output=True, text=True, timeout=120,
+                    env=preflight_env,
+                )
+
+                # Apply test_patch
+                subprocess.run(
+                    ['git', 'apply', str(patch_file)],
+                    cwd=repo_path, capture_output=True, text=True,
+                )
+
+                # Run tests WITH test_patch
+                patched_run = subprocess.run(
+                    [venv_python, '-m', 'pytest', '--tb=line', '-q', test_file_for_patch],
+                    cwd=repo_path, capture_output=True, text=True, timeout=120,
+                    env=preflight_env,
+                )
+
+                # Revert the test_patch
+                subprocess.run(
+                    ['git', 'checkout', '--', test_file_for_patch],
+                    cwd=repo_path, capture_output=True, text=True,
+                )
+
+                # Evaluate: test_patch must add NEW failures
+                baseline_fails = len(re.findall(r'FAILED', baseline_run.stdout))
+                patched_fails = len(re.findall(r'FAILED', patched_run.stdout))
+
+                if baseline_run.returncode != 0 and baseline_fails == 0:
+                    logger.debug('  Pre-flight baseline: rc=%d but 0 FAILED lines. stderr: %s',
+                                 baseline_run.returncode, baseline_run.stderr[:200])
+                if patched_run.returncode != 0 and patched_fails == 0:
+                    logger.debug('  Pre-flight patched: rc=%d but 0 FAILED lines. stderr: %s',
+                                 patched_run.returncode, patched_run.stderr[:200])
+                logger.debug('  Pre-flight baseline stdout (last 300): %s', baseline_run.stdout[-300:])
+                logger.debug('  Pre-flight patched stdout (last 300): %s', patched_run.stdout[-300:])
+
+                if patched_run.returncode == 0:
+                    logger.warning('  Pre-flight: test_patch does not fail on buggy code — continuing anyway')
+                elif patched_fails <= baseline_fails:
+                    logger.warning('  Pre-flight: test_patch did not add new failures (%d baseline, %d patched) — continuing anyway',
+                                   baseline_fails, patched_fails)
+                else:
+                    logger.info('  Pre-flight F2P PASSED — %d new failures (baseline=%d, patched=%d)',
+                                patched_fails - baseline_fails, baseline_fails, patched_fails)
+
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                logger.warning('  Pre-flight F2P check error: %s — continuing anyway', exc)
+                subprocess.run(
+                    ['git', 'checkout', '--', test_file_for_patch],
+                    cwd=repo_path, capture_output=True, text=True,
+                )
+            finally:
+                patch_file.unlink(missing_ok=True)
+
+        # Restore base_commit for next iteration
+        subprocess.run(
+            ['git', 'checkout', '--quiet', base_commit],
+            cwd=repo_path, capture_output=True, text=True,
+        )
 
         synthesis_result = SynthesisResult(
             bug_spec=bug_spec,
@@ -2999,6 +3318,13 @@ async def synthesize_repo(
         logger.info(
             "  Generated: %s (%s)", candidate.instance_id, bug_spec.bug_category,
         )
+
+    venv_cleanup = Path(repo_path) / '.synth-venv'
+    if venv_cleanup.is_dir():
+        shutil.rmtree(venv_cleanup, ignore_errors=True)
+    test_venv = Path(repo_path) / '.test-venv'
+    if test_venv.is_dir():
+        shutil.rmtree(test_venv, ignore_errors=True)
 
     logger.info(
         "Synthesis complete: %d/%d candidates generated",

@@ -2666,20 +2666,19 @@ def test_run_tests_on_buggy_code_installs_package(tmp_path: Path) -> None:
 
     from unittest.mock import patch as mock_patch
 
-    import sys
     original_run = subprocess.run
-    pip_calls: list = []
+    all_calls: list = []
 
     def tracking_run(cmd, **kwargs):
-        if cmd and len(cmd) >= 3 and cmd[1:3] == ["-m", "pip"]:
-            pip_calls.append(cmd)
+        if cmd:
+            all_calls.append(cmd)
         return original_run(cmd, **kwargs)
 
     with mock_patch("swebenchify.synthesizer.subprocess.run", side_effect=tracking_run):
         _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
 
-    assert any("pip" in str(c) and "install" in str(c) for c in pip_calls)
-    assert all(c[0] == sys.executable for c in pip_calls)
+    assert any(len(c) >= 3 and c[1:3] == ["-m", "venv"] for c in all_calls), "Expected venv creation"
+    assert any("install" in str(c) and "-e" in str(c) for c in all_calls), "Expected pip install in venv"
 
 
 # ---------------------------------------------------------------------------
@@ -2909,8 +2908,8 @@ def test_run_tests_on_buggy_code_pythonpath_src_layout(tmp_path: Path) -> None:
     assert parts.index(src_path) < parts.index(str(tmp_path))
 
 
-def test_run_tests_on_buggy_code_pip_install_fallback_order(tmp_path: Path) -> None:
-    """pip install tries with deps first, then --no-deps on failure."""
+def test_run_tests_on_buggy_code_venv_install_graceful_failure(tmp_path: Path) -> None:
+    """Venv pip install failure is caught and doesn't crash the function."""
     import subprocess
 
     subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
@@ -2936,22 +2935,28 @@ def test_run_tests_on_buggy_code_pip_install_fallback_order(tmp_path: Path) -> N
 
     import sys
     original_run = subprocess.run
-    pip_calls: list = []
+    calls: list = []
 
     def tracking_run(cmd, **kwargs):
-        if isinstance(cmd, list) and len(cmd) >= 3 and cmd[1:3] == ["-m", "pip"]:
-            pip_calls.append(cmd)
-            if "--no-deps" not in cmd:
+        if isinstance(cmd, list):
+            calls.append(cmd)
+            if len(cmd) >= 2 and cmd[-1] == "--quiet" and "install" in cmd:
                 raise subprocess.CalledProcessError(1, cmd)
         return original_run(cmd, **kwargs)
 
     with mock_patch("swebenchify.synthesizer.subprocess.run", side_effect=tracking_run):
-        _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
+        result = _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
 
-    assert len(pip_calls) == 2
-    assert pip_calls[0][0] == sys.executable
-    assert "--no-deps" not in pip_calls[0]
-    assert "--no-deps" in pip_calls[1]
+    venv_calls = [c for c in calls if len(c) >= 3 and c[1:3] == ["-m", "venv"]]
+    assert len(venv_calls) == 1
+    assert venv_calls[0][0] == sys.executable
+
+    pip_calls = [c for c in calls if "install" in c and "-e" in c]
+    assert len(pip_calls) == 1
+    assert pip_calls[0][0] != sys.executable
+    assert "--quiet" in pip_calls[0]
+
+    assert result is not None
 
 
 # ---------------------------------------------------------------------------
@@ -3514,11 +3519,11 @@ def test_count_test_functions_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Exp-21: test patch rejects new test functions
+# Exp-21: test patch rejects missing function def in LLM response
 # ---------------------------------------------------------------------------
 
-def test_test_patch_rejects_added_test_functions(tmp_path: Path) -> None:
-    """When the LLM adds new def test_ functions, the patch is rejected."""
+def test_test_patch_rejects_missing_function_def(tmp_path: Path) -> None:
+    """When the LLM response lacks the function definition, the patch is rejected."""
     from unittest.mock import MagicMock, patch as mock_patch
 
     (tmp_path / "src").mkdir()
@@ -3527,10 +3532,10 @@ def test_test_patch_rejects_added_test_functions(tmp_path: Path) -> None:
     existing_test = "import pytest\n\ndef test_add_basic():\n    assert add(1, 2) == 3\n"
     (tmp_path / "tests" / "test_calc.py").write_text(existing_test)
 
-    modified_test = existing_test + "\ndef test_add_negative():\n    assert add(-1, -2) == -3\n"
+    bad_response = "Here are some assertions you could add."
 
     class FakeResult:
-        content = [type("B", (), {"text": f"```python\n{modified_test}\n```"})()]
+        content = [type("B", (), {"text": bad_response})()]
 
     async def fake_query(prompt: str, options: object = None):
         yield FakeResult()
@@ -3557,7 +3562,7 @@ def test_test_patch_rejects_added_test_functions(tmp_path: Path) -> None:
 
 
 def test_test_patch_accepts_modified_existing_functions(tmp_path: Path) -> None:
-    """When the LLM only modifies existing test functions, the patch is accepted."""
+    """When the LLM returns a modified function, the patch is accepted."""
     from unittest.mock import MagicMock, patch as mock_patch
 
     (tmp_path / "src").mkdir()
@@ -3566,10 +3571,10 @@ def test_test_patch_accepts_modified_existing_functions(tmp_path: Path) -> None:
     existing_test = "import pytest\n\ndef test_add_basic():\n    assert add(1, 2) == 3\n"
     (tmp_path / "tests" / "test_calc.py").write_text(existing_test)
 
-    modified_test = "import pytest\n\ndef test_add_basic():\n    assert add(1, 2) == 3\n    assert add(0, 0) == 0\n"
+    modified_func = "def test_add_basic():\n    assert add(1, 2) == 3\n    assert add(0, 0) == 0\n"
 
     class FakeResult:
-        content = [type("B", (), {"text": f"```python\n{modified_test}\n```"})()]
+        content = [type("B", (), {"text": f"```python\n{modified_func}\n```"})()]
 
     async def fake_query(prompt: str, options: object = None):
         yield FakeResult()
@@ -3598,11 +3603,11 @@ def test_test_patch_accepts_modified_existing_functions(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Exp-21: test generation prompt is more prescriptive
+# Exp-21: test generation prompt sends only the function, not the whole file
 # ---------------------------------------------------------------------------
 
-def test_test_generation_prompt_hard_constraint() -> None:
-    """Verify the prompt uses HARD CONSTRAINT and forbids new test functions."""
+def test_test_generation_prompt_function_level() -> None:
+    """Verify the prompt sends only the target function and uses HARD CONSTRAINT."""
     from unittest.mock import MagicMock, patch as mock_patch
 
     captured_prompts: list[str] = []
@@ -3636,9 +3641,9 @@ def test_test_generation_prompt_hard_constraint() -> None:
     assert len(captured_prompts) == 1
     prompt = captured_prompts[0]
     assert "HARD CONSTRAINT" in prompt
-    assert "MUST NOT add any new" in prompt
-    assert "will be validated and rejected" in prompt
-    assert "AT MOST one new test function" not in prompt
+    assert "Return ONLY the modified function" in prompt
+    assert "Do NOT return the complete file" in prompt
+    assert "def test_add" in prompt
 
 
 # ---------------------------------------------------------------------------

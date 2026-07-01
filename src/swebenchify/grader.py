@@ -664,6 +664,7 @@ def compute_f2p(
     docker_image: str = _DEFAULT_IMAGE,
     timeout: int | None = None,
     n_runs: int = 1,
+    repo_path: str | None = None,
 ) -> ValidationResult:
     """Compute FAIL_TO_PASS and PASS_TO_PASS via Docker-based validation.
 
@@ -710,6 +711,24 @@ def compute_f2p(
         (tmp / "test.patch").write_text(test_patch)
         (tmp / "gold.patch").write_text(gold_patch)
 
+        use_tarball = False
+        if repo_path:
+            try:
+                subprocess.run(
+                    ["git", "-C", repo_path, "cat-file", "-e", base_commit],
+                    check=True, capture_output=True,
+                )
+                tarball = tmp / "repo.tar.gz"
+                subprocess.run(
+                    ["git", "-C", repo_path, "archive", "--format=tar.gz",
+                     "-o", str(tarball), base_commit],
+                    check=True, capture_output=True,
+                )
+                use_tarball = True
+            except subprocess.CalledProcessError:
+                logger.warning("repo_path=%s does not contain %s, falling back to clone",
+                               repo_path, base_commit)
+
         test_scope = backend.test_scope(test_patch)
         test_cmd = backend.make_test_cmd(fallback_spec)
         build_tag = f"swebenchify-f2p-{_short_hash(repo + base_commit)}"
@@ -717,7 +736,8 @@ def compute_f2p(
         build_rc, build_log = _docker_build(
             tag=build_tag,
             context_dir=str(tmp),
-            dockerfile=backend.make_dockerfile(repo, base_commit, fallback_spec),
+            dockerfile=backend.make_dockerfile(repo, base_commit, fallback_spec,
+                                               repo_tarball=use_tarball),
         )
 
         if build_rc != 0:

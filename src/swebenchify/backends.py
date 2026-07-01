@@ -145,7 +145,7 @@ def _git_clone_or_archive(repo: str, base_commit: str) -> str:
 # Go backend helpers
 # ---------------------------------------------------------------------------
 
-def _go_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmentSpec) -> str:
+def _go_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmentSpec, *, repo_tarball: bool = False) -> str:
     spec = env_spec if isinstance(env_spec, GoEnvironmentSpec) else None
     if spec and spec.go_version:
         base = f"golang:{spec.go_version}"
@@ -156,8 +156,15 @@ def _go_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmentSpe
     lines = [
         f"FROM {base}",
         f"LABEL org.opencontainers.image.source={source_url}",
-        _git_clone_or_archive(repo, base_commit),
     ]
+
+    if repo_tarball:
+        lines.append("COPY repo.tar.gz /tmp/repo.tar.gz")
+        lines.append("RUN mkdir -p /repo && cd /repo && tar xzf /tmp/repo.tar.gz && "
+                      "git init && git config user.email test@test.com && git config user.name Test && "
+                      "git add -A && git commit -q -m base")
+    else:
+        lines.append(_git_clone_or_archive(repo, base_commit))
 
     if spec and spec.system_dependencies:
         pkgs = " ".join(spec.system_dependencies)
@@ -212,7 +219,7 @@ def _go_test_scope(test_patch: str) -> str:
 # Python backend helpers
 # ---------------------------------------------------------------------------
 
-def _python_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmentSpec) -> str:
+def _python_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmentSpec, *, repo_tarball: bool = False) -> str:
     spec = env_spec if isinstance(env_spec, EnvironmentSpec) else None
 
     if spec and spec.base_image:
@@ -242,7 +249,13 @@ def _python_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmen
 
     lines.append("RUN rm -rf /var/lib/apt/lists/*")
 
-    lines.append(_git_clone_or_archive(repo, base_commit))
+    if repo_tarball:
+        lines.append("COPY repo.tar.gz /tmp/repo.tar.gz")
+        lines.append("RUN mkdir -p /repo && cd /repo && tar xzf /tmp/repo.tar.gz && "
+                      "git init && git config user.email test@test.com && git config user.name Test && "
+                      "git add -A && git commit -q -m base")
+    else:
+        lines.append(_git_clone_or_archive(repo, base_commit))
 
     if spec:
         for cmd in spec.pre_install:
@@ -299,7 +312,7 @@ def _python_test_scope(test_patch: str) -> str:
 # Java backend helpers
 # ---------------------------------------------------------------------------
 
-def _java_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmentSpec) -> str:
+def _java_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmentSpec, *, repo_tarball: bool = False) -> str:
     spec = env_spec if isinstance(env_spec, EnvironmentSpec) else None
 
     java_version = (spec.language_version if spec else None) or "17"
@@ -309,8 +322,15 @@ def _java_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmentS
     lines = [
         f"FROM {base}",
         f"LABEL org.opencontainers.image.source={source_url}",
-        _git_clone_or_archive(repo, base_commit),
     ]
+
+    if repo_tarball:
+        lines.append("COPY repo.tar.gz /tmp/repo.tar.gz")
+        lines.append("RUN mkdir -p /repo && cd /repo && tar xzf /tmp/repo.tar.gz && "
+                      "git init && git config user.email test@test.com && git config user.name Test && "
+                      "git add -A && git commit -q -m base")
+    else:
+        lines.append(_git_clone_or_archive(repo, base_commit))
 
     if spec and spec.system_dependencies:
         pkgs = " ".join(spec.system_dependencies)
@@ -380,7 +400,7 @@ def _java_normalize_f2p(test_ids: list[str]) -> list[str]:
 # Rust backend helpers
 # ---------------------------------------------------------------------------
 
-def _rust_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmentSpec) -> str:
+def _rust_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmentSpec, *, repo_tarball: bool = False) -> str:
     spec = env_spec if isinstance(env_spec, RustEnvironmentSpec) else None
     if spec and spec.rust_version:
         base = f"rust:{spec.rust_version}-slim"
@@ -393,8 +413,15 @@ def _rust_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmentS
         f"LABEL org.opencontainers.image.source={source_url}",
         "RUN apt-get update -qq && apt-get install -y --no-install-recommends "
         "git ca-certificates && rm -rf /var/lib/apt/lists/*",
-        _git_clone_or_archive(repo, base_commit),
     ]
+
+    if repo_tarball:
+        lines.append("COPY repo.tar.gz /tmp/repo.tar.gz")
+        lines.append("RUN mkdir -p /repo && cd /repo && tar xzf /tmp/repo.tar.gz && "
+                      "git init && git config user.email test@test.com && git config user.name Test && "
+                      "git add -A && git commit -q -m base")
+    else:
+        lines.append(_git_clone_or_archive(repo, base_commit))
 
     if spec and spec.system_dependencies:
         pkgs = " ".join(spec.system_dependencies)

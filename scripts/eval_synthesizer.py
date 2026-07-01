@@ -5,11 +5,14 @@ worktree. Zero prompt copying — when remote-factory changes prompts, this scri
 picks them up automatically.
 
 Usage:
-    python3 scripts/eval_synthesizer.py
+    python3 scripts/eval_synthesizer.py           # Full eval
+    python3 scripts/eval_synthesizer.py --quick    # Fast mode (~60s)
+    python3 scripts/eval_synthesizer.py --seed 99  # Pin random seed
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import glob
 import json
@@ -37,6 +40,7 @@ EVAL_TARGETS = [
         "repo_url": "https://github.com/pallets/flask.git",
         "repo_path": "/tmp/flask-synth-test",
         "language": "python",
+        "base_commit": "735a4701d6d5e848241e7d7535db898efb62d400",
         "n_synthetic": 3,
         "n_real": 3,
     },
@@ -45,6 +49,7 @@ EVAL_TARGETS = [
         "repo_url": "https://github.com/psf/requests.git",
         "repo_path": "/tmp/requests-synth-test",
         "language": "python",
+        "base_commit": "0106aced5faa299e6ede89d1230bd6784f2c3660",
         "n_synthetic": 3,
         "n_real": 3,
     },
@@ -249,7 +254,9 @@ def compute_diversity(instances: list[dict]) -> dict:
     Returns dict with subscores and overall."""
     if len(instances) < 2:
         return {"file_diversity": 0.0, "complexity": 0.0,
-                "length_diversity": 0.0, "overall": 0.0}
+                "length_diversity": 0.0, "overall": 0.0,
+                "unique_files": 0, "avg_changed_lines": 0.0,
+                "issue_length_cv": 0.0}
 
     # A. Files touched — unique source files across all patches
     files = set()
@@ -375,32 +382,47 @@ def compute_metrics(results: list[dict]) -> dict:
 # ── Main ─────────────────────────────────────────────────────────────────
 
 def main():
+    parser = argparse.ArgumentParser(description='Synthesizer eval')
+    parser.add_argument('--quick', action='store_true',
+                        help='Fast mode: 1 repo, 1 instance, skip Docker F2P and judge')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Random seed (default: 42 + round_num)')
+    args = parser.parse_args()
+
     round_num = detect_round()
     commit = detect_commit()
 
+    if args.quick:
+        targets = [EVAL_TARGETS[0].copy()]
+        targets[0]['n_synthetic'] = 3
+        targets[0]['n_real'] = 3
+    else:
+        targets = EVAL_TARGETS
+
+    mode_str = ' [QUICK]' if args.quick else ''
     err("=" * 72)
-    err(f"ROUND {round_num} — SYNTHESIZER COMMIT {commit} — OPUS 4.6 JUDGE")
-    err(f"Multi-repo eval: {', '.join(t['repo_slug'] for t in EVAL_TARGETS)}")
+    err(f"ROUND {round_num} — SYNTHESIZER COMMIT {commit} — OPUS 4.6 JUDGE{mode_str}")
+    err(f"Multi-repo eval: {', '.join(t['repo_slug'] for t in targets)}")
     err("=" * 72)
 
     # ── Load dataset ──
     with open(DATASET_PATH) as f:
         all_real = [json.loads(line) for line in f]
 
-    random.seed(42 + round_num)
+    random.seed(args.seed if args.seed is not None else 42 + round_num)
 
     all_synth_instances = []
     all_real_samples = []
     structural_failures = []
 
     # ── Phase 1: Synthesize + structural check per repo (bail early) ──
-    for target in EVAL_TARGETS:
+    for target in targets:
         repo_slug = target["repo_slug"]
         err(f"\n── {repo_slug} ──")
 
         repo_path = ensure_repo(target)
 
-        base_commit = pick_base_commit(repo_slug, all_real)
+        base_commit = target.get('base_commit') or pick_base_commit(repo_slug, all_real)
         err(f"  Base commit: {base_commit[:12]}")
 
         subprocess.run(
@@ -456,7 +478,7 @@ def main():
             err(f"    {iid}: {reason}")
         err("  Score: 0.0 (skipping diversity and judge)")
 
-        _write_round_doc(round_num, commit, n_s, n_r,
+        _write_round_doc(round_num, commit, n_s, n_r, targets,
                          structural_failures=structural_failures)
 
         print(json.dumps({
@@ -479,10 +501,10 @@ def main():
     err(f"  Issue length CV: {diversity['issue_length_cv']}")
     err(f"  Diversity score: {diversity['overall']}")
 
-    if diversity["overall"] == 0.0:
+    if diversity["overall"] == 0.0 and not args.quick:
         err("  Diversity score is 0.0 — skipping F2P and judge")
 
-        _write_round_doc(round_num, commit, n_s, n_r, diversity=diversity)
+        _write_round_doc(round_num, commit, n_s, n_r, targets, diversity=diversity)
 
         print(json.dumps({
             "score": 0.0,
@@ -494,209 +516,233 @@ def main():
         return
 
     # ── Phase 4 (expensive): F2P/P2P Docker validation ──
-    err("\n── F2P/P2P validation ──")
-    f2p_failures = []
+    if not args.quick:
+        err("\n── F2P/P2P validation ──")
+        f2p_failures = []
 
-    for i, inst in enumerate(all_synth_instances):
-        iid = inst.get("instance_id", "unknown")
-        repo_slug = inst.get("repo", "unknown")
-        target = next(
-            (t for t in EVAL_TARGETS if t["repo_slug"] == repo_slug), None
-        )
-        if not target:
-            f2p_failures.append((iid, "no matching target config"))
-            break
+        for i, inst in enumerate(all_synth_instances):
+            iid = inst.get("instance_id", "unknown")
+            repo_slug = inst.get("repo", "unknown")
+            target = next(
+                (t for t in targets if t["repo_slug"] == repo_slug), None
+            )
+            if not target:
+                f2p_failures.append((iid, "no matching target config"))
+                break
 
-        err(f"  [{i+1}/{n_s}] {iid}...")
-        env_spec = _make_env_spec(target)
+            err(f"  [{i+1}/{n_s}] {iid}...")
+            env_spec = _make_env_spec(target)
 
-        result = compute_f2p(
-            repo=repo_slug,
-            base_commit=inst.get("base_commit", ""),
-            test_patch=inst.get("test_patch", ""),
-            gold_patch=inst.get("patch", ""),
-            env_spec=env_spec,
-            timeout=600,
-        )
+            result = compute_f2p(
+                repo=repo_slug,
+                base_commit=inst.get("base_commit", ""),
+                test_patch=inst.get("test_patch", ""),
+                gold_patch=inst.get("patch", ""),
+                env_spec=env_spec,
+                timeout=600,
+                repo_path=target["repo_path"],
+            )
 
-        if result.status != "valid":
-            reason = result.error_message or f"status={result.status}"
-            f2p_failures.append((iid, reason))
-            err(f"    FAILED: {reason}")
-            break
-        err(
-            f"    PASSED: f2p={len(result.FAIL_TO_PASS)}"
-            f" p2p={len(result.PASS_TO_PASS)}"
-        )
+            if result.status != "valid":
+                reason = result.error_message or f"status={result.status}"
+                f2p_failures.append((iid, reason))
+                err(f"    FAILED: {reason}")
+                break
+            err(
+                f"    PASSED: f2p={len(result.FAIL_TO_PASS)}"
+                f" p2p={len(result.PASS_TO_PASS)}"
+            )
 
-    if f2p_failures:
-        err(f"\n  F2P GATE FAILED — {len(f2p_failures)} instance(s):")
-        for iid, reason in f2p_failures:
-            err(f"    {iid}: {reason}")
-        err("  Score: 0.0 (skipping judge)")
+        if f2p_failures:
+            err(f"\n  F2P GATE FAILED — {len(f2p_failures)} instance(s):")
+            for iid, reason in f2p_failures:
+                err(f"    {iid}: {reason}")
+            err("  Score: 0.0 (skipping judge)")
 
-        _write_round_doc(round_num, commit, n_s, n_r,
-                         diversity=diversity, f2p_failures=f2p_failures)
+            _write_round_doc(round_num, commit, n_s, n_r, targets,
+                             diversity=diversity, f2p_failures=f2p_failures)
+
+            print(json.dumps({
+                "score": 0.0,
+                "details": (
+                    f"R{round_num} ({commit}): F2P GATE FAILED. "
+                    + "; ".join(f"{iid}: {reason}" for iid, reason in f2p_failures)
+                ),
+            }))
+            return
+
+        err(f"  F2P/P2P validation: {n_s}/{n_s} passed ✓")
+    else:
+        err('\n── F2P/P2P validation (SKIPPED in quick mode) ──')
+
+    # ── Phase 5 (slow): Build eval set + judge ──
+    if not args.quick:
+        eval_set = []
+        for inst in all_synth_instances:
+            eval_set.append({"instance": inst, "label": "SYNTHETIC"})
+        for inst in all_real_samples:
+            eval_set.append({"instance": inst, "label": "REAL"})
+
+        random.shuffle(eval_set)
+
+        err(f"\n── Evaluation set: {len(eval_set)} instances ({n_s} synthetic, {n_r} real) ──")
+
+        # ── Judge ──
+        err("\n── Running Opus 4.6 judge ──\n")
+        results = []
+
+        for i, item in enumerate(eval_set):
+            inst = item["instance"]
+            true_label = item["label"]
+            iid = inst.get("instance_id", "unknown")
+
+            err(f"[{i+1}/{len(eval_set)}] {iid}")
+
+            verdict = judge_instance(inst)
+            predicted = verdict["classification"]
+            correct = predicted == true_label
+
+            results.append({
+                "instance_id": iid,
+                "true_label": true_label,
+                "predicted": predicted,
+                "confidence": verdict["confidence"],
+                "correct": correct,
+                "reasoning": verdict["reasoning"],
+            })
+
+            icon = "CORRECT" if correct else "WRONG"
+            err(f"  true={true_label:<10} pred={predicted:<10} conf={verdict['confidence']:<6} [{icon}]")
+            err(f"  {verdict['reasoning'][:160]}")
+            err()
+
+        # ── Results ──
+        err("=" * 72)
+        err("RESULTS")
+        err("=" * 72)
+
+        m = compute_metrics(results)
+
+        err(f"\n  Round:       {round_num} (commit {commit})")
+        err(f"  Repos:       {', '.join(t['repo_slug'] for t in targets)}")
+        err(f"  Instances:   {m['total']} ({n_r} real, {n_s} synthetic)")
+        err(f"  Accuracy:    {m['accuracy']:.0%}")
+        err(f"  Precision:   {m['precision']:.0%}")
+        err(f"  Recall:      {m['recall']:.0%}")
+        err(f"  F1:          {m['f1']:.0%}")
+        err("\n  Confusion matrix:")
+        err("                    Predicted REAL    Predicted SYNTH")
+        err(f"  Actual REAL       {m['tn']:>8}          {m['fp']:>8}")
+        err(f"  Actual SYNTH      {m['fn']:>8}          {m['tp']:>8}")
+
+        err(f"\n{'=' * 72}")
+        err("JUDGE REASONING BY OUTCOME")
+        err("=" * 72)
+
+        for label_pair, title in [
+            (("SYNTHETIC", True), "Correctly identified SYNTHETIC"),
+            (("SYNTHETIC", False), "Synthetic that FOOLED the judge"),
+            (("REAL", False), "Real wrongly flagged as SYNTHETIC"),
+            (("REAL", True), "Correctly identified REAL"),
+        ]:
+            matching = [r for r in results
+                        if r["true_label"] == label_pair[0] and r["correct"] == label_pair[1]]
+            if not matching:
+                continue
+            err(f"\n  {title} ({len(matching)}):")
+            for r in matching:
+                err(f"    {r['instance_id']} [{r['confidence']}]")
+                err(f"      {r['reasoning'][:300]}")
+
+        err(f"\n{'=' * 72}")
+        err("DISCRIMINABILITY VERDICT")
+        err("=" * 72)
+
+        recall = m["recall"]
+        if recall >= 0.9:
+            grade = "EASILY DISCRIMINABLE"
+        elif recall >= 0.7:
+            grade = "MODERATELY DISCRIMINABLE"
+        elif recall >= 0.5:
+            grade = "PARTIALLY DISCRIMINABLE"
+        else:
+            grade = "HARD TO DISCRIMINATE"
+
+        err(f"\n  Round {round_num}: {recall:.0%} detected ({m['tp']}/{m['tp']+m['fn']})")
+        far = m["fp"] / (m["fp"] + m["tn"]) if (m["fp"] + m["tn"]) else 0
+        err(f"  False alarm rate: {far:.0%}")
+        err(f"  Verdict: {grade}")
+        err()
+
+        out_path = f"/tmp/synth-eval-results-r{round_num}.json"
+        with open(out_path, "w") as f:
+            json.dump({
+                "round": round_num,
+                "commit": commit,
+                "synth_model": SYNTH_MODEL,
+                "judge_model": JUDGE_MODEL,
+                "repos": [t["repo_slug"] for t in targets],
+                "metrics": m,
+                "diversity": diversity,
+                "results": results,
+                "synthetic_instances": all_synth_instances,
+            }, f, indent=2)
+        err(f"  Full results: {out_path}")
+
+        # ── Write round markdown ──
+        _write_round_doc(round_num, commit, n_s, n_r, targets,
+                         results=results, metrics=m, diversity=diversity)
+
+        # ── Factory-compatible JSON output (stdout) ──
+        judge_evasion = 1.0 - recall
+        factory_score = 0.7 * judge_evasion + 0.3 * diversity["overall"]
+
+        conf_counts = {}
+        for r in results:
+            if r["true_label"] == "SYNTHETIC":
+                c = r["confidence"]
+                conf_counts[c] = conf_counts.get(c, 0) + 1
+        conf_summary = ", ".join(f"{v} {k}" for k, v in sorted(conf_counts.items()))
 
         print(json.dumps({
-            "score": 0.0,
+            "score": round(factory_score, 3),
             "details": (
-                f"R{round_num} ({commit}): F2P GATE FAILED. "
-                + "; ".join(f"{iid}: {reason}" for iid, reason in f2p_failures)
+                f"R{round_num} ({commit}): "
+                f"{m['fn']}/{m['tp']+m['fn']} synthetic fooled judge. "
+                f"Detection: {recall:.0%}. "
+                f"FP: {m['fp']}/{m['fp']+m['tn']}. "
+                f"Diversity: {diversity['overall']:.2f}. "
+                f"Repos: {', '.join(t['repo_slug'] for t in targets)}. "
+                f"Confidence: {conf_summary or 'n/a'}"
+            ),
+        }))
+    else:
+        # Save instances for debugging
+        out_path = f'/tmp/synth-eval-results-r{round_num}-quick.json'
+        with open(out_path, 'w') as f:
+            json.dump({'synthetic_instances': all_synth_instances}, f, indent=2)
+        err(f'  Instance data saved: {out_path}')
+
+        err('\n── Judge (SKIPPED in quick mode) ──')
+        factory_score = 0.3 * diversity['overall']
+        print(json.dumps({
+            'score': round(factory_score, 3),
+            'details': (
+                f'R{round_num} ({commit}): QUICK MODE. '
+                f'{n_s} synthetic generated. '
+                f'Diversity: {diversity["overall"]:.2f}. '
+                f'Docker F2P and judge skipped.'
             ),
         }))
         return
 
-    err(f"  F2P/P2P validation: {n_s}/{n_s} passed ✓")
 
-    # ── Phase 5 (slow): Build eval set + judge ──
-    eval_set = []
-    for inst in all_synth_instances:
-        eval_set.append({"instance": inst, "label": "SYNTHETIC"})
-    for inst in all_real_samples:
-        eval_set.append({"instance": inst, "label": "REAL"})
-
-    random.shuffle(eval_set)
-
-    err(f"\n── Evaluation set: {len(eval_set)} instances ({n_s} synthetic, {n_r} real) ──")
-
-    # ── Judge ──
-    err("\n── Running Opus 4.6 judge ──\n")
-    results = []
-
-    for i, item in enumerate(eval_set):
-        inst = item["instance"]
-        true_label = item["label"]
-        iid = inst.get("instance_id", "unknown")
-
-        err(f"[{i+1}/{len(eval_set)}] {iid}")
-
-        verdict = judge_instance(inst)
-        predicted = verdict["classification"]
-        correct = predicted == true_label
-
-        results.append({
-            "instance_id": iid,
-            "true_label": true_label,
-            "predicted": predicted,
-            "confidence": verdict["confidence"],
-            "correct": correct,
-            "reasoning": verdict["reasoning"],
-        })
-
-        icon = "CORRECT" if correct else "WRONG"
-        err(f"  true={true_label:<10} pred={predicted:<10} conf={verdict['confidence']:<6} [{icon}]")
-        err(f"  {verdict['reasoning'][:160]}")
-        err()
-
-    # ── Results ──
-    err("=" * 72)
-    err("RESULTS")
-    err("=" * 72)
-
-    m = compute_metrics(results)
-
-    err(f"\n  Round:       {round_num} (commit {commit})")
-    err(f"  Repos:       {', '.join(t['repo_slug'] for t in EVAL_TARGETS)}")
-    err(f"  Instances:   {m['total']} ({n_r} real, {n_s} synthetic)")
-    err(f"  Accuracy:    {m['accuracy']:.0%}")
-    err(f"  Precision:   {m['precision']:.0%}")
-    err(f"  Recall:      {m['recall']:.0%}")
-    err(f"  F1:          {m['f1']:.0%}")
-    err("\n  Confusion matrix:")
-    err("                    Predicted REAL    Predicted SYNTH")
-    err(f"  Actual REAL       {m['tn']:>8}          {m['fp']:>8}")
-    err(f"  Actual SYNTH      {m['fn']:>8}          {m['tp']:>8}")
-
-    err(f"\n{'=' * 72}")
-    err("JUDGE REASONING BY OUTCOME")
-    err("=" * 72)
-
-    for label_pair, title in [
-        (("SYNTHETIC", True), "Correctly identified SYNTHETIC"),
-        (("SYNTHETIC", False), "Synthetic that FOOLED the judge"),
-        (("REAL", False), "Real wrongly flagged as SYNTHETIC"),
-        (("REAL", True), "Correctly identified REAL"),
-    ]:
-        matching = [r for r in results
-                    if r["true_label"] == label_pair[0] and r["correct"] == label_pair[1]]
-        if not matching:
-            continue
-        err(f"\n  {title} ({len(matching)}):")
-        for r in matching:
-            err(f"    {r['instance_id']} [{r['confidence']}]")
-            err(f"      {r['reasoning'][:300]}")
-
-    err(f"\n{'=' * 72}")
-    err("DISCRIMINABILITY VERDICT")
-    err("=" * 72)
-
-    recall = m["recall"]
-    if recall >= 0.9:
-        grade = "EASILY DISCRIMINABLE"
-    elif recall >= 0.7:
-        grade = "MODERATELY DISCRIMINABLE"
-    elif recall >= 0.5:
-        grade = "PARTIALLY DISCRIMINABLE"
-    else:
-        grade = "HARD TO DISCRIMINATE"
-
-    err(f"\n  Round {round_num}: {recall:.0%} detected ({m['tp']}/{m['tp']+m['fn']})")
-    far = m["fp"] / (m["fp"] + m["tn"]) if (m["fp"] + m["tn"]) else 0
-    err(f"  False alarm rate: {far:.0%}")
-    err(f"  Verdict: {grade}")
-    err()
-
-    out_path = f"/tmp/synth-eval-results-r{round_num}.json"
-    with open(out_path, "w") as f:
-        json.dump({
-            "round": round_num,
-            "commit": commit,
-            "synth_model": SYNTH_MODEL,
-            "judge_model": JUDGE_MODEL,
-            "repos": [t["repo_slug"] for t in EVAL_TARGETS],
-            "metrics": m,
-            "diversity": diversity,
-            "results": results,
-            "synthetic_instances": all_synth_instances,
-        }, f, indent=2)
-    err(f"  Full results: {out_path}")
-
-    # ── Write round markdown ──
-    _write_round_doc(round_num, commit, n_s, n_r,
-                     results=results, metrics=m, diversity=diversity)
-
-    # ── Factory-compatible JSON output (stdout) ──
-    judge_evasion = 1.0 - recall
-    factory_score = 0.7 * judge_evasion + 0.3 * diversity["overall"]
-
-    conf_counts = {}
-    for r in results:
-        if r["true_label"] == "SYNTHETIC":
-            c = r["confidence"]
-            conf_counts[c] = conf_counts.get(c, 0) + 1
-    conf_summary = ", ".join(f"{v} {k}" for k, v in sorted(conf_counts.items()))
-
-    print(json.dumps({
-        "score": round(factory_score, 3),
-        "details": (
-            f"R{round_num} ({commit}): "
-            f"{m['fn']}/{m['tp']+m['fn']} synthetic fooled judge. "
-            f"Detection: {recall:.0%}. "
-            f"FP: {m['fp']}/{m['fp']+m['tn']}. "
-            f"Diversity: {diversity['overall']:.2f}. "
-            f"Repos: {', '.join(t['repo_slug'] for t in EVAL_TARGETS)}. "
-            f"Confidence: {conf_summary or 'n/a'}"
-        ),
-    }))
-
-
-def _write_round_doc(round_num, commit, n_s, n_r, *,
+def _write_round_doc(round_num, commit, n_s, n_r, targets, *,
                      results=None, metrics=None, diversity=None,
                      structural_failures=None, f2p_failures=None):
     """Write round-N.md for paper trail."""
     md_path = os.path.join(EVAL_DOCS, f"round-{round_num}.md")
-    repos_str = ", ".join(t["repo_slug"] for t in EVAL_TARGETS)
+    repos_str = ", ".join(t["repo_slug"] for t in targets)
 
     with open(md_path, "w") as f:
         f.write(f"# Synthetic Generator Eval — Round {round_num}\n\n")
