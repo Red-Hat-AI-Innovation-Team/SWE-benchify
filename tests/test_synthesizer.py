@@ -2017,3 +2017,73 @@ def test_bugplan_with_secondaries() -> None:
     )
     assert len(plan.secondary_descriptions) == 1
     assert plan.secondary_descriptions[0]["file"] == "api.py"
+
+
+# ---------------------------------------------------------------------------
+# Issue 2: _truncate_issue hard cap on single-paragraph text
+# ---------------------------------------------------------------------------
+
+def test_truncate_issue_hard_caps_single_paragraph() -> None:
+    """A single long paragraph with no breaks is sliced at 1500 chars."""
+    text = "## Title\n" + "A" * 2000
+    result = _truncate_issue(text)
+    assert len(result) <= 1500
+
+
+# ---------------------------------------------------------------------------
+# Issue 3: _enforce_banned_openers produces grammatically valid text
+# ---------------------------------------------------------------------------
+
+def test_enforce_banned_openers_no_awkward_concatenation() -> None:
+    """Replacement should be a complete opener, not prefix + leftover."""
+    text = "## Title\nIs this expected behavior when parsing configs?"
+    result = _enforce_banned_openers(text)
+    second_line = result.split("\n")[1]
+    assert second_line in [
+        'Has anyone seen this before?',
+        'Possible bug —',
+        'Something broke after the latest update.',
+        'Getting unexpected behavior.',
+        'Not sure if this is a bug, but...',
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Issue 1: bug_plan is passed to introduce_bug when available
+# ---------------------------------------------------------------------------
+
+def test_introduce_bug_receives_bug_plan() -> None:
+    """When bug_plan is provided, its content appears in the LLM prompt."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    target = {
+        "file": "core.py",
+        "function_name": "process",
+        "source": "def process(x):\n    return x + 1",
+        "language": "python",
+    }
+    plan = BugPlan(
+        primary_description="Change return type from int to str",
+        secondary_descriptions=[
+            {"file": "api.py", "plan": "Update caller to handle str"},
+        ],
+    )
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import introduce_bug
+        asyncio.run(introduce_bug(target, bug_plan=plan))
+
+    assert len(captured_prompts) == 1
+    prompt = captured_prompts[0]
+    assert "MULTI-FILE BUG PLAN: Change return type from int to str" in prompt
+    assert "Secondary change needed in api.py: Update caller to handle str" in prompt
+    assert "Your bug MUST include the secondary changes" in prompt
