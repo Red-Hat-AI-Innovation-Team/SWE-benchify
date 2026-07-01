@@ -2908,8 +2908,8 @@ def test_run_tests_on_buggy_code_pythonpath_src_layout(tmp_path: Path) -> None:
     assert parts.index(src_path) < parts.index(str(tmp_path))
 
 
-def test_run_tests_on_buggy_code_pip_install_fallback_order(tmp_path: Path) -> None:
-    """pip install tries with deps first, then --no-deps on failure."""
+def test_run_tests_on_buggy_code_venv_install_graceful_failure(tmp_path: Path) -> None:
+    """Venv pip install failure is caught and doesn't crash the function."""
     import subprocess
 
     subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
@@ -2935,22 +2935,28 @@ def test_run_tests_on_buggy_code_pip_install_fallback_order(tmp_path: Path) -> N
 
     import sys
     original_run = subprocess.run
-    pip_calls: list = []
+    calls: list = []
 
     def tracking_run(cmd, **kwargs):
-        if isinstance(cmd, list) and len(cmd) >= 3 and cmd[1:3] == ["-m", "pip"]:
-            pip_calls.append(cmd)
-            if "--no-deps" not in cmd:
+        if isinstance(cmd, list):
+            calls.append(cmd)
+            if len(cmd) >= 2 and cmd[-1] == "--quiet" and "install" in cmd:
                 raise subprocess.CalledProcessError(1, cmd)
         return original_run(cmd, **kwargs)
 
     with mock_patch("swebenchify.synthesizer.subprocess.run", side_effect=tracking_run):
-        _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
+        result = _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
 
-    assert len(pip_calls) == 2
-    assert pip_calls[0][0] == sys.executable
-    assert "--no-deps" not in pip_calls[0]
-    assert "--no-deps" in pip_calls[1]
+    venv_calls = [c for c in calls if len(c) >= 3 and c[1:3] == ["-m", "venv"]]
+    assert len(venv_calls) == 1
+    assert venv_calls[0][0] == sys.executable
+
+    pip_calls = [c for c in calls if "install" in c and "-e" in c]
+    assert len(pip_calls) == 1
+    assert pip_calls[0][0] != sys.executable
+    assert "--quiet" in pip_calls[0]
+
+    assert result is not None
 
 
 # ---------------------------------------------------------------------------
