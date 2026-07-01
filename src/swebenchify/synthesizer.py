@@ -1619,11 +1619,23 @@ async def generate_issue_from_symptom(
             test_output = None
         else:
             test_id = m.group(1)
-            issue = (
-                f'{test_id}\n\n'
-                f'```\n{test_output}\n```\n\n'
-                f'Environment: {version}, Python {lang_version}'
-            )
+            _ISSUE_OPENERS = [
+                'This test started failing after a recent update.',
+                'Getting unexpected test failures.',
+                'Noticed this is broken while working on something else.',
+                'Tests are failing on this branch.',
+                'Ran into this failure, not sure what changed.',
+                '',
+            ]
+            opener = random.choice(_ISSUE_OPENERS)
+            parts = [test_id, '']
+            if opener:
+                parts.append(opener)
+                parts.append('')
+            parts.append(f'```\n{test_output}\n```')
+            parts.append('')
+            parts.append(f'Environment: {version}, Python {lang_version}')
+            issue = '\n'.join(parts)
             return issue
 
     if dataset_examples:
@@ -2948,12 +2960,7 @@ async def synthesize_repo(
             dataset_examples=dataset_examples,
         )
 
-        test_patch = await generate_test_patch(
-            bug_spec, repo_path, language, model=model,
-        )
-        if test_patch is None:
-            logger.warning("  Skipped — test_patch generation failed")
-            continue
+        test_patch = ''
 
         synthesis_result = SynthesisResult(
             bug_spec=bug_spec,
