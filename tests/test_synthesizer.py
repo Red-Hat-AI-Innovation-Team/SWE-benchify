@@ -18,6 +18,7 @@ from swebenchify.synthesizer import (
     _discover_repo_modules,
     _edge_case_score,
     _enforce_banned_openers,
+    _extract_failed_test_names,
     _find_existing_test_file,
     _find_file_commits,
     _find_related_files,
@@ -34,6 +35,7 @@ from swebenchify.synthesizer import (
     _parse_incidental_changes,
     _parse_secondary_changes,
     _run_tests_on_buggy_code,
+    _sanitize_test_output,
     _source_to_module_name,
     _strip_strategy_labels,
     _strip_issue_shas,
@@ -2889,3 +2891,167 @@ def test_test_commands_use_sys_executable(tmp_path: Path) -> None:
     assert len(test_cmds) >= 1
     assert test_cmds[0][0] == sys.executable
     assert "python" not in test_cmds[0]
+
+
+# ---------------------------------------------------------------------------
+# Exp-15: _sanitize_test_output
+# ---------------------------------------------------------------------------
+
+def test__sanitize_test_output_strips_anthropic_vars() -> None:
+    output = (
+        "E       AssertionError: assert {'ANTHROPIC_DEFAULT_HAIKU_MODEL': 'claude-haiku-4-5-20251001',\n"
+        "E        'ANTHROPIC_API_KEY': 'sk-ant-xxx',\n"
+        "E        'HOME': '/home/user'} == {}\n"
+        "tests/test_app.py:42: AssertionError"
+    )
+    result = _sanitize_test_output(output, "/tmp/repo")
+    assert "ANTHROPIC_" not in result
+    assert "sk-ant-xxx" not in result
+    assert "AssertionError" in result
+
+
+def test__sanitize_test_output_strips_local_paths() -> None:
+    output = (
+        "  File \"/Users/aaye/Documents/code/project/src/app.py\", line 42\n"
+        "  File \"/Users/bob/projects/mylib/core.py\", line 10"
+    )
+    result = _sanitize_test_output(output, "/Users/aaye/Documents/code/project")
+    assert "/Users/aaye/" not in result
+    assert "/Users/bob/" not in result
+    assert "/home/user/" in result
+
+
+def test__sanitize_test_output_strips_synth_paths() -> None:
+    output = (
+        "  File \"/tmp/abc123-synth-test/repo/test_foo.py\", line 5\n"
+        "  File \"/tmp/xyz-synth/build/main.py\", line 10\n"
+        "  cachedir: /tmp/pytest-synth-factory/.cache\n"
+        "  File \"/path/to/remote-factory/run/thing.py\", line 1\n"
+        "  File \"/repo/.factory-worktrees/run-abc123/src/app.py\", line 3"
+    )
+    result = _sanitize_test_output(output, "/tmp/repo")
+    assert "synth-test" not in result
+    assert "synth/" not in result
+    assert "remote-factory" not in result
+    assert ".factory-worktrees" not in result
+    assert "/tmp/test-env/" in result
+
+
+def test__sanitize_test_output_strips_factory_env_vars() -> None:
+    output = (
+        "E       'FACTORY_RUN_ID': 'run-123',\n"
+        "E       'CLAUDE_CODE_VERSION': '1.0',\n"
+        "E       'SWEBENCHIFY_DATASET': '/path/to/data',\n"
+        "E       'PATH': '/usr/bin'\n"
+    )
+    result = _sanitize_test_output(output, "/tmp/repo")
+    assert "FACTORY_" not in result
+    assert "CLAUDE_" not in result
+    assert "SWEBENCHIFY_" not in result
+    assert "PATH" in result
+
+
+def test__sanitize_test_output_empty_input() -> None:
+    assert _sanitize_test_output("", "/tmp/repo") == ""
+
+
+# ---------------------------------------------------------------------------
+# Exp-15: _extract_failed_test_names
+# ---------------------------------------------------------------------------
+
+def test__extract_failed_test_names() -> None:
+    output = (
+        "FAILED tests/test_foo.py::TestBar::test_baz - AssertionError\n"
+        "FAILED tests/test_core.py::test_bad_environ_raises_bad_request\n"
+        "PASSED tests/test_ok.py::test_success\n"
+        "2 failed, 5 passed"
+    )
+    names = _extract_failed_test_names(output)
+    assert "tests/test_foo.py::TestBar::test_baz" in names
+    assert "tests/test_core.py::test_bad_environ_raises_bad_request" in names
+    assert len(names) == 2
+
+
+def test__extract_failed_test_names_empty() -> None:
+    assert _extract_failed_test_names("") == set()
+    assert _extract_failed_test_names("all passed") == set()
+
+
+# ---------------------------------------------------------------------------
+# Exp-15: _run_tests baseline diffing
+# ---------------------------------------------------------------------------
+
+def test__run_tests_baseline_diffing(tmp_path: Path) -> None:
+    """Baseline failures are filtered from buggy-code output."""
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=True)
+
+    (tmp_path / "module.py").write_text("def add(a, b):\n    return a + b\n")
+    (tmp_path / "test_module.py").write_text(
+        "from module import add\n\n"
+        "def test_add():\n    assert add(1, 2) == 3\n\n"
+        "def test_preexisting_broken():\n    assert False\n"
+    )
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "initial with broken test"], cwd=tmp_path, capture_output=True, check=True)
+    clean_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    (tmp_path / "module.py").write_text("def add(a, b):\n    return a - b\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "buggy"], cwd=tmp_path, capture_output=True, check=True)
+    buggy_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    # Return to clean commit so baseline captures only pre-existing failures
+    subprocess.run(["git", "checkout", clean_sha], cwd=tmp_path, capture_output=True, check=True)
+
+    output = _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
+    assert output is not None
+    # Pre-existing failure should be filtered out
+    assert "test_preexisting_broken" not in output
+    # Output should still contain failure info (assert False is too generic, check failed marker)
+    assert "failed" in output.lower()
+
+
+# ---------------------------------------------------------------------------
+# Exp-15: tone calibration
+# ---------------------------------------------------------------------------
+
+def test_data_first_prompt_tone_calibration() -> None:
+    """Data-first path uses matter-of-fact tone, not frustrated."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    real_test_output = (
+        "FAILED tests/test_core.py::test_add\n"
+        "E       AssertionError: assert -1 == 3\n"
+        "tests/test_core.py:5: AssertionError\n"
+        "======================== 1 failed ========================\n"
+        "Extra padding to ensure output exceeds 200 chars. " * 3
+    )
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import generate_issue_from_symptom
+        asyncio.run(generate_issue_from_symptom(
+            symptom="calculation fails",
+            test_output=real_test_output,
+        ))
+
+    assert len(captured_prompts) >= 1
+    prompt = captured_prompts[0]
+    assert "matter-of-fact" in prompt
+    assert "frustrated" not in prompt
