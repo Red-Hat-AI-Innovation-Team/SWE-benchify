@@ -3131,6 +3131,16 @@ async def synthesize_repo(
             logger.warning("  Skipped -- no valid test patch generated")
             continue
 
+        # Checkout buggy commit so pre-flight F2P tests see the mutation
+        try:
+            subprocess.run(
+                ['git', 'checkout', '--quiet', buggy_commit],
+                cwd=repo_path, capture_output=True, text=True, check=True,
+            )
+        except subprocess.CalledProcessError:
+            logger.warning('  Skipped — could not checkout buggy commit for pre-flight F2P')
+            continue
+
         # Pre-validate: test_patch must cause failures on buggy code
         test_file_for_patch = None
         for line in test_patch.splitlines():
@@ -3151,6 +3161,10 @@ async def synthesize_repo(
                 if apply_result.returncode != 0:
                     logger.warning('  Skipped — test_patch does not apply cleanly')
                     patch_file.unlink(missing_ok=True)
+                    subprocess.run(
+                        ['git', 'checkout', '--quiet', base_commit],
+                        cwd=repo_path, capture_output=True, text=True,
+                    )
                     continue
 
                 # Build env with venv site-packages
@@ -3203,11 +3217,19 @@ async def synthesize_repo(
                 if patched_run.returncode == 0:
                     logger.warning('  Skipped — test_patch does not fail on buggy code (pre-flight F2P)')
                     patch_file.unlink(missing_ok=True)
+                    subprocess.run(
+                        ['git', 'checkout', '--quiet', base_commit],
+                        cwd=repo_path, capture_output=True, text=True,
+                    )
                     continue
                 elif patched_fails <= baseline_fails:
                     logger.warning('  Skipped — test_patch did not add new failures (%d baseline, %d patched)',
                                    baseline_fails, patched_fails)
                     patch_file.unlink(missing_ok=True)
+                    subprocess.run(
+                        ['git', 'checkout', '--quiet', base_commit],
+                        cwd=repo_path, capture_output=True, text=True,
+                    )
                     continue
                 else:
                     logger.info('  Pre-flight F2P PASSED — %d new failures (baseline=%d, patched=%d)',
@@ -3219,8 +3241,18 @@ async def synthesize_repo(
                     ['git', 'checkout', '--', test_file_for_patch],
                     cwd=repo_path, capture_output=True, text=True,
                 )
+                subprocess.run(
+                    ['git', 'checkout', '--quiet', base_commit],
+                    cwd=repo_path, capture_output=True, text=True,
+                )
             finally:
                 patch_file.unlink(missing_ok=True)
+
+        # Restore base_commit after pre-flight F2P
+        subprocess.run(
+            ['git', 'checkout', '--quiet', base_commit],
+            cwd=repo_path, capture_output=True, text=True,
+        )
 
         synthesis_result = SynthesisResult(
             bug_spec=bug_spec,
