@@ -67,6 +67,7 @@ class CandidateInstance:
     resolved_jira_issues: list[str] = field(default_factory=list)
     merged_at: str = ""        # ISO 8601 merge timestamp from GitHub API
     link_confidence: float = 0.0
+    provenance: str = "public_upstream"
 
 
 @dataclass
