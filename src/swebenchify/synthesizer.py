@@ -2190,9 +2190,6 @@ Requirements:
         logger.warning("  Generated test code failed validation")
         return None
 
-    if not _validate_test_imports(modified_content, repo_path):
-        return None
-
     # generate_patch diffs mutated→original; swap args so we get original→modified
     return generate_patch(modified_content, original_test_content, test_file)
 
