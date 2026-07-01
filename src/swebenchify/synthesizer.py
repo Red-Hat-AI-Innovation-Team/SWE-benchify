@@ -1478,15 +1478,10 @@ Respond with ONLY the symptom sentence, nothing else."""
 def _is_valid_test_output(test_output: str) -> bool:
     """Check if test output contains a real test failure, not a setup error."""
     stripped = test_output.strip()
-    if len(stripped) < 200:
+    if len(stripped) < 100:
         return False
     head = stripped[:500]
-    if "ModuleNotFoundError" in head:
-        return False
-    if "ImportError" in head and "FAILED" not in head and "AssertionError" not in head:
-        return False
-    failure_signals = ("FAILED", "AssertionError", "Error", "Exception", "Traceback")
-    if not any(sig in stripped for sig in failure_signals):
+    if 'ModuleNotFoundError' in head:
         return False
     return True
 
@@ -2469,9 +2464,6 @@ def _run_tests_on_buggy_code(
 
     When *target_file* is provided, runs only the corresponding test file
     (found via _find_existing_test_file) instead of the full suite.
-
-    Captures a baseline of failures on the clean code BEFORE checkout and
-    filters out pre-existing failures from the buggy-code output.
     """
     def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -2485,8 +2477,11 @@ def _run_tests_on_buggy_code(
     except subprocess.CalledProcessError:
         return None
 
-    # Set up PYTHONPATH early so baseline run can use it
     test_env = os.environ.copy()
+    test_env = {
+        k: v for k, v in test_env.items()
+        if not k.startswith(('ANTHROPIC_', 'FACTORY_', 'CLAUDE_', 'SWEBENCHIFY_'))
+    }
     src_dir = os.path.join(repo_path, "src")
     if os.path.isdir(src_dir):
         test_env["PYTHONPATH"] = src_dir + os.pathsep + repo_path + os.pathsep + test_env.get("PYTHONPATH", "")
@@ -2500,30 +2495,6 @@ def _run_tests_on_buggy_code(
         if test_file:
             test_cmd = [sys.executable, "-m", "pytest", test_file, "-x", "--tb=long"]
             logger.debug("  Running targeted tests: %s", test_file)
-
-    # --- Baseline run on CLEAN code ---
-    baseline_failures: set[str] = set()
-    if test_cmd or language in _TEST_COMMANDS:
-        cmds_to_try = [test_cmd] if test_cmd else [
-            [sys.executable if c == "python" else c for c in t]
-            for t in _TEST_COMMANDS.get(language, [])
-        ]
-        for cmd in cmds_to_try:
-            if cmd is None:
-                continue
-            try:
-                baseline_result = subprocess.run(
-                    cmd, cwd=repo_path, capture_output=True, text=True,
-                    timeout=timeout, env=test_env,
-                )
-                if baseline_result.returncode != 0:
-                    baseline_out = (baseline_result.stdout + "\n" + baseline_result.stderr).strip()
-                    baseline_failures = _extract_failed_test_names(baseline_out)
-                    if baseline_failures:
-                        logger.debug("  Baseline has %d pre-existing failures", len(baseline_failures))
-                break
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                continue
 
     try:
         run(["git", "checkout", buggy_commit])
@@ -2580,23 +2551,7 @@ def _run_tests_on_buggy_code(
                 )
                 combined = (result.stdout + "\n" + result.stderr).strip()
                 if result.returncode != 0 and combined:
-                    # Filter out pre-existing baseline failures
-                    if baseline_failures:
-                        short_names = {
-                            bf.rsplit("::", 1)[-1] for bf in baseline_failures
-                        }
-                        all_names = baseline_failures | short_names
-                        filtered_lines = []
-                        for line in combined.split("\n"):
-                            mentions_baseline = any(
-                                re.search(r'\b' + re.escape(name) + r'\b', line)
-                                for name in all_names
-                            )
-                            if not mentions_baseline:
-                                filtered_lines.append(line)
-                        combined = "\n".join(filtered_lines).strip()
-                    if combined:
-                        test_output = combined[:2000]
+                    test_output = combined[:2000]
                     break
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 continue
