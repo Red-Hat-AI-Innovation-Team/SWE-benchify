@@ -1624,6 +1624,12 @@ async def generate_issue_from_symptom(
             test_output = None
         else:
             test_id = m.group(1)
+            func_part = test_id.rsplit('::', 1)[-1] if '::' in test_id else test_id
+            func_part = func_part.split('[')[0]
+            if func_part.startswith('test_'):
+                func_part = func_part[5:]
+            title = func_part.replace('_', ' ').capitalize()
+
             _ISSUE_OPENERS = [
                 'This test started failing after a recent update.',
                 'Getting unexpected test failures.',
@@ -1633,10 +1639,12 @@ async def generate_issue_from_symptom(
                 '',
             ]
             opener = random.choice(_ISSUE_OPENERS)
-            parts = [test_id, '']
+            parts = [title, '']
             if opener:
                 parts.append(opener)
                 parts.append('')
+            parts.append(f'Running `pytest {test_id}` reproduces the failure:')
+            parts.append('')
             parts.append(f'```\n{test_output}\n```')
             parts.append('')
             parts.append(f'Environment: {version}, Python {lang_version}')
