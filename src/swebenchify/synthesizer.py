@@ -990,12 +990,12 @@ async def introduce_bug(
 
     prompt = f"""You are a code mutation expert. Given the following {language} function, introduce a subtle, realistic bug — the kind a developer might actually make during a refactoring or late-night coding session.
 
-PREFERRED bug types (choose one):
-- Type confusion: use a similar but wrong type (str where bytes expected, list where tuple needed, int where float, TextIO where BinaryIO)
-- Wrong method: call a similar method on the same object (.items() vs .values(), .append() vs .extend(), .read() vs .readline())
-- Incomplete refactoring: rename a variable in some places but not all, or update a function signature without updating all callers
-- Wrong argument order: swap two arguments of the same type in a function call
-- Stale reference: use an old variable name that was valid before a rename
+PREFERRED bug types (choose the first that applies to this function):
+1. Incomplete refactoring (BEST — hardest to detect): rename a variable or parameter in some places but not all, or change a function call in one location but miss another. This is the most realistic and hardest-to-detect bug type.
+2. Stale reference: use an old variable name or API that was valid before a rename or deprecation
+3. Type confusion: use a similar but wrong type (str where bytes expected, list where tuple needed)
+4. Wrong method: call a similar method on the same object (.items() vs .values(), .append() vs .extend())
+5. Wrong argument order: swap two arguments of the same type in a function call
 
 AVOID these (too easy to detect as artificial):
 - Simple condition inversions (> to <, True to False)
@@ -1140,6 +1140,10 @@ def _parse_bug_response(text: str, target: dict) -> BugSpec | None:
     buggy_code = _align_indentation(target['source'], buggy_code)
     buggy_code = _preserve_unchanged_lines(target['source'], buggy_code)
 
+    if _is_trivial_inversion(target['source'], buggy_code):
+        logger.warning('Rejected trivial inversion mutation — retrying')
+        return None
+
     if buggy_code == target["source"]:
         logger.warning("LLM returned identical code — no bug introduced")
         return None
@@ -1222,6 +1226,54 @@ def _preserve_unchanged_lines(original_code: str, buggy_code: str) -> str:
                 result[buggy_idx] = orig_lines[orig_idx]
 
     return '\n'.join(result)
+
+
+_INVERSION_PATTERNS = [
+    (r'\bnot\s+in\b', 'in'),
+    (r'\bin\b', 'not in'),
+    (r'\bis\s+not\b', 'is'),
+    (r'\bis\b', 'is not'),
+    (r'!=', '=='),
+    (r'==', '!='),
+    (r'>=', '<'),
+    (r'<=', '>'),
+    (r'>', '<='),
+    (r'<', '>='),
+    (r'\bTrue\b', 'False'),
+    (r'\bFalse\b', 'True'),
+    (r'\band\b', 'or'),
+    (r'\bor\b', 'and'),
+    (r'\bnot\s+', ''),
+]
+
+
+def _is_trivial_inversion(original_code: str, buggy_code: str) -> bool:
+    """Check if the mutation is a simple boolean/condition inversion."""
+    orig_lines = original_code.splitlines()
+    buggy_lines = buggy_code.splitlines()
+
+    if len(orig_lines) != len(buggy_lines):
+        return False
+
+    diff_count = 0
+    for o, b in zip(orig_lines, buggy_lines):
+        if o.strip() != b.strip():
+            diff_count += 1
+
+    if diff_count != 1:
+        return False
+
+    for o, b in zip(orig_lines, buggy_lines):
+        if o.strip() != b.strip():
+            o_stripped = o.strip()
+            b_stripped = b.strip()
+            for old_pat, new_pat in _INVERSION_PATTERNS:
+                candidate = re.sub(old_pat, new_pat, o_stripped, count=1)
+                if candidate == b_stripped:
+                    return True
+            break
+
+    return False
 
 
 def _parse_secondary_changes(text: str) -> list[SecondaryChange]:
