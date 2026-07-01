@@ -1133,6 +1133,7 @@ def _parse_bug_response(text: str, target: dict) -> BugSpec | None:
 
     # Auto-correct indentation to match original
     buggy_code = _align_indentation(target['source'], buggy_code)
+    buggy_code = _preserve_unchanged_lines(target['source'], buggy_code)
 
     if buggy_code == target["source"]:
         logger.warning("LLM returned identical code — no bug introduced")
@@ -1187,6 +1188,35 @@ def _align_indentation(original_code: str, buggy_code: str) -> str:
             remove = min(abs(diff), len(line) - len(line.lstrip()))
             adjusted.append(line[remove:])
     return '\n'.join(adjusted)
+
+
+def _preserve_unchanged_lines(original_code: str, buggy_code: str) -> str:
+    """Force unchanged lines to be byte-identical to the original.
+
+    After LLM produces buggy code, some lines may have whitespace
+    differences (trailing spaces, tab/space mixing) even though the
+    semantic content is identical. These show up as noise in the diff
+    and are flagged by reviewers as 'indentation artifacts.'
+
+    Uses SequenceMatcher to find matching blocks between original and
+    buggy code. For lines within matched blocks where the stripped
+    content is the same, the original line is used verbatim.
+    """
+    import difflib
+    orig_lines = original_code.splitlines()
+    buggy_lines = buggy_code.splitlines()
+
+    matcher = difflib.SequenceMatcher(None,
+        [ln.strip() for ln in orig_lines],
+        [ln.strip() for ln in buggy_lines])
+
+    result = list(buggy_lines)  # start with buggy, replace matches
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'equal':
+            for orig_idx, buggy_idx in zip(range(i1, i2), range(j1, j2)):
+                result[buggy_idx] = orig_lines[orig_idx]
+
+    return '\n'.join(result)
 
 
 def _parse_secondary_changes(text: str) -> list[SecondaryChange]:
