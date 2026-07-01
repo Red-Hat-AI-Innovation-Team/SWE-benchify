@@ -698,6 +698,49 @@ def _strip_issue_shas(text: str) -> str:
 
 _FAKE_USERNAMES = ["alex", "sarah", "dev", "mike", "jenny"]
 
+_SYNTH_ENV_PREFIXES = ("ANTHROPIC_", "SWEBENCHIFY_", "FACTORY_", "CLAUDE_")
+
+
+def _sanitize_test_output(test_output: str, repo_path: str) -> str:
+    """Remove synthetic-origin fingerprints from test output.
+
+    Strips env vars (ANTHROPIC_*, FACTORY_*, CLAUDE_*, SWEBENCHIFY_*),
+    local macOS paths, synth/factory working directory paths, and
+    pytest metadata containing those paths.
+    """
+    if not test_output:
+        return ""
+
+    lines = test_output.split("\n")
+    cleaned: list[str] = []
+    for line in lines:
+        if any(prefix in line for prefix in _SYNTH_ENV_PREFIXES):
+            continue
+        cleaned.append(line)
+    result = "\n".join(cleaned)
+
+    # Strip dict-like env var entries: 'ANTHROPIC_FOO': 'bar' or "ANTHROPIC_FOO": "bar"
+    result = re.sub(
+        r"""['"](""" + "|".join(_SYNTH_ENV_PREFIXES) + r""")[^'"]*['"]:\s*['"][^'"]*['"],?\s*""",
+        "", result,
+    )
+
+    # Replace macOS /Users/<username>/... paths with neutral /home/user/...
+    result = re.sub(r"/Users/[^/\s]+/", "/home/user/", result)
+
+    # Neutralize synth-related tmp paths
+    result = re.sub(r"/tmp/[a-zA-Z0-9_-]*synth-test[a-zA-Z0-9_-]*/", "/tmp/test-env/", result)
+    result = re.sub(r"/tmp/[a-zA-Z0-9_-]*synth[a-zA-Z0-9_-]*/", "/tmp/test-env/", result)
+
+    # Strip remote-factory and .factory-worktrees paths
+    result = re.sub(r"[^\s]*remote-factory[^\s]*/", "/home/user/project/", result)
+    result = re.sub(r"[^\s]*\.factory-worktrees/[^\s/]+/", "/home/user/project/", result)
+
+    # Strip cachedir lines with synth/factory paths
+    result = re.sub(r"cachedir:.*(?:synth|factory).*\n?", "", result)
+
+    return result
+
 
 def _humanize_traceback(test_output: str, repo_path: str) -> str:
     """Transform raw test output paths to look like a user's environment."""
@@ -1494,7 +1537,7 @@ async def generate_issue_from_symptom(
     if test_output:
         prompt = (
             "Write ONLY a title and 1-2 sentence intro for a GitHub issue. "
-            "A user hit this error. Be brief and frustrated. "
+            "A user hit this error. Be brief and matter-of-fact, like a developer filing a quick bug report. "
             "Output format: Title on the first line, then a blank line, "
             "then 1-2 sentences.\n\n"
             f"Symptom: {symptom}"
@@ -2377,6 +2420,20 @@ def _create_buggy_commit_multi(
         return None
 
 
+_FAILED_TEST_PATTERN = re.compile(
+    r"FAILED\s+(\S+::(?:\S+::)?\S+)",
+)
+
+
+def _extract_failed_test_names(test_output: str) -> set[str]:
+    """Extract test IDs from pytest FAILED lines.
+
+    Parses lines like 'FAILED tests/test_foo.py::TestBar::test_baz'
+    and returns the set of full test node IDs.
+    """
+    return set(_FAILED_TEST_PATTERN.findall(test_output))
+
+
 _TEST_COMMANDS: dict[str, list[list[str]]] = {
     "python": [
         ["python", "-m", "pytest", "--tb=long", "-q"],
@@ -2393,12 +2450,19 @@ def _run_tests_on_buggy_code(
     buggy_commit: str,
     language: str,
     timeout: int = 120,
+    target_file: str | None = None,
 ) -> str | None:
     """Run the project's test suite against buggy code and capture output.
 
     Checks out the buggy commit, runs tests, then restores the original
     branch. Returns the combined stderr/stdout truncated to 2000 chars,
     or None if tests couldn't be run.
+
+    When *target_file* is provided, runs only the corresponding test file
+    (found via _find_existing_test_file) instead of the full suite.
+
+    Captures a baseline of failures on the clean code BEFORE checkout and
+    filters out pre-existing failures from the buggy-code output.
     """
     def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -2411,6 +2475,46 @@ def _run_tests_on_buggy_code(
             orig = run(["git", "rev-parse", "HEAD"]).stdout.strip()
     except subprocess.CalledProcessError:
         return None
+
+    # Set up PYTHONPATH early so baseline run can use it
+    test_env = os.environ.copy()
+    src_dir = os.path.join(repo_path, "src")
+    if os.path.isdir(src_dir):
+        test_env["PYTHONPATH"] = src_dir + os.pathsep + repo_path + os.pathsep + test_env.get("PYTHONPATH", "")
+    else:
+        test_env["PYTHONPATH"] = repo_path + os.pathsep + test_env.get("PYTHONPATH", "")
+
+    # Build the test command — use targeted test file if possible
+    test_cmd: list[str] | None = None
+    if target_file and language == "python":
+        test_file = _find_existing_test_file(repo_path, target_file, language)
+        if test_file:
+            test_cmd = [sys.executable, "-m", "pytest", test_file, "-x", "--tb=long"]
+            logger.debug("  Running targeted tests: %s", test_file)
+
+    # --- Baseline run on CLEAN code ---
+    baseline_failures: set[str] = set()
+    if test_cmd or language in _TEST_COMMANDS:
+        cmds_to_try = [test_cmd] if test_cmd else [
+            [sys.executable if c == "python" else c for c in t]
+            for t in _TEST_COMMANDS.get(language, [])
+        ]
+        for cmd in cmds_to_try:
+            if cmd is None:
+                continue
+            try:
+                baseline_result = subprocess.run(
+                    cmd, cwd=repo_path, capture_output=True, text=True,
+                    timeout=timeout, env=test_env,
+                )
+                if baseline_result.returncode != 0:
+                    baseline_out = (baseline_result.stdout + "\n" + baseline_result.stderr).strip()
+                    baseline_failures = _extract_failed_test_names(baseline_out)
+                    if baseline_failures:
+                        logger.debug("  Baseline has %d pre-existing failures", len(baseline_failures))
+                break
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                continue
 
     try:
         run(["git", "checkout", buggy_commit])
@@ -2439,14 +2543,6 @@ def _run_tests_on_buggy_code(
             except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
                 logger.debug("  pip install -e . failed, proceeding anyway")
 
-    # Set PYTHONPATH so the repo's source is importable even without pip install
-    test_env = os.environ.copy()
-    src_dir = os.path.join(repo_path, "src")
-    if os.path.isdir(src_dir):
-        test_env["PYTHONPATH"] = src_dir + os.pathsep + repo_path + os.pathsep + test_env.get("PYTHONPATH", "")
-    else:
-        test_env["PYTHONPATH"] = repo_path + os.pathsep + test_env.get("PYTHONPATH", "")
-
     repo_package_name = Path(repo_path).name.replace("-", "_")
     try:
         import_check = subprocess.run(
@@ -2461,9 +2557,13 @@ def _run_tests_on_buggy_code(
 
     test_output: str | None = None
     try:
-        commands = _TEST_COMMANDS.get(language, [])
-        for cmd_template in commands:
-            cmd = [sys.executable if c == "python" else c for c in cmd_template]
+        cmds_to_try = [test_cmd] if test_cmd else [
+            [sys.executable if c == "python" else c for c in t]
+            for t in _TEST_COMMANDS.get(language, [])
+        ]
+        for cmd in cmds_to_try:
+            if cmd is None:
+                continue
             try:
                 result = subprocess.run(
                     cmd, cwd=repo_path, capture_output=True, text=True,
@@ -2471,7 +2571,22 @@ def _run_tests_on_buggy_code(
                 )
                 combined = (result.stdout + "\n" + result.stderr).strip()
                 if result.returncode != 0 and combined:
-                    test_output = combined[:2000]
+                    # Filter out pre-existing baseline failures
+                    if baseline_failures:
+                        short_names = {
+                            bf.rsplit("::", 1)[-1] for bf in baseline_failures
+                        }
+                        all_names = baseline_failures | short_names
+                        filtered_lines = []
+                        for line in combined.split("\n"):
+                            mentions_baseline = any(
+                                name in line for name in all_names
+                            )
+                            if not mentions_baseline:
+                                filtered_lines.append(line)
+                        combined = "\n".join(filtered_lines).strip()
+                    if combined:
+                        test_output = combined[:2000]
                     break
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 continue
@@ -2746,9 +2861,11 @@ async def synthesize_repo(
         # H3: Capture test failure output from buggy code
         test_output = _run_tests_on_buggy_code(
             repo_path, buggy_commit, language,
+            target_file=bug_spec.file,
         )
         if test_output:
             logger.info("  Captured %d chars of test output", len(test_output))
+            test_output = _sanitize_test_output(test_output, repo_path)
             test_output = _humanize_traceback(test_output, repo_path)
 
         # H2: Mine social artifacts and build social context
