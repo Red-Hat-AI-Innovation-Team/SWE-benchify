@@ -19,6 +19,7 @@ import random
 import re
 import shutil
 import subprocess
+import tempfile
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -3140,12 +3141,11 @@ async def synthesize_repo(
                     break
 
         if test_file_for_patch:
-            import tempfile
             patch_file = Path(tempfile.mktemp(suffix='.patch'))
             try:
                 patch_file.write_text(test_patch, encoding='utf-8')
                 apply_result = subprocess.run(
-                    ['git', 'apply', '--stat', str(patch_file)],
+                    ['git', 'apply', '--check', str(patch_file)],
                     cwd=repo_path, capture_output=True, text=True,
                 )
                 if apply_result.returncode != 0:
@@ -3153,15 +3153,41 @@ async def synthesize_repo(
                     patch_file.unlink(missing_ok=True)
                     continue
 
+                # Build env with venv site-packages
+                preflight_env = dict(os.environ)
+                venv_dir = Path(repo_path) / '.synth-venv'
+                pp_parts = [repo_path]
+                if venv_dir.is_dir():
+                    sp_result = subprocess.run(
+                        [str(venv_dir / 'bin' / 'python'), '-c',
+                         'import site; print(site.getsitepackages()[0])'],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    if sp_result.returncode == 0:
+                        pp_parts.insert(0, sp_result.stdout.strip())
+                src_dir = Path(repo_path) / 'src'
+                if src_dir.is_dir():
+                    pp_parts.append(str(src_dir))
+                preflight_env['PYTHONPATH'] = os.pathsep.join(pp_parts)
+
+                # Baseline: run tests WITHOUT test_patch
+                baseline_run = subprocess.run(
+                    [sys.executable, '-m', 'pytest', '--tb=line', '-q', test_file_for_patch],
+                    cwd=repo_path, capture_output=True, text=True, timeout=120,
+                    env=preflight_env,
+                )
+
+                # Apply test_patch
                 subprocess.run(
                     ['git', 'apply', str(patch_file)],
                     cwd=repo_path, capture_output=True, text=True,
                 )
 
-                test_run = subprocess.run(
-                    [sys.executable, '-m', 'pytest', '-x', '--tb=no', '-q', test_file_for_patch],
+                # Run tests WITH test_patch
+                patched_run = subprocess.run(
+                    [sys.executable, '-m', 'pytest', '--tb=line', '-q', test_file_for_patch],
                     cwd=repo_path, capture_output=True, text=True, timeout=120,
-                    env={**os.environ, 'PYTHONPATH': repo_path},
+                    env=preflight_env,
                 )
 
                 # Revert the test_patch
@@ -3170,12 +3196,22 @@ async def synthesize_repo(
                     cwd=repo_path, capture_output=True, text=True,
                 )
 
-                if test_run.returncode == 0:
-                    logger.warning('  Skipped — test_patch does not fail on buggy code (pre-flight F2P check)')
+                # Evaluate: test_patch must add NEW failures
+                baseline_fails = len(re.findall(r'FAILED', baseline_run.stdout))
+                patched_fails = len(re.findall(r'FAILED', patched_run.stdout))
+
+                if patched_run.returncode == 0:
+                    logger.warning('  Skipped — test_patch does not fail on buggy code (pre-flight F2P)')
+                    patch_file.unlink(missing_ok=True)
+                    continue
+                elif patched_fails <= baseline_fails:
+                    logger.warning('  Skipped — test_patch did not add new failures (%d baseline, %d patched)',
+                                   baseline_fails, patched_fails)
                     patch_file.unlink(missing_ok=True)
                     continue
                 else:
-                    logger.info('  Pre-flight F2P check PASSED — tests fail on buggy code')
+                    logger.info('  Pre-flight F2P PASSED — %d new failures (baseline=%d, patched=%d)',
+                                patched_fails - baseline_fails, baseline_fails, patched_fails)
 
             except (subprocess.TimeoutExpired, OSError) as exc:
                 logger.warning('  Pre-flight F2P check error: %s', exc)
