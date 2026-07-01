@@ -1180,7 +1180,7 @@ def _align_indentation(original_code: str, buggy_code: str) -> str:
     adjusted = []
     for line in buggy_lines:
         if not line.strip():
-            adjusted.append(line)
+            adjusted.append('')
         elif diff > 0:
             adjusted.append(' ' * diff + line)
         else:
@@ -2708,14 +2708,14 @@ async def synthesize_repo(
 
     candidates: list[CandidateInstance] = []
 
-    for i, target in enumerate(targets):
+    for i, target in enumerate(targets[:max_mutations * 8]):
         if len(candidates) >= max_mutations:
             break
 
         logger.info(
             "[%d/%d] Mutating %s:%s",
             i + 1,
-            min(len(targets), max_mutations),
+            min(len(targets), max_mutations * 8),
             target["file"],
             target["function_name"],
         )
@@ -2923,6 +2923,10 @@ async def synthesize_repo(
             logger.info("  Captured %d chars of test output", len(test_output))
             test_output = _sanitize_test_output(test_output, repo_path)
             test_output = _humanize_traceback(test_output, repo_path)
+
+        if not test_output or not _is_valid_test_output(test_output):
+            logger.warning("  Skipped — mutation did not cause test failures (data-first path required)")
+            continue
 
         # H2: Mine social artifacts and build social context
         social_artifacts = _mine_social_artifacts(repo_path)
