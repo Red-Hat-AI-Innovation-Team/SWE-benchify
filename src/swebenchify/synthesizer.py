@@ -2000,6 +2000,7 @@ async def generate_test_patch(
     repo_path: str,
     language: str,
     model: str = "sonnet",
+    test_output: str | None = None,
 ) -> str | None:
     """Generate a test patch that exposes a synthetic bug.
 
@@ -2012,6 +2013,7 @@ async def generate_test_patch(
     if existing_test:
         return await _generate_test_patch_existing(
             bug_spec, repo_path, existing_test, language, model,
+            test_output=test_output,
         )
     logger.warning(
         "  No existing test file found for %s — skipping test patch generation",
@@ -2105,12 +2107,23 @@ def _extract_file_imports(source: str) -> str:
     return "\n".join(lines).rstrip() + "\n" if lines else ""
 
 
+def _test_output_section(test_output: str | None) -> str:
+    if not test_output:
+        return ""
+    return (
+        "Here is what happens when existing tests run against the buggy code "
+        "(use this to understand what inputs trigger the bug):\n"
+        + test_output
+    )
+
+
 async def _generate_test_patch_existing(
     bug_spec: BugSpec,
     repo_path: str,
     test_file: str,
     language: str,
     model: str,
+    test_output: str | None = None,
 ) -> str | None:
     """Generate a test patch by adding tests to an existing test file."""
     try:
@@ -2163,7 +2176,7 @@ Here is the buggy function:
 ```
 
 The bug: {bug_spec.bug_description}
-
+{_test_output_section(test_output)}
 HARD CONSTRAINT: Return ONLY the modified function. Do NOT return the complete file.
 
 Add 1-2 `assert` statements to this function. At least one must PASS against the original code and FAIL against the buggy code.
@@ -3110,11 +3123,68 @@ async def synthesize_repo(
 
         test_patch = await generate_test_patch(
             bug_spec, repo_path, language, model=model,
+            test_output=test_output,
         ) or ''
 
         if not test_patch.strip():
             logger.warning("  Skipped -- no valid test patch generated")
             continue
+
+        # Pre-validate: test_patch must cause failures on buggy code
+        test_file_for_patch = None
+        for line in test_patch.splitlines():
+            if line.startswith('diff --git'):
+                parts = line.split()
+                if len(parts) >= 4:
+                    test_file_for_patch = parts[3].lstrip('b/')
+                    break
+
+        if test_file_for_patch:
+            import tempfile
+            patch_file = Path(tempfile.mktemp(suffix='.patch'))
+            try:
+                patch_file.write_text(test_patch, encoding='utf-8')
+                apply_result = subprocess.run(
+                    ['git', 'apply', '--stat', str(patch_file)],
+                    cwd=repo_path, capture_output=True, text=True,
+                )
+                if apply_result.returncode != 0:
+                    logger.warning('  Skipped — test_patch does not apply cleanly')
+                    patch_file.unlink(missing_ok=True)
+                    continue
+
+                subprocess.run(
+                    ['git', 'apply', str(patch_file)],
+                    cwd=repo_path, capture_output=True, text=True,
+                )
+
+                test_run = subprocess.run(
+                    [sys.executable, '-m', 'pytest', '-x', '--tb=no', '-q', test_file_for_patch],
+                    cwd=repo_path, capture_output=True, text=True, timeout=120,
+                    env={**os.environ, 'PYTHONPATH': repo_path},
+                )
+
+                # Revert the test_patch
+                subprocess.run(
+                    ['git', 'checkout', '--', test_file_for_patch],
+                    cwd=repo_path, capture_output=True, text=True,
+                )
+
+                if test_run.returncode == 0:
+                    logger.warning('  Skipped — test_patch does not fail on buggy code (pre-flight F2P check)')
+                    patch_file.unlink(missing_ok=True)
+                    continue
+                else:
+                    logger.info('  Pre-flight F2P check PASSED — tests fail on buggy code')
+
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                logger.warning('  Pre-flight F2P check error: %s', exc)
+                subprocess.run(
+                    ['git', 'checkout', '--', test_file_for_patch],
+                    cwd=repo_path, capture_output=True, text=True,
+                )
+            finally:
+                patch_file.unlink(missing_ok=True)
 
         synthesis_result = SynthesisResult(
             bug_spec=bug_spec,
