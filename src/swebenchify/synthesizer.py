@@ -1567,6 +1567,8 @@ def _is_valid_test_output(test_output: str) -> bool:
     head = stripped[:500]
     if 'ModuleNotFoundError' in head:
         return False
+    if 'ImportError while loading conftest' in stripped:
+        return False
     failure_signals = ('FAILED', 'AssertionError', 'Error', 'ERRORS', 'Traceback')
     if not any(sig in stripped for sig in failure_signals):
         return False
@@ -2781,6 +2783,40 @@ def _run_tests_on_buggy_code(
                 [venv_pip, 'install', 'pytest', '--quiet'],
                 capture_output=True, text=True, timeout=60,
             )
+            # Verify the installed package actually imports; if not,
+            # try downgrading deps that are known to break old releases.
+            venv_py = str(venv_dir / 'bin' / 'python')
+            pkg_name = Path(repo_path).name.replace('-', '_')
+            for candidate in [pkg_name, pkg_name.split('_')[0]]:
+                _imp = subprocess.run(
+                    [venv_py, '-c', f'import {candidate}'],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if _imp.returncode == 0:
+                    break
+            else:
+                imp_stderr = _imp.stderr if _imp else ''
+                compat_pins: list[str] = []
+                if 'jinja2' in imp_stderr.lower() or 'markup' in imp_stderr.lower():
+                    compat_pins.extend(['jinja2<3.1', 'markupsafe<2.1'])
+                if 'werkzeug' in imp_stderr.lower():
+                    compat_pins.append('Werkzeug<2.0')
+                if 'itsdangerous' in imp_stderr.lower():
+                    compat_pins.append('itsdangerous<2.1')
+                if compat_pins:
+                    subprocess.run(
+                        [venv_pip, 'install'] + compat_pins + ['--quiet'],
+                        capture_output=True, text=True, timeout=60,
+                    )
+                for req_file in ['requirements.txt', 'requirements-dev.txt',
+                                 'test-requirements.txt']:
+                    req_path = root / req_file
+                    if req_path.is_file():
+                        subprocess.run(
+                            [venv_pip, 'install', '-r', str(req_path), '--quiet'],
+                            capture_output=True, text=True, timeout=120,
+                        )
+                        break
             site_pkgs = subprocess.run(
                 [str(venv_dir / 'bin' / 'python'), '-c',
                  'import site; print(site.getsitepackages()[0])'],
