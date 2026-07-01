@@ -8,6 +8,7 @@ so adding a new language is configuration, not forked code.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from io import StringIO
@@ -26,6 +27,8 @@ from swebenchify.parsers import (
     normalize_go_f2p,
     normalize_rust_f2p,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -52,6 +55,7 @@ _BACKENDS: dict[str, LanguageBackend] = {}
 
 
 def register_backend(backend: LanguageBackend) -> None:
+    logger.info("registered backend name=%s", backend.name)
     _BACKENDS[backend.name] = backend
 
 
@@ -91,9 +95,14 @@ def refine_patch_split(
     if not backend.is_test_hunk or not gold_patch:
         return gold_patch, test_patch
 
+    if not gold_patch.strip():
+        logger.warning("empty gold_patch input, skipping refinement")
+        return gold_patch, test_patch
+
     try:
         patch_set = PatchSet(StringIO(gold_patch))
     except Exception:
+        logger.warning("failed to parse gold_patch for refinement")
         return gold_patch, test_patch
 
     ext = {"rust": ".rs"}.get(backend.name)
@@ -113,11 +122,24 @@ def refine_patch_split(
             source = source_callback(patched_file.path)
             if source is not None:
                 test_regions = _rust_parse_test_regions(source)
+            else:
+                logger.warning(
+                    "source_callback returned None for path=%s, falling back to heuristic",
+                    patched_file.path,
+                )
 
         gold_hunks = []
         test_hunks = []
         for hunk in patched_file:
-            if backend.is_test_hunk(hunk, test_regions):
+            is_test = backend.is_test_hunk(hunk, test_regions)
+            logger.debug(
+                "hunk file=%s lines=%d-%d classified=%s",
+                patched_file.path,
+                hunk.source_start,
+                hunk.source_start + hunk.source_length,
+                "test" if is_test else "gold",
+            )
+            if is_test:
                 test_hunks.append(hunk)
             else:
                 gold_hunks.append(hunk)
@@ -134,6 +156,9 @@ def refine_patch_split(
     else:
         refined_test = test_patch
 
+    moved = len(extra_test)
+    if moved:
+        logger.info("patch split refined: hunks_moved_to_test=%d", moved)
     return refined_gold, refined_test
 
 
@@ -464,6 +489,11 @@ def _rust_parse_test_regions(source: str) -> list[tuple[int, int]]:
             i += 1
         end_line = source.count("\n", 0, i) + 1
         regions.append((cfg_start, end_line))
+    logger.debug(
+        "test regions found: count=%d ranges=%s",
+        len(regions),
+        [(s, e) for s, e in regions],
+    )
     return regions
 
 
