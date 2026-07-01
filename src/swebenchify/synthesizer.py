@@ -17,6 +17,7 @@ import logging
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -2747,27 +2748,32 @@ def _run_tests_on_buggy_code(
     except subprocess.CalledProcessError:
         return None
 
-    # Install the target package so imports resolve during test runs
+    # Install the target package in an ISOLATED venv so it doesn't pollute
+    # the host Python (e.g. psf/requests would shadow the system 'requests').
     root = Path(repo_path)
+    venv_dir = root / '.synth-venv'
     if any((root / cfg).is_file() for cfg in ("pyproject.toml", "setup.py", "setup.cfg")):
-        installed = False
         try:
             subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"],
+                [sys.executable, '-m', 'venv', str(venv_dir)],
+                capture_output=True, text=True, timeout=60,
+            )
+            venv_pip = str(venv_dir / 'bin' / 'pip')
+            subprocess.run(
+                [venv_pip, 'install', '-e', '.', '--quiet'],
                 cwd=repo_path, capture_output=True, text=True, timeout=120,
             )
-            installed = True
+            site_pkgs = subprocess.run(
+                [str(venv_dir / 'bin' / 'python'), '-c',
+                 'import site; print(site.getsitepackages()[0])'],
+                capture_output=True, text=True, timeout=10,
+            )
+            if site_pkgs.returncode == 0:
+                sp = site_pkgs.stdout.strip()
+                test_env['PYTHONPATH'] = sp + os.pathsep + test_env.get('PYTHONPATH', '')
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
                 FileNotFoundError, OSError):
-            pass
-        if not installed:
-            try:
-                subprocess.run(
-                    [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet", "--no-deps"],
-                    cwd=repo_path, capture_output=True, text=True, timeout=60,
-                )
-            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-                logger.debug("  pip install -e . failed, proceeding anyway")
+            logger.debug('  venv pip install -e . failed, proceeding anyway')
 
     repo_package_name = Path(repo_path).name.replace("-", "_")
     try:
@@ -3129,6 +3135,10 @@ async def synthesize_repo(
         logger.info(
             "  Generated: %s (%s)", candidate.instance_id, bug_spec.bug_category,
         )
+
+    venv_cleanup = Path(repo_path) / '.synth-venv'
+    if venv_cleanup.is_dir():
+        shutil.rmtree(venv_cleanup, ignore_errors=True)
 
     logger.info(
         "Synthesis complete: %d/%d candidates generated",
