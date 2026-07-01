@@ -1241,6 +1241,22 @@ def _parse_secondary_changes(text: str) -> list[SecondaryChange]:
             buggy = m.group(3).strip()
             desc = m.group(4).strip()
             if filepath and original and buggy and original != buggy:
+                orig_lines_stripped = [ln.strip() for ln in original.splitlines() if ln.strip()]
+                buggy_lines_stripped = [ln.strip() for ln in buggy.splitlines() if ln.strip()]
+
+                if all(ln.startswith(('import ', 'from ')) for ln in orig_lines_stripped) or \
+                        all(ln.startswith(('import ', 'from ')) for ln in buggy_lines_stripped):
+                    continue
+
+                if len(orig_lines_stripped) <= 1 and len(buggy_lines_stripped) <= 1:
+                    continue
+
+                if buggy_lines_stripped and all(
+                    ln.startswith('#') or ln.startswith('"""') or ln.startswith("'''")
+                    for ln in buggy_lines_stripped
+                ):
+                    continue
+
                 changes.append(SecondaryChange(
                     file=filepath,
                     original_snippet=original,
