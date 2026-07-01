@@ -307,6 +307,10 @@ class HarborTaskGenerator:
                     '|| pip install -e ".[dev]" 2>/dev/null || true'
                 )
                 lines.append("RUN cd /testbed && pip install pytest 2>/dev/null || true")
+            elif language == "java":
+                lines.append("RUN cd /testbed && mvn dependency:resolve -B 2>/dev/null || true")
+            elif language == "rust":
+                lines.append("RUN cd /testbed && cargo fetch 2>/dev/null || true")
 
         return "\n".join(lines) if lines else "# No extra setup required"
 
@@ -330,6 +334,10 @@ class HarborTaskGenerator:
             template_name = "test_go.sh.template"
         elif language == "python":
             template_name = "test_python.sh.template"
+        elif language == "java":
+            template_name = "test_java.sh.template"
+        elif language == "rust":
+            template_name = "test_rust.sh.template"
         else:
             template_name = "test_go.sh.template"
 
