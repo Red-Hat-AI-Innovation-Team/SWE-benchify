@@ -1029,20 +1029,17 @@ Return your response in EXACTLY this format:
 The COMPLETE modified function with ONLY the bug introduced. Include ALL lines of the original function. The bug should affect 2-3 related lines, not just one. Do NOT add incidental improvements (docstring fixes, variable renames, type hints) — only the bug mutation.
 </buggy_code>
 
-If RELATED CODE was shown above, the same bug pattern could plausibly exist in the related file. Provide a secondary change that introduces the SAME bug into the related file — so the gold patch must fix BOTH locations.
+If RELATED CODE was shown above, you MUST provide a secondary change. Real bug fixes almost always touch multiple files. Think of it this way: you are simulating an incomplete refactoring where the developer updated the primary function but forgot to apply the same change consistently in related code.
 
-CRITICAL: The secondary change must pass this test: "Does the related file have similar code where the SAME type of bug would plausibly exist?" If not, do NOT include a secondary change. A decorative change (comment, docstring, type annotation) is WORSE than no secondary change — it signals synthetic generation.
+Your secondary change MUST:
+1. Apply the SAME type of mutation to the related file (same rename, same API change, same parameter adjustment)
+2. Be a real code change that would break something if not fixed
+3. NOT be a decorative change (no comments, docstrings, or type annotations)
 
-Good secondary changes (same bug pattern):
-- The related file has the same function/logic and could have the same mistake
-- A caller that uses the same operator/value/condition that you mutated
-- A helper that has parallel logic to the primary function
-
-Bad secondary changes (noise — DO NOT USE):
-- Adding comments to explain unchanged code
-- Adding type annotations to unrelated parameters
-- Updating docstrings
-- Any change where the code works correctly without it
+Good secondary changes:
+- You renamed a variable in the primary function — rename the same variable (or its usage) in the related file
+- You changed a method call — change a similar method call in the related file
+- You swapped arguments — swap similar arguments in the related file
 
 For each secondary change, use this format:
 <secondary_change>
@@ -1051,14 +1048,14 @@ For each secondary change, use this format:
 the CORRECT code currently in the secondary file — copy-paste the exact lines
 </sec_original>
 <sec_buggy>
-the BUGGY version with the same mutation pattern applied — this is what the file will look like in the buggy state
+the BUGGY version with the same mutation pattern applied
 </sec_buggy>
 <sec_description>one sentence explaining why fixing ONLY the primary file is incomplete</sec_description>
 </secondary_change>
 
 DIRECTION: sec_original is the CORRECT code (what exists now). sec_buggy is the BROKEN version (with the same bug pattern as the primary). The buggy commit will have sec_buggy; the gold patch reverts sec_buggy → sec_original.
 
-If no secondary change makes sense, omit the block entirely. No secondary change is better than a decorative one.
+If there is genuinely no way to apply the same mutation pattern to the related code, omit the secondary change — but this should be rare. Most functions share patterns with their callers and importers.
 
 IMPORTANT:
 - Do NOT change return type annotations, class hierarchy, or method decorators. Only modify the BODY of the function (inside the function, after the def line and docstring).
