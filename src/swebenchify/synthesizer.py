@@ -1127,6 +1127,56 @@ def _count_changed_lines(patch: str) -> int:
     return count
 
 
+def _apply_cosmetic_noise(content: str, language: str = 'python') -> str:
+    """Apply 1-2 small cosmetic changes to source code to produce multi-hunk diffs.
+
+    Real developer patches often include incidental cleanup (trailing whitespace
+    removal, blank line normalization) alongside the actual fix. Adding cosmetic
+    noise to the 'fixed' version makes the gold_patch multi-hunk.
+    """
+    if language != 'python':
+        return content
+
+    lines = content.split('\n')
+    changes_made = 0
+    max_changes = random.randint(1, 2)
+
+    # Strategy 1: Remove trailing whitespace from a random line that has it
+    trailing_ws_lines = [i for i, line in enumerate(lines) if line != line.rstrip() and line.strip()]
+    if trailing_ws_lines and changes_made < max_changes:
+        idx = random.choice(trailing_ws_lines)
+        lines[idx] = lines[idx].rstrip()
+        changes_made += 1
+
+    # Strategy 2: Normalize blank lines (remove double-blank between functions)
+    double_blank_positions = []
+    for i in range(len(lines) - 1):
+        if not lines[i].strip() and not lines[i + 1].strip():
+            if i > 0 and i + 2 < len(lines):
+                if any(lines[j].startswith(('def ', 'class ')) for j in range(max(0, i-3), i)):
+                    double_blank_positions.append(i)
+    if double_blank_positions and changes_made < max_changes:
+        idx = random.choice(double_blank_positions)
+        lines.pop(idx)
+        changes_made += 1
+
+    # Strategy 3: Add a blank line before a function def that's missing one
+    # (PEP 8 says two blank lines before top-level defs)
+    for i in range(2, len(lines)):
+        if changes_made >= max_changes:
+            break
+        if lines[i].startswith('def ') or lines[i].startswith('class '):
+            if i >= 2 and lines[i-1].strip() == '' and lines[i-2].strip() != '':
+                lines.insert(i, '')
+                changes_made += 1
+                break
+
+    if changes_made == 0:
+        return content
+
+    return '\n'.join(lines)
+
+
 def _parse_bug_response(text: str, target: dict) -> BugSpec | None:
     """Parse LLM response to extract bug specification."""
     cat_match = re.search(
@@ -1400,6 +1450,7 @@ def _mine_social_artifacts(repo_path: str) -> dict[str, list[str]]:
 
 def _build_social_context(artifacts: dict[str, list[str]]) -> str:
     """Build social context string from mined artifacts."""
+    return ''
     templates: list[str] = []
 
     if artifacts.get('shas'):
@@ -2758,7 +2809,8 @@ async def synthesize_repo(
 
             mutated_content = _normalize_test_whitespace(mutated_content, original_content)
 
-            patch = generate_patch(original_content, mutated_content, bug_spec.file)
+            fixed_content = _apply_cosmetic_noise(original_content, language)
+            patch = generate_patch(fixed_content, mutated_content, bug_spec.file)
             if not patch.strip():
                 logger.warning("  Skipped — empty patch")
                 bug_spec = None

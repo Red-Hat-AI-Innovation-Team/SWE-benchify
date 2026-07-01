@@ -12,6 +12,7 @@ from swebenchify.synthesizer import (
     BugPlan,
     BugSpec,
     SynthesisResult,
+    _apply_cosmetic_noise,
     _build_social_context,
     _collect_repo_context,
     _count_changed_lines,
@@ -1703,6 +1704,51 @@ def test_count_changed_lines_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _apply_cosmetic_noise
+# ---------------------------------------------------------------------------
+
+
+def test_apply_cosmetic_noise_trailing_whitespace() -> None:
+    """Trailing whitespace on a non-blank line is stripped."""
+    import random
+    random.seed(0)
+    content = "def foo():  \n    return 1\n"
+    result = _apply_cosmetic_noise(content, 'python')
+    assert "  \n" not in result
+    assert "def foo():\n" in result or "def foo()" in result
+
+
+def test_apply_cosmetic_noise_double_blank_normalized() -> None:
+    """Double blank lines between function defs get collapsed."""
+    import random
+    # Content with ONLY double-blank opportunity (no trailing whitespace)
+    content = "def foo():\n    pass\n\n\ndef bar():\n    pass\n"
+    # Try multiple seeds to ensure at least one hits the double-blank strategy
+    found_collapsed = False
+    for seed in range(20):
+        random.seed(seed)
+        result = _apply_cosmetic_noise(content, 'python')
+        if "\n\n\n" not in result and result != content:
+            found_collapsed = True
+            break
+    assert found_collapsed
+
+
+def test_apply_cosmetic_noise_no_opportunities() -> None:
+    """Content without noise opportunities is returned unchanged."""
+    content = "x = 1\ny = 2\n"
+    result = _apply_cosmetic_noise(content, 'python')
+    assert result == content
+
+
+def test_apply_cosmetic_noise_non_python() -> None:
+    """Non-python language returns content unchanged."""
+    content = "func main() {  \n}\n"
+    result = _apply_cosmetic_noise(content, 'go')
+    assert result == content
+
+
+# ---------------------------------------------------------------------------
 # _find_existing_test_file — broadened search
 # ---------------------------------------------------------------------------
 
@@ -2424,24 +2470,14 @@ def test_mine_social_artifacts_no_repo(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def test_build_social_context_produces_natural_refs() -> None:
-    """_build_social_context produces short, natural social references."""
-    import random
-    random.seed(42)
+    """_build_social_context is disabled and always returns empty string."""
     artifacts = {
         "contributors": ["Alice"],
         "shas": ["abc1234"],
         "issues": ["42"],
         "branches": ["main", "develop"],
     }
-    results = set()
-    for _ in range(50):
-        r = _build_social_context(artifacts)
-        if r:
-            results.add(r.strip())
-    assert len(results) > 0
-    for r in results:
-        assert "cc abc1234" in r or "cc @Alice" in r or "see also #42" in r
-        assert "branch" not in r
+    assert _build_social_context(artifacts) == ''
 
 
 def test_build_social_context_empty_artifacts() -> None:
