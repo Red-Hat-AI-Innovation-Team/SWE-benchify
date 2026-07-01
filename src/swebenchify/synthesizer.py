@@ -992,39 +992,19 @@ async def introduce_bug(
 
 Categories include: off-by-one errors, wrong variable usage, missing null/bounds check, incorrect operator, swapped arguments, wrong return value, missing edge case handling, incorrect string formatting, race condition setup, wrong comparison.
 
-PREFERRED mutation types (these fool detection the best):
-- Condition inversions: `not in` → `in`, `>` → `>=`, `and` → `or`, `is None` → `is not None`
-- Wrong variable in similar scope: using `other_list` where `this_list` was intended, when both are in scope
-- Off-by-one errors: wrong loop bound (`range(n)` → `range(n-1)`), wrong slice index
-- Missing early return: removing a guard clause so execution falls through to the wrong code path
-- Swapped arguments: reordering args to a function call where both have the same type
+Good mutation examples:
+- Condition inversion (`not in` → `in`, `>` → `>=`)
+- Off-by-one (`range(n)` → `range(n-1)`)
+- Wrong variable when similar names are in scope
+- Missing or extra negation
 
-AVOID these mutation types (they are detectably artificial):
-- Return type changes (int → bool, str → None)
-- Attribute/method access changes (obj.x → obj.y, logger → logger.name)
-- Single-value constant swaps (True → False, 0 → 1, '' → None)
-- Type constructor changes (list() → dict(), set() → frozenset())
-- Adding entirely new code paths, conditions, or branches that didn't exist before
-
-Plausibility check: before finalizing, ask yourself — could this bug arise from a routine refactoring where a developer is moving, renaming, or reorganizing existing code? If not, pick a different mutation.
+The mutation should look like a plausible developer mistake during routine coding or refactoring.
 
 CRITICAL CONSTRAINTS on bug subtlety:
 - The bug MUST NOT break the function's basic contract. If the function adds two numbers, don't make it subtract — that would be caught immediately by any test.
 - The bug should only manifest with specific inputs, edge cases, or unusual conditions. Think: boundary values, empty collections, negative numbers, Unicode strings, concurrent access, large inputs.
 - The bug must be plausible as something that would survive a typical CI suite. If the existing test suite would trivially catch it, the bug is too obvious.
 - Prefer bugs in error handling paths, edge case branches, or rarely-exercised code paths over bugs in the main happy path.
-
-MUTATION COMPLEXITY — CRITICAL:
-- The bug MUST involve changes to at least 2-3 lines of code. Single-token or single-line swaps (like `<` → `<=`) are too easy to detect as synthetic.
-- Prefer bugs that require COORDINATED changes across multiple statements:
-  * Wrong statement order: swap two statements that have an order dependency
-  * Missing cleanup in error path: remove/alter both the error check AND its cleanup/recovery code
-  * Incorrect state transition: change a condition AND the state it transitions to
-  * Stale variable: shadow or reassign a variable early, causing wrong value in a later use
-  * Mismatched init-and-use: change a default value AND the validation that depends on it
-  * Split logic error: alter a condition in one branch AND the corresponding else/fallback behavior
-- AVOID additive mutations: do NOT add new conditions, new if-branches, or new code that wasn't there before. Adding `and not key.startswith('_')` to an existing condition is suspicious because it introduces code with no plausible origin in the repo's history.
-- The mutation should look like a refactoring mistake — something a developer could accidentally introduce while cleaning up or reorganizing existing code.
 
 Here is the function:
 
@@ -2765,14 +2745,14 @@ async def synthesize_repo(
                 break
 
             changed = _count_changed_lines(patch)
-            if changed >= 5 and len(patch) >= 500:
+            if changed >= 2 and len(patch) >= 100:
                 break
             if attempt < 2:
                 reason = []
-                if changed < 5:
-                    reason.append(f"{changed} changed lines < 5")
-                if len(patch) < 500:
-                    reason.append(f"{len(patch)} chars < 500")
+                if changed < 2:
+                    reason.append(f"{changed} changed lines < 2")
+                if len(patch) < 100:
+                    reason.append(f"{len(patch)} chars < 100")
                 logger.info(
                     "  Patch too simple (%s), retrying (%d/2)",
                     ", ".join(reason), attempt + 1,

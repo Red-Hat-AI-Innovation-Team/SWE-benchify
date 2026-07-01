@@ -2626,12 +2626,12 @@ def test_generate_issue_from_symptom_no_strip_shas() -> None:
 # ---------------------------------------------------------------------------
 
 def test_patch_floor_accepts_5_lines_500_chars() -> None:
-    """Verify new thresholds: 5 changed lines, 500 chars."""
+    """Verify new thresholds: 2 changed lines, 100 chars."""
     import swebenchify.synthesizer as mod
     import inspect
     source = inspect.getsource(mod.synthesize_repo)
-    assert "changed >= 5" in source
-    assert 'len(patch) >= 500' in source
+    assert "changed >= 2" in source
+    assert 'len(patch) >= 100' in source
 
 
 def test_patch_floor_log_messages_updated() -> None:
@@ -2639,8 +2639,8 @@ def test_patch_floor_log_messages_updated() -> None:
     import swebenchify.synthesizer as mod
     import inspect
     source = inspect.getsource(mod.synthesize_repo)
-    assert 'changed lines < 5' in source
-    assert 'chars < 500' in source
+    assert 'changed lines < 2' in source
+    assert 'chars < 100' in source
 
 
 # ---------------------------------------------------------------------------
