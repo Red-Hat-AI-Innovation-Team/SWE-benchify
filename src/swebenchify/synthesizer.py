@@ -988,15 +988,15 @@ async def introduce_bug(
         plan_parts.append("Your bug MUST include the secondary changes described above. Show ALL modified files in your response.")
         bug_plan_context = "\n".join(plan_parts)
 
-    prompt = f"""You are a code mutation expert. Given the following {language} function, introduce ONE subtle, realistic bug. The bug should be the kind a developer might actually make — NOT a trivial syntax error.
+    prompt = f"""You are a code mutation expert. Given the following {language} function, introduce a subtle, realistic bug that affects 2-3 related lines. The bug should be the kind a developer might actually make — NOT a trivial syntax error.
 
 Categories include: off-by-one errors, wrong variable usage, missing null/bounds check, incorrect operator, swapped arguments, wrong return value, missing edge case handling, incorrect string formatting, race condition setup, wrong comparison.
 
-Good mutation examples:
-- Condition inversion (`not in` → `in`, `>` → `>=`)
-- Off-by-one (`range(n)` → `range(n-1)`)
-- Wrong variable when similar names are in scope
-- Missing or extra negation
+Good mutation examples (each touches 2-3 related lines):
+- Change a variable initialization AND a later use of that variable
+- Swap a comparison operator AND the corresponding error message/return
+- Remove a guard clause AND the variable it was protecting
+- Change a default value AND the condition that relies on it
 
 The mutation should look like a plausible developer mistake during routine coding or refactoring.
 
@@ -1021,7 +1021,7 @@ Return your response in EXACTLY this format:
 <bug_description>One sentence describing what the bug does, under what conditions it manifests, and why existing tests wouldn't catch it</bug_description>
 
 <buggy_code>
-The COMPLETE modified function with ONLY the bug introduced. Include ALL lines of the original function. Do NOT add incidental improvements (docstring fixes, variable renames, type hints) — only the bug mutation.
+The COMPLETE modified function with ONLY the bug introduced. Include ALL lines of the original function. The bug should affect 2-3 related lines, not just one. Do NOT add incidental improvements (docstring fixes, variable renames, type hints) — only the bug mutation.
 </buggy_code>
 
 If RELATED CODE was shown above, the same bug pattern could plausibly exist in the related file. Provide a secondary change that introduces the SAME bug into the related file — so the gold patch must fix BOTH locations.
