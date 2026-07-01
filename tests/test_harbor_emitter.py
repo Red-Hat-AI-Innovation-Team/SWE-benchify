@@ -105,6 +105,21 @@ class TestHarborTaskGenerator:
         assert "owner/repo" in dockerfile
         assert "abc123" in dockerfile
 
+    def test_python_dockerfile_has_default_pip_install_without_env_spec(self, tmp_path: Path) -> None:
+        inst = _make_instance(repo_language="python")
+        gen = HarborTaskGenerator(instances=[inst])
+        gen.generate_all(tmp_path)
+        dockerfile = (tmp_path / "owner__repo-1" / "environment" / "Dockerfile").read_text()
+        assert "pip install -e" in dockerfile
+        assert "pip install pytest" in dockerfile
+
+    def test_go_dockerfile_has_mod_download_without_env_spec(self, tmp_path: Path) -> None:
+        inst = _make_instance(repo_language="go")
+        gen = HarborTaskGenerator(instances=[inst])
+        gen.generate_all(tmp_path)
+        dockerfile = (tmp_path / "owner__repo-1" / "environment" / "Dockerfile").read_text()
+        assert "go mod download" in dockerfile
+
     def test_empty_instances_returns_empty(self, tmp_path: Path) -> None:
         gen = HarborTaskGenerator(instances=[])
         generated = gen.generate_all(tmp_path)

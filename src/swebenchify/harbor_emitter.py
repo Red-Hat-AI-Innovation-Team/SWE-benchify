@@ -300,6 +300,13 @@ class HarborTaskGenerator:
         else:
             if language == "go":
                 lines.append("RUN cd /testbed && go mod download")
+            elif language == "python":
+                lines.append(
+                    'RUN cd /testbed && pip install -e ".[dev,test,testing]" 2>/dev/null '
+                    '|| pip install -e "." 2>/dev/null '
+                    '|| pip install -e ".[dev]" 2>/dev/null || true'
+                )
+                lines.append("RUN cd /testbed && pip install pytest 2>/dev/null || true")
 
         return "\n".join(lines) if lines else "# No extra setup required"
 
