@@ -990,22 +990,20 @@ async def introduce_bug(
 
     prompt = f"""You are a code mutation expert. Given the following {language} function, introduce a subtle, realistic bug — the kind a developer might actually make during a refactoring or late-night coding session.
 
-You MUST introduce an 'incomplete refactoring' bug. This is the ONLY allowed bug type.
+PREFERRED bug types (choose one):
+- Type confusion: use a similar but wrong type (str where bytes expected, list where tuple needed, int where float, TextIO where BinaryIO)
+- Wrong method: call a similar method on the same object (.items() vs .values(), .append() vs .extend(), .read() vs .readline())
+- Incomplete refactoring: rename a variable in some places but not all, or update a function signature without updating all callers
+- Wrong argument order: swap two arguments of the same type in a function call
+- Stale reference: use an old variable name that was valid before a rename
 
-An incomplete refactoring bug simulates a developer who started renaming or reorganizing code but didn't finish. The key property is that the change is INCONSISTENT — some locations are updated but others are not, breaking the code.
+AVOID these (too easy to detect as artificial):
+- Simple condition inversions (> to <, True to False)
+- Removing or commenting out a single line
+- Changing a single character in a string literal
+- Off-by-one errors in simple ranges
 
-Concrete patterns (pick one that fits the function):
-1. PARTIAL RENAME: Pick a local variable, parameter, or helper call. Rename it in 2-3 places but leave 1-2 references using the old name. The mismatch causes a NameError or wrong-value bug.
-2. SIGNATURE CHANGE: Change a function's parameter name or add/remove a parameter, but don't update all the call sites within the function body.
-3. API MIGRATION: Replace one method call with its modern equivalent (e.g., .format() to f-string, old API to new) in some places but not others, causing mixed behavior.
-4. CONSTANT EXTRACTION: Extract a magic value to a variable in some places but leave the literal in others, then change the variable's value — the literal-using locations are now wrong.
-
-CONSTRAINTS:
-- The bug MUST change at least 3 lines (not counting blank lines)
-- The bug MUST be a naming/reference inconsistency, NOT a logic change
-- Do NOT invert conditions, change operators, or modify boolean values
-- Do NOT remove or comment out lines
-- Do NOT add comments, docstrings, or type annotations
+The bug must look like something that would happen during a real refactoring or API migration, not a deliberate sabotage.
 
 CRITICAL CONSTRAINTS on bug subtlety:
 - The bug MUST NOT break the function's basic contract. If the function adds two numbers, don't make it subtract — that would be caught immediately by any test.
