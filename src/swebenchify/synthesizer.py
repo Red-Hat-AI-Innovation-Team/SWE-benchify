@@ -2785,6 +2785,19 @@ def _run_tests_on_buggy_code(
                 [venv_pip, 'install', 'pytest', '--quiet'],
                 capture_output=True, text=True, timeout=60,
             )
+            # Install test dependencies if a requirements file exists
+            for req_file in [
+                'requirements/tests.txt', 'requirements/test.txt',
+                'requirements-test.txt', 'test-requirements.txt',
+                'requirements/dev.txt', 'requirements-dev.txt',
+            ]:
+                req_path = root / req_file
+                if req_path.is_file():
+                    subprocess.run(
+                        [venv_pip, 'install', '-r', str(req_path), '--quiet'],
+                        capture_output=True, text=True, timeout=120,
+                    )
+                    break
             # Verify the installed package actually imports; if not,
             # try downgrading deps that are known to break old releases.
             venv_py = str(venv_dir / 'bin' / 'python')
