@@ -1321,14 +1321,16 @@ def test_parse_secondary_changes_falls_back_to_sec_fixed() -> None:
     """Old format with sec_fixed should still parse."""
     text = """<secondary_change>
 <sec_file>api.py</sec_file>
-<sec_original>result = calculate(x)</sec_original>
-<sec_fixed>result = calculate(x, strict=True)</sec_fixed>
+<sec_original>result = calculate(x)
+validated = check_result(result)</sec_original>
+<sec_fixed>result = calculate(x, strict=True)
+validated = check_result(result, mode="strict")</sec_fixed>
 <sec_description>Add strict mode</sec_description>
 </secondary_change>"""
 
     changes = _parse_secondary_changes(text)
     assert len(changes) == 1
-    assert changes[0].buggy_snippet == "result = calculate(x, strict=True)"
+    assert changes[0].buggy_snippet == "result = calculate(x, strict=True)\nvalidated = check_result(result, mode=\"strict\")"
 
 
 def test_parse_secondary_changes_empty() -> None:
@@ -1364,8 +1366,11 @@ def calc(x):
 </buggy_code>
 <secondary_change>
 <sec_file>api.py</sec_file>
-<sec_original>val = calc(n)\n    assert val > 0</sec_original>
-<sec_buggy>val = calc(n)</sec_buggy>
+<sec_original>val = calc(n)
+    assert val > 0
+    log.info("validated")</sec_original>
+<sec_buggy>val = calc(n)
+    log.info("validated")</sec_buggy>
 <sec_description>Remove assertion that catches the bug</sec_description>
 </secondary_change>"""
 
