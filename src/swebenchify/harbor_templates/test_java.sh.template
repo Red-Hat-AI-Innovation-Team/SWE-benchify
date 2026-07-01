@@ -1,0 +1,144 @@
+#!/bin/bash
+set -uxo pipefail
+
+cd /testbed
+
+# Ensure git trusts the directory
+git config --global --add safe.directory /testbed
+
+# --- Phase 1: Apply test patch ---
+# Reset to clean state
+git checkout -- . && git clean -fd -q
+
+# Apply test patch (adds/modifies test files that catch the bug)
+git apply /tests/test.patch 2>&1 || {{
+    echo "TEST_PATCH_APPLY_FAILED"
+    echo 0 > /logs/verifier/reward.txt
+    exit 0
+}}
+
+# --- Phase 2: Run tests ---
+# Capture test output for grading
+LOG_FILE=$(mktemp)
+
+echo '>>>>> Start Test Output'
+
+{test_command} > "$LOG_FILE" 2>&1 || true
+cat "$LOG_FILE"
+
+echo '>>>>> End Test Output'
+
+# --- Phase 3: Grade results ---
+# Parse Maven Surefire output and check against expected FAIL_TO_PASS / PASS_TO_PASS
+# Load expected test lists from config.json
+FAIL_TO_PASS=$(python3 -c "
+import json, sys
+with open('/tests/config.json') as f:
+    cfg = json.load(f)
+f2p = cfg.get('FAIL_TO_PASS', '[]')
+if isinstance(f2p, str):
+    f2p = json.loads(f2p)
+print('\n'.join(f2p))
+" 2>/dev/null || true)
+
+PASS_TO_PASS=$(python3 -c "
+import json, sys
+with open('/tests/config.json') as f:
+    cfg = json.load(f)
+p2p = cfg.get('PASS_TO_PASS', '[]')
+if isinstance(p2p, str):
+    p2p = json.loads(p2p)
+print('\n'.join(p2p))
+" 2>/dev/null || true)
+
+# Parse Maven Surefire class-level results into an associative array
+declare -A CLASS_RESULTS
+while IFS= read -r line; do
+    if echo "$line" | grep -qP 'Tests run:\s*\d+.*--\s+in\s+\S+'; then
+        class_name=$(echo "$line" | grep -oP '(?<=--\s{{0,4}}in\s{{0,4}})\S+')
+        failures=$(echo "$line" | grep -oP '(?<=Failures:\s{{0,4}})\d+')
+        errors=$(echo "$line" | grep -oP '(?<=Errors:\s{{0,4}})\d+')
+        if [ "$failures" -gt 0 ] 2>/dev/null || [ "$errors" -gt 0 ] 2>/dev/null; then
+            CLASS_RESULTS["$class_name"]="failed"
+        else
+            CLASS_RESULTS["$class_name"]="passed"
+        fi
+    fi
+done < "$LOG_FILE"
+
+# Detect compilation errors
+COMPILED=1
+if grep -qP 'BUILD FAILURE|COMPILATION ERROR' "$LOG_FILE" 2>/dev/null; then
+    if [ ${{#CLASS_RESULTS[@]}} -eq 0 ]; then
+        COMPILED=0
+    fi
+fi
+
+# Check if all FAIL_TO_PASS tests now pass
+ALL_PASS=1
+if [ "$COMPILED" -eq 0 ]; then
+    ALL_PASS=0
+else
+    while IFS= read -r test_name; do
+        [ -z "$test_name" ] && continue
+        if [ "${{CLASS_RESULTS[$test_name]+_}}" ]; then
+            if [ "${{CLASS_RESULTS[$test_name]}}" != "passed" ]; then
+                ALL_PASS=0
+                break
+            fi
+        else
+            ALL_PASS=0
+            break
+        fi
+    done <<< "$FAIL_TO_PASS"
+
+    # Check if all PASS_TO_PASS tests still pass
+    while IFS= read -r test_name; do
+        [ -z "$test_name" ] && continue
+        if [ "${{CLASS_RESULTS[$test_name]+_}}" ]; then
+            if [ "${{CLASS_RESULTS[$test_name]}}" = "failed" ]; then
+                ALL_PASS=0
+                break
+            fi
+        fi
+    done <<< "$PASS_TO_PASS"
+fi
+
+# Write reward
+if [ $ALL_PASS -eq 1 ] && [ -n "$FAIL_TO_PASS" ]; then
+    echo 1 > /logs/verifier/reward.txt
+else
+    echo 0 > /logs/verifier/reward.txt
+fi
+
+# Write detailed report
+python3 -c "
+import json, re
+
+log = open('$LOG_FILE').read()
+
+# Parse Maven Surefire class-level results
+results = {{}}
+for m in re.finditer(
+    r'Tests run:\s*(\d+),\s*Failures:\s*(\d+),\s*Errors:\s*(\d+),\s*Skipped:\s*(\d+).*?--\s+in\s+([\w.\$]+)',
+    log
+):
+    total, failures, errors, skipped, class_name = m.groups()
+    if int(failures) > 0 or int(errors) > 0:
+        results[class_name] = 'failed'
+    elif int(skipped) == int(total):
+        results[class_name] = 'skipped'
+    else:
+        results[class_name] = 'passed'
+
+report = {{
+    'test_results': results,
+    'total_tests': len(results),
+    'passed': sum(1 for v in results.values() if v == 'passed'),
+    'failed': sum(1 for v in results.values() if v == 'failed'),
+}}
+with open('/logs/verifier/report.json', 'w') as f:
+    json.dump(report, f, indent=2)
+" 2>/dev/null || true
+
+exit 0
