@@ -2580,7 +2580,8 @@ def _run_tests_on_buggy_code(
                         filtered_lines = []
                         for line in combined.split("\n"):
                             mentions_baseline = any(
-                                name in line for name in all_names
+                                re.search(r'\b' + re.escape(name) + r'\b', line)
+                                for name in all_names
                             )
                             if not mentions_baseline:
                                 filtered_lines.append(line)

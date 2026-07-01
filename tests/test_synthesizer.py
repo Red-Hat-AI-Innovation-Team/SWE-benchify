@@ -3019,6 +3019,41 @@ def test__run_tests_baseline_diffing(tmp_path: Path) -> None:
     assert "failed" in output.lower()
 
 
+def test__baseline_diffing_no_substring_collision(tmp_path: Path) -> None:
+    """Baseline failure 'test_add' must NOT filter lines about 'test_add_numbers'."""
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=True)
+
+    (tmp_path / "module.py").write_text("def add(a, b):\n    return a + b\n\ndef add_numbers(a, b):\n    return a + b\n")
+    (tmp_path / "test_module.py").write_text(
+        "from module import add, add_numbers\n\n"
+        "def test_add():\n    assert False\n\n"
+        "def test_add_numbers():\n    assert add_numbers(1, 2) == 3\n"
+    )
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=tmp_path, capture_output=True, check=True)
+    clean_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    (tmp_path / "module.py").write_text("def add(a, b):\n    return a + b\n\ndef add_numbers(a, b):\n    return 0  # always wrong\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "buggy add_numbers"], cwd=tmp_path, capture_output=True, check=True)
+    buggy_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    subprocess.run(["git", "checkout", clean_sha], cwd=tmp_path, capture_output=True, check=True)
+
+    output = _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
+    assert output is not None
+    assert "test_add_numbers" in output
+    assert "test_add" not in output or "test_add_numbers" in output
+
+
 # ---------------------------------------------------------------------------
 # Exp-15: tone calibration
 # ---------------------------------------------------------------------------
