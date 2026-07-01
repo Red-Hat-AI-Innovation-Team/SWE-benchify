@@ -15,6 +15,7 @@ from swebenchify.synthesizer import (
     _build_social_context,
     _collect_repo_context,
     _count_changed_lines,
+    _count_test_functions,
     _discover_repo_modules,
     _edge_case_score,
     _enforce_banned_openers,
@@ -1056,7 +1057,7 @@ def test_test_patch_modifies_existing_file(tmp_path: Path) -> None:
     existing_test = "import pytest\n\ndef test_add_basic():\n    assert add(1, 2) == 3\n"
     (tmp_path / "tests" / "test_calc.py").write_text(existing_test)
 
-    modified_test = existing_test + "\ndef test_add_negative():\n    assert add(-1, -2) == -3\n"
+    modified_test = "import pytest\n\ndef test_add_basic():\n    assert add(1, 2) == 3\n    assert add(-1, -2) == -3\n"
 
     class FakeResult:
         content = [type("B", (), {"text": f"```python\n{modified_test}\n```"})()]
@@ -1083,7 +1084,7 @@ def test_test_patch_modifies_existing_file(tmp_path: Path) -> None:
     assert result is not None
     assert "new file mode" not in result
     assert "tests/test_calc.py" in result
-    assert "+def test_add_negative" in result
+    assert "+    assert add(-1, -2) == -3" in result
 
 
 # ---------------------------------------------------------------------------
@@ -2422,15 +2423,25 @@ def test_mine_social_artifacts_no_repo(tmp_path: Path) -> None:
 # H2: _build_social_context
 # ---------------------------------------------------------------------------
 
-def test_build_social_context_disabled() -> None:
-    """_build_social_context is disabled and always returns empty string."""
+def test_build_social_context_produces_natural_refs() -> None:
+    """_build_social_context produces short, natural social references."""
+    import random
+    random.seed(42)
     artifacts = {
-        "contributors": ["Alice", "Bob"],
+        "contributors": ["Alice"],
         "shas": ["abc1234"],
         "issues": ["42"],
         "branches": ["main", "develop"],
     }
-    assert _build_social_context(artifacts) == ""
+    results = set()
+    for _ in range(50):
+        r = _build_social_context(artifacts)
+        if r:
+            results.add(r.strip())
+    assert len(results) > 0
+    for r in results:
+        assert "cc abc1234" in r or "cc @Alice" in r or "see also #42" in r
+        assert "branch" not in r
 
 
 def test_build_social_context_empty_artifacts() -> None:
@@ -3478,3 +3489,160 @@ def test_data_first_prompt_tone_calibration() -> None:
     prompt = captured_prompts[0]
     assert "matter-of-fact" in prompt
     assert "frustrated" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Exp-21: _count_test_functions
+# ---------------------------------------------------------------------------
+
+def test_count_test_functions_counts_correctly() -> None:
+    code = textwrap.dedent("""\
+        import pytest
+
+        def helper():
+            return 42
+
+        def test_add():
+            assert 1 + 1 == 2
+
+        def test_subtract():
+            assert 2 - 1 == 1
+
+        class TestGroup:
+            def test_multiply(self):
+                assert 2 * 3 == 6
+    """)
+    assert _count_test_functions(code) == 3
+
+
+def test_count_test_functions_empty() -> None:
+    assert _count_test_functions("") == 0
+    assert _count_test_functions("def helper():\n    pass\n") == 0
+
+
+# ---------------------------------------------------------------------------
+# Exp-21: test patch rejects new test functions
+# ---------------------------------------------------------------------------
+
+def test_test_patch_rejects_added_test_functions(tmp_path: Path) -> None:
+    """When the LLM adds new def test_ functions, the patch is rejected."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+    (tmp_path / "tests").mkdir()
+    existing_test = "import pytest\n\ndef test_add_basic():\n    assert add(1, 2) == 3\n"
+    (tmp_path / "tests" / "test_calc.py").write_text(existing_test)
+
+    modified_test = existing_test + "\ndef test_add_negative():\n    assert add(-1, -2) == -3\n"
+
+    class FakeResult:
+        content = [type("B", (), {"text": f"```python\n{modified_test}\n```"})()]
+
+    async def fake_query(prompt: str, options: object = None):
+        yield FakeResult()
+
+    bug_spec = BugSpec(
+        file="src/calc.py",
+        function_name="add",
+        original_code="def add(a, b):\n    return a + b",
+        buggy_code="def add(a, b):\n    return a - b",
+        bug_description="Changed + to -",
+        bug_category="incorrect-operator",
+    )
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()), \
+         mock_patch("swebenchify.synthesizer.ResultMessage", FakeResult):
+        import asyncio
+        from swebenchify.synthesizer import _generate_test_patch_existing
+        result = asyncio.run(_generate_test_patch_existing(
+            bug_spec, str(tmp_path), "tests/test_calc.py", "python", "sonnet",
+        ))
+
+    assert result is None
+
+
+def test_test_patch_accepts_modified_existing_functions(tmp_path: Path) -> None:
+    """When the LLM only modifies existing test functions, the patch is accepted."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+    (tmp_path / "tests").mkdir()
+    existing_test = "import pytest\n\ndef test_add_basic():\n    assert add(1, 2) == 3\n"
+    (tmp_path / "tests" / "test_calc.py").write_text(existing_test)
+
+    modified_test = "import pytest\n\ndef test_add_basic():\n    assert add(1, 2) == 3\n    assert add(0, 0) == 0\n"
+
+    class FakeResult:
+        content = [type("B", (), {"text": f"```python\n{modified_test}\n```"})()]
+
+    async def fake_query(prompt: str, options: object = None):
+        yield FakeResult()
+
+    bug_spec = BugSpec(
+        file="src/calc.py",
+        function_name="add",
+        original_code="def add(a, b):\n    return a + b",
+        buggy_code="def add(a, b):\n    return a - b",
+        bug_description="Changed + to -",
+        bug_category="incorrect-operator",
+    )
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()), \
+         mock_patch("swebenchify.synthesizer.ResultMessage", FakeResult):
+        import asyncio
+        from swebenchify.synthesizer import _generate_test_patch_existing
+        result = asyncio.run(_generate_test_patch_existing(
+            bug_spec, str(tmp_path), "tests/test_calc.py", "python", "sonnet",
+        ))
+
+    assert result is not None
+    assert "tests/test_calc.py" in result
+    assert "+    assert add(0, 0) == 0" in result
+
+
+# ---------------------------------------------------------------------------
+# Exp-21: test generation prompt is more prescriptive
+# ---------------------------------------------------------------------------
+
+def test_test_generation_prompt_hard_constraint() -> None:
+    """Verify the prompt uses HARD CONSTRAINT and forbids new test functions."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    bug_spec = BugSpec(
+        file="src/calc.py",
+        function_name="add",
+        original_code="def add(a, b):\n    return a + b",
+        buggy_code="def add(a, b):\n    return a - b",
+        bug_description="Changed + to -",
+        bug_category="incorrect-operator",
+    )
+
+    (tmp_dir := Path("/tmp/test_prompt_check")).mkdir(exist_ok=True)
+    test_file = tmp_dir / "test_calc.py"
+    test_file.write_text("def test_add():\n    assert add(1, 2) == 3\n")
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import _generate_test_patch_existing
+        asyncio.run(_generate_test_patch_existing(
+            bug_spec, str(tmp_dir), "test_calc.py", "python", "sonnet",
+        ))
+
+    assert len(captured_prompts) == 1
+    prompt = captured_prompts[0]
+    assert "HARD CONSTRAINT" in prompt
+    assert "MUST NOT add any new" in prompt
+    assert "will be validated and rejected" in prompt
+    assert "AT MOST one new test function" not in prompt

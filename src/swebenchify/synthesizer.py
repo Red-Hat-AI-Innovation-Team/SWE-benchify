@@ -1400,21 +1400,17 @@ def _mine_social_artifacts(repo_path: str) -> dict[str, list[str]]:
 
 def _build_social_context(artifacts: dict[str, list[str]]) -> str:
     """Build social context string from mined artifacts."""
-    return ''
     templates: list[str] = []
 
-    if artifacts.get("shas"):
-        sha = random.choice(artifacts["shas"])
-        templates.append(f"I first noticed this after {sha} landed")
-    if artifacts.get("contributors"):
-        contributor = random.choice(artifacts["contributors"])
-        templates.append(f"@{contributor} might know more")
-    if artifacts.get("issues"):
-        issue_num = random.choice(artifacts["issues"])
-        templates.append(f"Possibly related to #{issue_num}")
-    if artifacts.get("branches"):
-        branch = random.choice(artifacts["branches"])
-        templates.append(f"Seeing this on the {branch} branch")
+    if artifacts.get('shas'):
+        sha = random.choice(artifacts['shas'])
+        templates.append(f'cc {sha}')
+    if artifacts.get('contributors'):
+        contributor = random.choice(artifacts['contributors'])
+        templates.append(f'cc @{contributor}')
+    if artifacts.get('issues'):
+        issue_num = random.choice(artifacts['issues'])
+        templates.append(f'see also #{issue_num}')
 
     # Deduplicate to avoid template-like repetition
     templates = list(dict.fromkeys(templates))
@@ -1958,6 +1954,11 @@ async def generate_test_patch(
     return None
 
 
+def _count_test_functions(code: str) -> int:
+    """Count the number of test function definitions in Python code."""
+    return len(re.findall(r'^\s*def\s+test_\w+', code, re.MULTILINE))
+
+
 async def _generate_test_patch_existing(
     bug_spec: BugSpec,
     repo_path: str,
@@ -1974,7 +1975,7 @@ async def _generate_test_patch_existing(
         logger.warning("Could not read existing test file %s", test_file)
         return None
 
-    prompt = f"""You are adding regression tests to an existing test file. Here is the current test file:
+    prompt = f"""You are modifying an existing test file to add regression coverage. Here is the current test file:
 
 ```{language}
 {original_test_content}
@@ -1992,25 +1993,17 @@ Here is the buggy function:
 
 The bug: {bug_spec.bug_description}
 
-Your PRIMARY task is to MODIFY EXISTING test functions — do NOT create new `def test_*` functions unless absolutely necessary. Real developers almost always extend existing tests rather than writing new ones.
+HARD CONSTRAINT: You MUST NOT add any new `def test_` functions. You can ONLY modify existing test functions by:
+- Adding 1-2 `assert` statements to an existing test function that already tests related behavior
+- Adding a new case to an existing `@pytest.mark.parametrize` decorator
 
-How to modify existing tests (pick 1-2 of these):
-- Add 1-2 `assert` statements to an existing test function that already tests related behavior
-- Add a new case to an existing `@pytest.mark.parametrize` decorator
-- Extend an existing test's setup/fixture to also cover the edge case
-- Add an `if` branch or loop iteration to an existing test that covers the new scenario
-- Modify an existing assertion to also check for the edge case
-
-You may add AT MOST one new test function, and ONLY if no existing test can be reasonably extended. If you do add a new function, place it immediately after the most related existing test.
-
-At least one changed assertion must PASS against the original code and FAIL against the buggy code.
+Find the most closely related existing test function and add assertions there. At least one added assertion must PASS against the original code and FAIL against the buggy code.
 
 Requirements:
 - Follow the existing test style and conventions in the file
 - Use the same imports, fixtures, and test patterns already present
-- Do NOT add comments labeling your approach or explaining why you added each test
-- Do NOT add more than one new test function
-- Write tests as a developer would — no meta-commentary, no labels, no strategy descriptions
+- Do NOT add comments explaining your changes
+- Do NOT add new test functions — this will be validated and rejected
 
 Return the COMPLETE modified test file."""
 
@@ -2048,6 +2041,16 @@ Return the COMPLETE modified test file."""
 
     if language == "python" and not _validate_test_imports(modified_content, repo_path):
         return None
+
+    if language == 'python':
+        original_test_count = _count_test_functions(original_test_content)
+        modified_test_count = _count_test_functions(modified_content)
+        if modified_test_count > original_test_count:
+            logger.warning(
+                '  Test patch adds %d new test function(s) — rejecting to avoid detection',
+                modified_test_count - original_test_count,
+            )
+            return None
 
     # generate_patch diffs mutated→original; swap args so we get original→modified
     return generate_patch(modified_content, original_test_content, test_file)
