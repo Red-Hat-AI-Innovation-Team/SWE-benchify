@@ -2057,26 +2057,32 @@ def _find_best_test_function(
     bug_spec: BugSpec,
 ) -> dict[str, str | int] | None:
     """Pick the test function most relevant to the bug."""
+    ranked = _rank_test_functions(test_functions, bug_spec)
+    return ranked[0] if ranked else None
+
+
+def _rank_test_functions(
+    test_functions: list[dict[str, str | int]],
+    bug_spec: BugSpec,
+    limit: int = 3,
+) -> list[dict[str, str | int]]:
+    """Return test functions ranked by relevance to the bug, up to *limit*."""
     if not test_functions:
-        return None
+        return []
 
     targets = {bug_spec.function_name}
     module_stem = Path(bug_spec.file).stem
     if module_stem:
         targets.add(module_stem)
 
-    best: dict[str, str | int] | None = None
-    best_score = -1
-    for tf in test_functions:
+    scored: list[tuple[int, int, dict[str, str | int]]] = []
+    for idx, tf in enumerate(test_functions):
         body = str(tf["source"]).lower()
         score = sum(1 for t in targets if t.lower() in body)
-        if score > best_score:
-            best_score = score
-            best = tf
+        scored.append((score, -idx, tf))
 
-    if best is not None:
-        return best
-    return test_functions[0]
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return [tf for _, _, tf in scored[:limit]]
 
 
 def _extract_file_imports(source: str) -> str:
@@ -2119,14 +2125,18 @@ async def _generate_test_patch_existing(
         logger.warning("  No test functions found in %s", test_file)
         return None
 
-    target = _find_best_test_function(test_functions, bug_spec)
-    if target is None:
+    ranked = _rank_test_functions(test_functions, bug_spec)
+    if not ranked:
         return None
 
-    target_source = str(target["source"])
     file_imports = _extract_file_imports(original_test_content)
+    resolved_model = MODEL_MAP.get(model, model)
+    options = ClaudeCodeOptions(max_turns=1, model=resolved_model)
 
-    prompt = f"""You are modifying a single test function to add regression coverage for a bug.
+    for attempt, target in enumerate(ranked):
+        target_source = str(target["source"])
+
+        prompt = f"""You are modifying a single test function to add regression coverage for a bug.
 
 Here is the test function to modify:
 ```{language}
@@ -2161,47 +2171,62 @@ Requirements:
 - Do NOT add new test functions
 - Return ONLY the function starting from `def {target["name"]}` — nothing else"""
 
-    resolved_model = MODEL_MAP.get(model, model)
-    options = ClaudeCodeOptions(max_turns=1, model=resolved_model)
+        modified_func: str | None = None
+        try:
+            async for message in query(prompt=prompt, options=options):
+                if isinstance(message, ResultMessage):
+                    text = _extract_text_from_result(message)
+                    if text:
+                        extracted = _extract_code_block(text)
+                        modified_func = extracted if extracted else text
+        except Exception:
+            logger.warning(
+                "LLM call failed for test function %s (attempt %d/%d)",
+                target["name"], attempt + 1, len(ranked),
+            )
+            continue
 
-    modified_func: str | None = None
-    try:
-        async for message in query(prompt=prompt, options=options):
-            if isinstance(message, ResultMessage):
-                text = _extract_text_from_result(message)
-                if text:
-                    extracted = _extract_code_block(text)
-                    modified_func = extracted if extracted else text
-    except Exception:
-        logger.warning("LLM call failed for existing-file test generation")
-        return None
+        if not modified_func or modified_func.strip() == target_source.strip():
+            logger.debug(
+                "  No change produced for %s (attempt %d/%d)",
+                target["name"], attempt + 1, len(ranked),
+            )
+            continue
 
-    if not modified_func or modified_func.strip() == target_source.strip():
-        return None
+        modified_func = _strip_strategy_labels(modified_func)
+        func_prefix = f"def {target['name']}"
+        idx = modified_func.find(func_prefix)
+        if idx > 0:
+            modified_func = modified_func[idx:]
+        elif idx < 0:
+            logger.warning(
+                "  LLM response missing function definition for %s (attempt %d/%d)",
+                target["name"], attempt + 1, len(ranked),
+            )
+            continue
 
-    modified_func = _strip_strategy_labels(modified_func)
-    func_prefix = f"def {target['name']}"
-    idx = modified_func.find(func_prefix)
-    if idx > 0:
-        modified_func = modified_func[idx:]
-    elif idx < 0:
-        logger.warning("  LLM response missing function definition")
-        return None
+        modified_content = original_test_content.replace(target_source.rstrip(), modified_func.rstrip())
 
-    modified_content = original_test_content.replace(target_source.rstrip(), modified_func.rstrip())
+        if modified_content == original_test_content:
+            logger.warning(
+                "  Splice failed for %s (attempt %d/%d)",
+                target["name"], attempt + 1, len(ranked),
+            )
+            continue
 
-    if modified_content == original_test_content:
-        logger.warning("  Splice failed — original function text not found in file")
-        return None
+        modified_content = _normalize_test_whitespace(modified_content, original_test_content)
 
-    modified_content = _normalize_test_whitespace(modified_content, original_test_content)
+        if not _validate_test_code(modified_content, language):
+            logger.warning(
+                "  Validation failed for %s (attempt %d/%d)",
+                target["name"], attempt + 1, len(ranked),
+            )
+            continue
 
-    if not _validate_test_code(modified_content, language):
-        logger.warning("  Generated test code failed validation")
-        return None
+        return generate_patch(modified_content, original_test_content, test_file)
 
-    # generate_patch diffs mutated→original; swap args so we get original→modified
-    return generate_patch(modified_content, original_test_content, test_file)
+    logger.warning("  All %d test function attempts failed", len(ranked))
+    return None
 
 
 async def _generate_test_patch_new(
@@ -3077,6 +3102,10 @@ async def synthesize_repo(
         test_patch = await generate_test_patch(
             bug_spec, repo_path, language, model=model,
         ) or ''
+
+        if not test_patch.strip():
+            logger.warning("  Skipped -- no valid test patch generated")
+            continue
 
         synthesis_result = SynthesisResult(
             bug_spec=bug_spec,
