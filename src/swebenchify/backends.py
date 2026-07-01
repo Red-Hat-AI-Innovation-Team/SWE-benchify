@@ -161,7 +161,8 @@ def _go_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmentSpe
     if repo_tarball:
         lines.append("COPY repo.tar.gz /tmp/repo.tar.gz")
         lines.append("RUN mkdir -p /repo && cd /repo && tar xzf /tmp/repo.tar.gz && "
-                      "git init && git add -A && git commit -q -m base")
+                      "git init && git config user.email test@test.com && git config user.name Test && "
+                      "git add -A && git commit -q -m base")
     else:
         lines.append(_git_clone_or_archive(repo, base_commit))
 
@@ -251,7 +252,8 @@ def _python_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmen
     if repo_tarball:
         lines.append("COPY repo.tar.gz /tmp/repo.tar.gz")
         lines.append("RUN mkdir -p /repo && cd /repo && tar xzf /tmp/repo.tar.gz && "
-                      "git init && git add -A && git commit -q -m base")
+                      "git init && git config user.email test@test.com && git config user.name Test && "
+                      "git add -A && git commit -q -m base")
     else:
         lines.append(_git_clone_or_archive(repo, base_commit))
 
@@ -325,7 +327,8 @@ def _java_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmentS
     if repo_tarball:
         lines.append("COPY repo.tar.gz /tmp/repo.tar.gz")
         lines.append("RUN mkdir -p /repo && cd /repo && tar xzf /tmp/repo.tar.gz && "
-                      "git init && git add -A && git commit -q -m base")
+                      "git init && git config user.email test@test.com && git config user.name Test && "
+                      "git add -A && git commit -q -m base")
     else:
         lines.append(_git_clone_or_archive(repo, base_commit))
 
@@ -415,7 +418,8 @@ def _rust_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmentS
     if repo_tarball:
         lines.append("COPY repo.tar.gz /tmp/repo.tar.gz")
         lines.append("RUN mkdir -p /repo && cd /repo && tar xzf /tmp/repo.tar.gz && "
-                      "git init && git add -A && git commit -q -m base")
+                      "git init && git config user.email test@test.com && git config user.name Test && "
+                      "git add -A && git commit -q -m base")
     else:
         lines.append(_git_clone_or_archive(repo, base_commit))
 
