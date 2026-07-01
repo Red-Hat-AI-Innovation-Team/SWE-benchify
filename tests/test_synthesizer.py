@@ -2666,20 +2666,19 @@ def test_run_tests_on_buggy_code_installs_package(tmp_path: Path) -> None:
 
     from unittest.mock import patch as mock_patch
 
-    import sys
     original_run = subprocess.run
-    pip_calls: list = []
+    all_calls: list = []
 
     def tracking_run(cmd, **kwargs):
-        if cmd and len(cmd) >= 3 and cmd[1:3] == ["-m", "pip"]:
-            pip_calls.append(cmd)
+        if cmd:
+            all_calls.append(cmd)
         return original_run(cmd, **kwargs)
 
     with mock_patch("swebenchify.synthesizer.subprocess.run", side_effect=tracking_run):
         _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
 
-    assert any("pip" in str(c) and "install" in str(c) for c in pip_calls)
-    assert all(c[0] == sys.executable for c in pip_calls)
+    assert any(len(c) >= 3 and c[1:3] == ["-m", "venv"] for c in all_calls), "Expected venv creation"
+    assert any("install" in str(c) and "-e" in str(c) for c in all_calls), "Expected pip install in venv"
 
 
 # ---------------------------------------------------------------------------
