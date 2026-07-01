@@ -254,7 +254,9 @@ def compute_diversity(instances: list[dict]) -> dict:
     Returns dict with subscores and overall."""
     if len(instances) < 2:
         return {"file_diversity": 0.0, "complexity": 0.0,
-                "length_diversity": 0.0, "overall": 0.0}
+                "length_diversity": 0.0, "overall": 0.0,
+                "unique_files": 0, "avg_changed_lines": 0.0,
+                "issue_length_cv": 0.0}
 
     # A. Files touched — unique source files across all patches
     files = set()
@@ -499,7 +501,7 @@ def main():
     err(f"  Issue length CV: {diversity['issue_length_cv']}")
     err(f"  Diversity score: {diversity['overall']}")
 
-    if diversity["overall"] == 0.0:
+    if diversity["overall"] == 0.0 and not args.quick:
         err("  Diversity score is 0.0 — skipping F2P and judge")
 
         _write_round_doc(round_num, commit, n_s, n_r, targets, diversity=diversity)
