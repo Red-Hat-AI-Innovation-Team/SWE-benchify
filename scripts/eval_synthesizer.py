@@ -84,6 +84,8 @@ class _FakeOptions:
             setattr(self, k, v)
 
 import swebenchify.synthesizer as synth_mod  # noqa: E402
+from swebenchify.grader import compute_f2p  # noqa: E402
+from swebenchify.models import EnvironmentSpec  # noqa: E402
 
 synth_mod.query = _vertex_query
 synth_mod.ResultMessage = _FakeResultMessage
@@ -141,6 +143,17 @@ def pick_base_commit(repo_slug: str, all_real: list[dict]) -> str:
         raise ValueError(f"No instances for {repo_slug} in dataset")
     chosen = random.choice(repo_instances)
     return chosen["base_commit"]
+
+
+def _make_env_spec(target: dict) -> EnvironmentSpec:
+    """Build an EnvironmentSpec for Docker-based F2P validation."""
+    return EnvironmentSpec(
+        language=target["language"],
+        language_version="3.11",
+        package_manager="pip",
+        install_cmd="pip install -e .",
+        test_cmd="pytest -xvs",
+    )
 
 
 # ── Validation tiers (ordered cheapest → most expensive) ───────────────
@@ -460,7 +473,7 @@ def main():
     err(f"  Diversity score: {diversity['overall']}")
 
     if diversity["overall"] == 0.0:
-        err("  Diversity score is 0.0 — skipping judge")
+        err("  Diversity score is 0.0 — skipping F2P and judge")
 
         _write_round_doc(round_num, commit, n_s, n_r, diversity=diversity)
 
@@ -473,7 +486,63 @@ def main():
         }))
         return
 
-    # ── Phase 4 (slow): Build eval set + judge ──
+    # ── Phase 4 (expensive): F2P/P2P Docker validation ──
+    err("\n── F2P/P2P validation ──")
+    f2p_failures = []
+
+    for i, inst in enumerate(all_synth_instances):
+        iid = inst.get("instance_id", "unknown")
+        repo_slug = inst.get("repo", "unknown")
+        target = next(
+            (t for t in EVAL_TARGETS if t["repo_slug"] == repo_slug), None
+        )
+        if not target:
+            f2p_failures.append((iid, "no matching target config"))
+            break
+
+        err(f"  [{i+1}/{n_s}] {iid}...")
+        env_spec = _make_env_spec(target)
+
+        result = compute_f2p(
+            repo=repo_slug,
+            base_commit=inst.get("base_commit", ""),
+            test_patch=inst.get("test_patch", ""),
+            gold_patch=inst.get("patch", ""),
+            env_spec=env_spec,
+            timeout=600,
+        )
+
+        if result.status != "valid":
+            reason = result.error_message or f"status={result.status}"
+            f2p_failures.append((iid, reason))
+            err(f"    FAILED: {reason}")
+            break
+        err(
+            f"    PASSED: f2p={len(result.FAIL_TO_PASS)}"
+            f" p2p={len(result.PASS_TO_PASS)}"
+        )
+
+    if f2p_failures:
+        err(f"\n  F2P GATE FAILED — {len(f2p_failures)} instance(s):")
+        for iid, reason in f2p_failures:
+            err(f"    {iid}: {reason}")
+        err("  Score: 0.0 (skipping judge)")
+
+        _write_round_doc(round_num, commit, n_s, n_r,
+                         diversity=diversity, f2p_failures=f2p_failures)
+
+        print(json.dumps({
+            "score": 0.0,
+            "details": (
+                f"R{round_num} ({commit}): F2P GATE FAILED. "
+                + "; ".join(f"{iid}: {reason}" for iid, reason in f2p_failures)
+            ),
+        }))
+        return
+
+    err(f"  F2P/P2P validation: {n_s}/{n_s} passed ✓")
+
+    # ── Phase 5 (slow): Build eval set + judge ──
     eval_set = []
     for inst in all_synth_instances:
         eval_set.append({"instance": inst, "label": "SYNTHETIC"})
@@ -617,7 +686,7 @@ def main():
 
 def _write_round_doc(round_num, commit, n_s, n_r, *,
                      results=None, metrics=None, diversity=None,
-                     structural_failures=None):
+                     structural_failures=None, f2p_failures=None):
     """Write round-N.md for paper trail."""
     md_path = os.path.join(EVAL_DOCS, f"round-{round_num}.md")
     repos_str = ", ".join(t["repo_slug"] for t in EVAL_TARGETS)
@@ -651,8 +720,22 @@ def _write_round_doc(round_num, commit, n_s, n_r, *,
             f.write(f"| Issue length CV | {diversity.get('issue_length_cv', 'n/a')} |\n")
             f.write(f"| **Diversity score** | **{diversity.get('overall', 'n/a')}** |\n")
 
+        # F2P/P2P section
+        f.write("\n## F2P/P2P validation\n\n")
         if structural_failures:
-            return  # Don't write judge results if gate failed
+            f.write("*Skipped — structural gate failed*\n")
+        elif f2p_failures:
+            f.write(f"**FAILED** — {len(f2p_failures)} instance(s):\n\n")
+            for iid, reason in f2p_failures:
+                f.write(f"- `{iid}`: {reason}\n")
+            f.write("\n**Factory score: 0.00** (F2P gate)\n")
+        elif diversity and diversity.get("overall", 0) == 0.0:
+            f.write("*Skipped — diversity gate failed*\n")
+        else:
+            f.write(f"- {n_s}/{n_s} passed ✓\n")
+
+        if structural_failures or f2p_failures:
+            return
 
         if not results or not metrics:
             return
