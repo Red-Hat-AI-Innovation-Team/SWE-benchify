@@ -1385,6 +1385,22 @@ Respond with ONLY the symptom sentence, nothing else."""
     return bug_description
 
 
+def _is_valid_test_output(test_output: str) -> bool:
+    """Check if test output contains a real test failure, not a setup error."""
+    stripped = test_output.strip()
+    if len(stripped) < 200:
+        return False
+    head = stripped[:500]
+    if "ModuleNotFoundError" in head:
+        return False
+    if "ImportError" in head and "FAILED" not in head and "AssertionError" not in head:
+        return False
+    failure_signals = ("FAILED", "AssertionError", "Error", "Exception", "Traceback")
+    if not any(sig in stripped for sig in failure_signals):
+        return False
+    return True
+
+
 async def generate_issue_from_symptom(
     symptom: str,
     test_output: str | None = None,
@@ -1425,6 +1441,10 @@ async def generate_issue_from_symptom(
     os_info = ctx.get("os_info", "") or random.choice(_OS_CHOICES)
 
     general_area = symptom.split(".")[0] if "." in symptom else symptom
+
+    if test_output and not _is_valid_test_output(test_output):
+        logger.warning("Test output appears to be a setup error, falling back to LLM-generated issue")
+        test_output = None
 
     if test_output:
         prompt = (
@@ -2331,6 +2351,17 @@ def _run_tests_on_buggy_code(
         run(["git", "checkout", buggy_commit])
     except subprocess.CalledProcessError:
         return None
+
+    # Install the target package so imports resolve during test runs
+    root = Path(repo_path)
+    if any((root / cfg).is_file() for cfg in ("pyproject.toml", "setup.py", "setup.cfg")):
+        try:
+            subprocess.run(
+                ["pip", "install", "-e", ".", "--quiet", "--no-deps"],
+                cwd=repo_path, capture_output=True, text=True, timeout=60,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            logger.debug("  pip install -e . failed, proceeding anyway")
 
     test_output: str | None = None
     try:
