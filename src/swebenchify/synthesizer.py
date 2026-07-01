@@ -988,17 +988,22 @@ async def introduce_bug(
         plan_parts.append("Your bug MUST include the secondary changes described above. Show ALL modified files in your response.")
         bug_plan_context = "\n".join(plan_parts)
 
-    prompt = f"""You are a code mutation expert. Given the following {language} function, introduce a subtle, realistic bug that affects 2-3 related lines. The bug should be the kind a developer might actually make — NOT a trivial syntax error.
+    prompt = f"""You are a code mutation expert. Given the following {language} function, introduce a subtle, realistic bug — the kind a developer might actually make during a refactoring or late-night coding session.
 
-Categories include: off-by-one errors, wrong variable usage, missing null/bounds check, incorrect operator, swapped arguments, wrong return value, missing edge case handling, incorrect string formatting, race condition setup, wrong comparison.
+PREFERRED bug types (choose one):
+- Type confusion: use a similar but wrong type (str where bytes expected, list where tuple needed, int where float, TextIO where BinaryIO)
+- Wrong method: call a similar method on the same object (.items() vs .values(), .append() vs .extend(), .read() vs .readline())
+- Incomplete refactoring: rename a variable in some places but not all, or update a function signature without updating all callers
+- Wrong argument order: swap two arguments of the same type in a function call
+- Stale reference: use an old variable name that was valid before a rename
 
-Good mutation examples (each touches 2-3 related lines):
-- Change a variable initialization AND a later use of that variable
-- Swap a comparison operator AND the corresponding error message/return
-- Remove a guard clause AND the variable it was protecting
-- Change a default value AND the condition that relies on it
+AVOID these (too easy to detect as artificial):
+- Simple condition inversions (> to <, True to False)
+- Removing or commenting out a single line
+- Changing a single character in a string literal
+- Off-by-one errors in simple ranges
 
-The mutation should look like a plausible developer mistake during routine coding or refactoring.
+The bug must look like something that would happen during a real refactoring or API migration, not a deliberate sabotage.
 
 CRITICAL CONSTRAINTS on bug subtlety:
 - The bug MUST NOT break the function's basic contract. If the function adds two numbers, don't make it subtract — that would be caught immediately by any test.
