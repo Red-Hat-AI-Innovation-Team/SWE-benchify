@@ -1060,6 +1060,7 @@ DIRECTION: sec_original is the CORRECT code (what exists now). sec_buggy is the 
 If no secondary change makes sense, omit the block entirely. No secondary change is better than a decorative one.
 
 IMPORTANT:
+- Do NOT change return type annotations, class hierarchy, or method decorators. Only modify the BODY of the function (inside the function, after the def line and docstring).
 - Return the COMPLETE function, not just the changed lines
 - The bug must be subtle — it should compile/parse correctly
 - Do NOT add comments marking the bug
@@ -1398,10 +1399,13 @@ def _build_social_context(artifacts: dict[str, list[str]]) -> str:
         branch = random.choice(artifacts["branches"])
         templates.append(f"Seeing this on the {branch} branch")
 
+    # Deduplicate to avoid template-like repetition
+    templates = list(dict.fromkeys(templates))
+
     if not templates:
         return ""
 
-    count = random.choices([0, 1, 2], weights=[1, 3, 1])[0]
+    count = random.choices([0, 1], weights=[1, 3])[0]
     if count == 0:
         return ""
 
@@ -1440,15 +1444,21 @@ def _find_file_commits(
     return commits
 
 
-async def _bug_to_symptom(bug_description: str, model: str = "sonnet") -> str:
+async def _bug_to_symptom(bug_description: str, file_path: str = '', model: str = "sonnet") -> str:
     """Convert a code-level bug description to a user-facing symptom.
 
     Strips technical details (operator names, variable names, condition
     specifics) and returns only what a user would observe.
     """
+    file_context = ''
+    if file_path:
+        module = Path(file_path).stem
+        file_context = f'\nThe bug is in the {module} module ({file_path}). The symptom MUST be about {module} functionality specifically.'
+
     prompt = f"""Convert this developer-level bug description into a user-facing symptom. Keep the FUNCTIONAL AREA (what part of the system is affected — e.g., "time duration handling", "CLI startup", "RST link parsing") but remove the specific code-level fix details (no operator names like `>=`, no variable names, no exact condition logic).
 
 Bug description: {bug_description}
+{file_context}
 
 Return ONLY the symptom in one sentence. Examples:
 - "split() instead of rsplit() in custom Sphinx role parser" → "RST documentation rendering breaks certain link syntax"
@@ -1766,7 +1776,7 @@ async def generate_issue_description(
         "version": "", "lang_version": "", "os_info": random.choice(_OS_CHOICES),
         "recent_issues": [],
     }
-    symptom = await _bug_to_symptom(bug_spec.bug_description, model=model)
+    symptom = await _bug_to_symptom(bug_spec.bug_description, file_path=bug_spec.file, model=model)
     style_examples = _mine_issue_style_examples(repo_path) if repo_path else []
     return await generate_issue_from_symptom(
         symptom=symptom,
@@ -2241,10 +2251,9 @@ Only suggest changes to files that actually exist in the repo. Keep changes smal
 
     changes = _parse_incidental_changes(result_text)
     # Constrain incidental changes to the same file as the fix or project-level files
-    _PROJECT_LEVEL = {
-        "CHANGES.rst", "CHANGELOG.md", "CHANGELOG.rst", "HISTORY.md",
-        "HISTORY.rst", "NEWS", "NEWS.md", "NEWS.rst",
-    }
+    # Changelog files disabled — synthetic entries consistently contradict
+    # the code direction and are a strong detection signal for judges.
+    _PROJECT_LEVEL: set[str] = set()
     # Extract significant keywords from bug description for changelog validation
     _STOP_WORDS = {
         "the", "a", "an", "in", "on", "of", "to", "for", "is", "and", "or",
@@ -2865,7 +2874,7 @@ async def synthesize_repo(
         social_context = _build_social_context(social_artifacts)
 
         # H1: Information firewall — generate issue from symptom only
-        symptom = await _bug_to_symptom(bug_spec.bug_description, model=model)
+        symptom = await _bug_to_symptom(bug_spec.bug_description, file_path=bug_spec.file, model=model)
         style_examples = _mine_issue_style_examples(repo_path)
         problem_statement = await generate_issue_from_symptom(
             symptom=symptom,
