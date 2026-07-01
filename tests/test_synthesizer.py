@@ -26,6 +26,7 @@ from swebenchify.synthesizer import (
     _humanize_traceback,
     _is_stdlib_or_installed,
     _is_valid_test_output,
+    _load_dataset_examples,
     _mine_issue_style_examples,
     _mine_social_artifacts,
     _normalize_test_whitespace,
@@ -2639,3 +2640,190 @@ def test_run_tests_on_buggy_code_pip_install_fallback_order(tmp_path: Path) -> N
     assert len(pip_calls) == 2
     assert "--no-deps" not in pip_calls[0]
     assert "--no-deps" in pip_calls[1]
+
+
+# ---------------------------------------------------------------------------
+# Exp-13: _load_dataset_examples
+# ---------------------------------------------------------------------------
+
+def test_load_dataset_examples_with_matching_repo(tmp_path: Path) -> None:
+    dataset = tmp_path / "dataset.jsonl"
+    import json
+    lines = [
+        json.dumps({"repo": "pallets/flask", "problem_statement": "Setting error handler for unknown code fails"}),
+        json.dumps({"repo": "pallets/flask", "problem_statement": "JSONEncoder encodes aware datetime incorrectly"}),
+        json.dumps({"repo": "pallets/flask", "problem_statement": "Don't overwrite Vary header for cookie access"}),
+        json.dumps({"repo": "other/repo", "problem_statement": "Unrelated issue"}),
+    ]
+    dataset.write_text("\n".join(lines) + "\n")
+
+    examples = _load_dataset_examples(str(dataset), "pallets/flask", n=5)
+    assert len(examples) == 3
+    assert all("flask" not in ex or "pallets" not in ex for ex in examples)
+    assert "Unrelated issue" not in examples
+
+
+def test_load_dataset_examples_samples_n(tmp_path: Path) -> None:
+    import json
+    dataset = tmp_path / "dataset.jsonl"
+    lines = [
+        json.dumps({"repo": "org/repo", "problem_statement": f"Issue {i}"})
+        for i in range(20)
+    ]
+    dataset.write_text("\n".join(lines) + "\n")
+
+    examples = _load_dataset_examples(str(dataset), "org/repo", n=3)
+    assert len(examples) == 3
+
+
+def test_load_dataset_examples_missing_file() -> None:
+    examples = _load_dataset_examples("/nonexistent/path/dataset.jsonl", "pallets/flask")
+    assert examples == []
+
+
+def test_load_dataset_examples_no_matching_repo(tmp_path: Path) -> None:
+    import json
+    dataset = tmp_path / "dataset.jsonl"
+    lines = [
+        json.dumps({"repo": "other/repo", "problem_statement": "Some issue"}),
+    ]
+    dataset.write_text("\n".join(lines) + "\n")
+
+    examples = _load_dataset_examples(str(dataset), "pallets/flask")
+    assert examples == []
+
+
+def test_load_dataset_examples_handles_malformed_json(tmp_path: Path) -> None:
+    dataset = tmp_path / "dataset.jsonl"
+    import json
+    content = (
+        "not valid json\n"
+        + json.dumps({"repo": "org/repo", "problem_statement": "Valid issue"}) + "\n"
+        + "{broken\n"
+    )
+    dataset.write_text(content)
+
+    examples = _load_dataset_examples(str(dataset), "org/repo")
+    assert len(examples) == 1
+    assert examples[0] == "Valid issue"
+
+
+# ---------------------------------------------------------------------------
+# Exp-13: generate_issue_from_symptom with dataset_examples (few-shot path)
+# ---------------------------------------------------------------------------
+
+def test_generate_issue_from_symptom_uses_dataset_examples() -> None:
+    """When dataset_examples are provided, the prompt includes them."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    examples = [
+        "Setting error handler for unknown code fails",
+        "JSONEncoder encodes aware datetime objects incorrectly",
+    ]
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import generate_issue_from_symptom
+        asyncio.run(generate_issue_from_symptom(
+            symptom="parsing breaks on unicode",
+            dataset_examples=examples,
+        ))
+
+    assert len(captured_prompts) >= 1
+    prompt = captured_prompts[0]
+    assert "Setting error handler for unknown code fails" in prompt
+    assert "JSONEncoder encodes aware datetime objects incorrectly" in prompt
+    assert "real GitHub issues" in prompt
+    assert "Match the examples" in prompt
+
+
+def test_generate_issue_from_symptom_few_shot_no_char_budget() -> None:
+    """When dataset_examples are provided, the old char_budget instruction is absent."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import generate_issue_from_symptom
+        asyncio.run(generate_issue_from_symptom(
+            symptom="test symptom",
+            dataset_examples=["Example issue text"],
+        ))
+
+    prompt = captured_prompts[0]
+    assert "frustrated user" not in prompt
+    assert "CONCISE" not in prompt
+
+
+def test_generate_issue_from_symptom_fallback_without_dataset_examples() -> None:
+    """Without dataset_examples, falls back to the original prompt style."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import generate_issue_from_symptom
+        asyncio.run(generate_issue_from_symptom(
+            symptom="test symptom",
+            dataset_examples=None,
+        ))
+
+    prompt = captured_prompts[0]
+    assert "CONCISE" in prompt
+    assert "characters" in prompt.lower()
+
+
+def test_generate_issue_from_symptom_few_shot_not_used_for_data_first() -> None:
+    """The data-first path (with test_output) is unchanged by dataset_examples."""
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    real_test_output = (
+        "FAILED tests/test_core.py::test_add\n"
+        "E       AssertionError: assert -1 == 3\n"
+        "tests/test_core.py:5: AssertionError\n"
+        "======================== 1 failed ========================\n"
+        "Extra padding to ensure output exceeds 200 chars. " * 3
+    )
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import generate_issue_from_symptom
+        result = asyncio.run(generate_issue_from_symptom(
+            symptom="calculation fails",
+            test_output=real_test_output,
+            dataset_examples=["Example issue 1", "Example issue 2"],
+        ))
+
+    assert "FAILED" in result
+    assert "AssertionError" in result
+    assert "```" in result
