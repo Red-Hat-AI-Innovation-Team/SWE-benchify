@@ -3,12 +3,15 @@ set -euo pipefail
 
 cd /testbed
 
+# Ensure git trusts the directory
+git config --global --add safe.directory /testbed
+
 # Apply the gold patch (the actual fix)
 cat > /tmp/solution_patch.diff << '__SOLUTION__'
 {gold_patch}
 __SOLUTION__
 
-patch --fuzz=5 -p1 -i /tmp/solution_patch.diff
+git apply --3way /tmp/solution_patch.diff || git apply /tmp/solution_patch.diff
 
 # Some tests depend on git status
 git add -A
