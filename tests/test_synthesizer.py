@@ -3514,11 +3514,11 @@ def test_count_test_functions_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Exp-21: test patch rejects new test functions
+# Exp-21: test patch rejects missing function def in LLM response
 # ---------------------------------------------------------------------------
 
-def test_test_patch_rejects_added_test_functions(tmp_path: Path) -> None:
-    """When the LLM adds new def test_ functions, the patch is rejected."""
+def test_test_patch_rejects_missing_function_def(tmp_path: Path) -> None:
+    """When the LLM response lacks the function definition, the patch is rejected."""
     from unittest.mock import MagicMock, patch as mock_patch
 
     (tmp_path / "src").mkdir()
@@ -3527,10 +3527,10 @@ def test_test_patch_rejects_added_test_functions(tmp_path: Path) -> None:
     existing_test = "import pytest\n\ndef test_add_basic():\n    assert add(1, 2) == 3\n"
     (tmp_path / "tests" / "test_calc.py").write_text(existing_test)
 
-    modified_test = existing_test + "\ndef test_add_negative():\n    assert add(-1, -2) == -3\n"
+    bad_response = "Here are some assertions you could add."
 
     class FakeResult:
-        content = [type("B", (), {"text": f"```python\n{modified_test}\n```"})()]
+        content = [type("B", (), {"text": bad_response})()]
 
     async def fake_query(prompt: str, options: object = None):
         yield FakeResult()
@@ -3557,7 +3557,7 @@ def test_test_patch_rejects_added_test_functions(tmp_path: Path) -> None:
 
 
 def test_test_patch_accepts_modified_existing_functions(tmp_path: Path) -> None:
-    """When the LLM only modifies existing test functions, the patch is accepted."""
+    """When the LLM returns a modified function, the patch is accepted."""
     from unittest.mock import MagicMock, patch as mock_patch
 
     (tmp_path / "src").mkdir()
@@ -3566,10 +3566,10 @@ def test_test_patch_accepts_modified_existing_functions(tmp_path: Path) -> None:
     existing_test = "import pytest\n\ndef test_add_basic():\n    assert add(1, 2) == 3\n"
     (tmp_path / "tests" / "test_calc.py").write_text(existing_test)
 
-    modified_test = "import pytest\n\ndef test_add_basic():\n    assert add(1, 2) == 3\n    assert add(0, 0) == 0\n"
+    modified_func = "def test_add_basic():\n    assert add(1, 2) == 3\n    assert add(0, 0) == 0\n"
 
     class FakeResult:
-        content = [type("B", (), {"text": f"```python\n{modified_test}\n```"})()]
+        content = [type("B", (), {"text": f"```python\n{modified_func}\n```"})()]
 
     async def fake_query(prompt: str, options: object = None):
         yield FakeResult()
@@ -3598,11 +3598,11 @@ def test_test_patch_accepts_modified_existing_functions(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Exp-21: test generation prompt is more prescriptive
+# Exp-21: test generation prompt sends only the function, not the whole file
 # ---------------------------------------------------------------------------
 
-def test_test_generation_prompt_hard_constraint() -> None:
-    """Verify the prompt uses HARD CONSTRAINT and forbids new test functions."""
+def test_test_generation_prompt_function_level() -> None:
+    """Verify the prompt sends only the target function and uses HARD CONSTRAINT."""
     from unittest.mock import MagicMock, patch as mock_patch
 
     captured_prompts: list[str] = []
@@ -3636,9 +3636,9 @@ def test_test_generation_prompt_hard_constraint() -> None:
     assert len(captured_prompts) == 1
     prompt = captured_prompts[0]
     assert "HARD CONSTRAINT" in prompt
-    assert "MUST NOT add any new" in prompt
-    assert "will be validated and rejected" in prompt
-    assert "AT MOST one new test function" not in prompt
+    assert "Return ONLY the modified function" in prompt
+    assert "Do NOT return the complete file" in prompt
+    assert "def test_add" in prompt
 
 
 # ---------------------------------------------------------------------------

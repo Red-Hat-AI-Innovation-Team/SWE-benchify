@@ -2011,6 +2011,80 @@ def _count_test_functions(code: str) -> int:
     return len(re.findall(r'^\s*def\s+test_\w+', code, re.MULTILINE))
 
 
+def _extract_test_functions(source: str) -> list[dict[str, str | int]]:
+    """Extract test functions from Python source using AST.
+
+    Returns a list of dicts with keys: name, source, start_line, end_line.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    source_lines = source.splitlines(keepends=True)
+    results: list[dict[str, str | int]] = []
+
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not node.name.startswith("test_"):
+            continue
+        start = node.lineno - 1
+        end = node.end_lineno if node.end_lineno else start + 1
+        func_source = "".join(source_lines[start:end])
+        results.append({
+            "name": node.name,
+            "source": func_source,
+            "start_line": start,
+            "end_line": end,
+        })
+
+    return results
+
+
+def _find_best_test_function(
+    test_functions: list[dict[str, str | int]],
+    bug_spec: BugSpec,
+) -> dict[str, str | int] | None:
+    """Pick the test function most relevant to the bug."""
+    if not test_functions:
+        return None
+
+    targets = {bug_spec.function_name}
+    module_stem = Path(bug_spec.file).stem
+    if module_stem:
+        targets.add(module_stem)
+
+    best: dict[str, str | int] | None = None
+    best_score = -1
+    for tf in test_functions:
+        body = str(tf["source"]).lower()
+        score = sum(1 for t in targets if t.lower() in body)
+        if score > best_score:
+            best_score = score
+            best = tf
+
+    if best is not None:
+        return best
+    return test_functions[0]
+
+
+def _extract_file_imports(source: str) -> str:
+    """Extract import lines from the top of a Python file."""
+    lines: list[str] = []
+    for line in source.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("import ", "from ")) or stripped == "":
+            lines.append(line)
+        elif lines and not stripped:
+            lines.append(line)
+        elif stripped.startswith("#"):
+            lines.append(line)
+        elif lines:
+            break
+    return "\n".join(lines).rstrip() + "\n" if lines else ""
+
+
 async def _generate_test_patch_existing(
     bug_spec: BugSpec,
     repo_path: str,
@@ -2027,10 +2101,31 @@ async def _generate_test_patch_existing(
         logger.warning("Could not read existing test file %s", test_file)
         return None
 
-    prompt = f"""You are modifying an existing test file to add regression coverage. Here is the current test file:
+    if language != "python":
+        return None
 
+    test_functions = _extract_test_functions(original_test_content)
+    if not test_functions:
+        logger.warning("  No test functions found in %s", test_file)
+        return None
+
+    target = _find_best_test_function(test_functions, bug_spec)
+    if target is None:
+        return None
+
+    target_source = str(target["source"])
+    file_imports = _extract_file_imports(original_test_content)
+
+    prompt = f"""You are modifying a single test function to add regression coverage for a bug.
+
+Here is the test function to modify:
 ```{language}
-{original_test_content}
+{target_source}
+```
+
+Context — imports used in the test file:
+```{language}
+{file_imports}
 ```
 
 A bug was introduced in the code. Here is the original (correct) function:
@@ -2045,64 +2140,58 @@ Here is the buggy function:
 
 The bug: {bug_spec.bug_description}
 
-HARD CONSTRAINT: You MUST NOT add any new `def test_` functions. You can ONLY modify existing test functions by:
-- Adding 1-2 `assert` statements to an existing test function that already tests related behavior
-- Adding a new case to an existing `@pytest.mark.parametrize` decorator
+HARD CONSTRAINT: Return ONLY the modified function. Do NOT return the complete file.
 
-Find the most closely related existing test function and add assertions there. At least one added assertion must PASS against the original code and FAIL against the buggy code.
+Add 1-2 `assert` statements to this function. At least one must PASS against the original code and FAIL against the buggy code.
 
 Requirements:
-- Follow the existing test style and conventions in the file
-- Use the same imports, fixtures, and test patterns already present
+- Keep the same function name and signature
+- Follow the existing test style
 - Do NOT add comments explaining your changes
-- Do NOT add new test functions — this will be validated and rejected
-
-Return the COMPLETE modified test file."""
+- Do NOT add new test functions
+- Return ONLY the function starting from `def {target["name"]}` — nothing else"""
 
     resolved_model = MODEL_MAP.get(model, model)
     options = ClaudeCodeOptions(max_turns=1, model=resolved_model)
 
-    modified_content: str | None = None
+    modified_func: str | None = None
     try:
         async for message in query(prompt=prompt, options=options):
             if isinstance(message, ResultMessage):
                 text = _extract_text_from_result(message)
                 if text:
                     extracted = _extract_code_block(text)
-                    modified_content = extracted if extracted else text
+                    modified_func = extracted if extracted else text
     except Exception:
         logger.warning("LLM call failed for existing-file test generation")
         return None
 
-    if not modified_content or modified_content.strip() == original_test_content.strip():
+    if not modified_func or modified_func.strip() == target_source.strip():
         return None
 
-    if len(modified_content) < len(original_test_content) * 0.5:
-        logger.warning(
-            "  Generated test code too short (%d chars vs %d original) — likely truncated",
-            len(modified_content), len(original_test_content),
-        )
+    modified_func = _strip_strategy_labels(modified_func)
+    func_prefix = f"def {target['name']}"
+    idx = modified_func.find(func_prefix)
+    if idx > 0:
+        modified_func = modified_func[idx:]
+    elif idx < 0:
+        logger.warning("  LLM response missing function definition")
         return None
 
-    modified_content = _strip_strategy_labels(modified_content)
+    modified_content = original_test_content.replace(target_source.rstrip(), modified_func.rstrip())
+
+    if modified_content == original_test_content:
+        logger.warning("  Splice failed — original function text not found in file")
+        return None
+
     modified_content = _normalize_test_whitespace(modified_content, original_test_content)
 
     if not _validate_test_code(modified_content, language):
         logger.warning("  Generated test code failed validation")
         return None
 
-    if language == "python" and not _validate_test_imports(modified_content, repo_path):
+    if not _validate_test_imports(modified_content, repo_path):
         return None
-
-    if language == 'python':
-        original_test_count = _count_test_functions(original_test_content)
-        modified_test_count = _count_test_functions(modified_content)
-        if modified_test_count > original_test_count:
-            logger.warning(
-                '  Test patch adds %d new test function(s) — rejecting to avoid detection',
-                modified_test_count - original_test_count,
-            )
-            return None
 
     # generate_patch diffs mutated→original; swap args so we get original→modified
     return generate_patch(modified_content, original_test_content, test_file)
