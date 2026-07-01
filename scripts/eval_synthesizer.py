@@ -517,6 +517,7 @@ def main():
             gold_patch=inst.get("patch", ""),
             env_spec=env_spec,
             timeout=600,
+            repo_path=target["repo_path"],
         )
 
         if result.status != "valid":
