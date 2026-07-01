@@ -515,13 +515,12 @@ def _find_related_files(
             except OSError:
                 pass
 
-            test_related: list[dict[str, str]] = []
             for test_dir_name in ("tests", "test"):
                 test_dir = root / test_dir_name
                 if not test_dir.is_dir():
                     continue
                 for f in sorted(test_dir.rglob("test_*.py")):
-                    if len(related) + len(test_related) >= max_files:
+                    if len(related) >= max_files:
                         break
                     try:
                         content = f.read_text(encoding="utf-8", errors="replace")
@@ -532,22 +531,7 @@ def _find_related_files(
                         for p in (target_module, ".".join(target_parts[:-1]))
                         if p
                     ):
-                        rel = str(f.relative_to(root))
-                        if rel not in seen_files and rel != target_file:
-                            seen_files.add(rel)
-                            lines = content.splitlines()
-                            snippet = "\n".join(lines[:20])
-                            test_related.append({"file": rel, "snippet": snippet})
-
-            if test_related and not any(
-                r["file"].startswith(("tests/", "test/"))
-                or "/test_" in r["file"]
-                or r["file"].startswith("test_")
-                for r in related
-            ):
-                related = test_related + related
-            else:
-                related = test_related + related
+                        _add_file_snippet(str(f.relative_to(root)))
 
     if len(related) < max_files:
         try:
@@ -2846,7 +2830,6 @@ async def synthesize_repo(
 
         # Apply secondary changes from multi-file mutation
         buggy_files: dict[str, str] = {bug_spec.file: mutated_content}
-        test_patch_parts: list[str] = []
         for sc in bug_spec.secondary_changes:
             sec_path = Path(repo_path) / sc.file
             if not sec_path.is_file():
@@ -2861,11 +2844,7 @@ async def synthesize_repo(
                 continue
             sec_buggy = sec_content.replace(sc.original_snippet, sc.buggy_snippet, 1)
             if sec_buggy != sec_content:
-                sec_diff = generate_patch(sec_content, sec_buggy, sc.file)
-                if sc.file.startswith(('tests/', 'test/')) or '/test_' in sc.file or sc.file.startswith('test_'):
-                    test_patch_parts.append(sec_diff)
-                else:
-                    patch += sec_diff
+                patch += generate_patch(sec_content, sec_buggy, sc.file)
                 buggy_files[sc.file] = sec_buggy
                 logger.info("  Secondary change in %s: %s", sc.file, sc.description)
 
@@ -2887,11 +2866,7 @@ async def synthesize_repo(
                         continue
                     sec_buggy = sec_content.replace(sc.original_snippet, sc.buggy_snippet, 1)
                     if sec_buggy != sec_content:
-                        sec_diff = generate_patch(sec_content, sec_buggy, sc.file)
-                        if sc.file.startswith(('tests/', 'test/')) or '/test_' in sc.file or sc.file.startswith('test_'):
-                            test_patch_parts.append(sec_diff)
-                        else:
-                            patch += sec_diff
+                        patch += generate_patch(sec_content, sec_buggy, sc.file)
                         buggy_files[sc.file] = sec_buggy
                         logger.info("  Retry secondary change in %s", sc.file)
 
@@ -2990,7 +2965,7 @@ async def synthesize_repo(
             dataset_examples=dataset_examples,
         )
 
-        test_patch = ''.join(test_patch_parts)
+        test_patch = ''
 
         synthesis_result = SynthesisResult(
             bug_spec=bug_spec,
