@@ -2777,6 +2777,10 @@ def _run_tests_on_buggy_code(
                 [venv_pip, 'install', '-e', '.', '--quiet'],
                 cwd=repo_path, capture_output=True, text=True, timeout=120,
             )
+            subprocess.run(
+                [venv_pip, 'install', 'pytest', '--quiet'],
+                capture_output=True, text=True, timeout=60,
+            )
             site_pkgs = subprocess.run(
                 [str(venv_dir / 'bin' / 'python'), '-c',
                  'import site; print(site.getsitepackages()[0])'],
@@ -3168,25 +3172,22 @@ async def synthesize_repo(
                     continue
 
                 # Build env with venv site-packages
-                preflight_env = dict(os.environ)
                 venv_dir = Path(repo_path) / '.synth-venv'
-                pp_parts = [repo_path]
                 if venv_dir.is_dir():
-                    sp_result = subprocess.run(
-                        [str(venv_dir / 'bin' / 'python'), '-c',
-                         'import site; print(site.getsitepackages()[0])'],
-                        capture_output=True, text=True, timeout=10,
-                    )
-                    if sp_result.returncode == 0:
-                        pp_parts.insert(0, sp_result.stdout.strip())
-                src_dir = Path(repo_path) / 'src'
-                if src_dir.is_dir():
-                    pp_parts.append(str(src_dir))
-                preflight_env['PYTHONPATH'] = os.pathsep.join(pp_parts)
+                    venv_python = str(venv_dir / 'bin' / 'python')
+                    preflight_env = dict(os.environ)
+                else:
+                    venv_python = sys.executable
+                    preflight_env = dict(os.environ)
+                    pp_parts = [repo_path]
+                    src_dir = Path(repo_path) / 'src'
+                    if src_dir.is_dir():
+                        pp_parts.append(str(src_dir))
+                    preflight_env['PYTHONPATH'] = os.pathsep.join(pp_parts)
 
                 # Baseline: run tests WITHOUT test_patch
                 baseline_run = subprocess.run(
-                    [sys.executable, '-m', 'pytest', '--tb=line', '-q', test_file_for_patch],
+                    [venv_python, '-m', 'pytest', '--tb=line', '-q', test_file_for_patch],
                     cwd=repo_path, capture_output=True, text=True, timeout=120,
                     env=preflight_env,
                 )
@@ -3199,7 +3200,7 @@ async def synthesize_repo(
 
                 # Run tests WITH test_patch
                 patched_run = subprocess.run(
-                    [sys.executable, '-m', 'pytest', '--tb=line', '-q', test_file_for_patch],
+                    [venv_python, '-m', 'pytest', '--tb=line', '-q', test_file_for_patch],
                     cwd=repo_path, capture_output=True, text=True, timeout=120,
                     env=preflight_env,
                 )
@@ -3213,6 +3214,13 @@ async def synthesize_repo(
                 # Evaluate: test_patch must add NEW failures
                 baseline_fails = len(re.findall(r'FAILED', baseline_run.stdout))
                 patched_fails = len(re.findall(r'FAILED', patched_run.stdout))
+
+                if baseline_run.returncode != 0 and baseline_fails == 0:
+                    logger.debug('  Pre-flight baseline: rc=%d but 0 FAILED lines. stderr: %s',
+                                 baseline_run.returncode, baseline_run.stderr[:200])
+                if patched_run.returncode != 0 and patched_fails == 0:
+                    logger.debug('  Pre-flight patched: rc=%d but 0 FAILED lines. stderr: %s',
+                                 patched_run.returncode, patched_run.stderr[:200])
 
                 if patched_run.returncode == 0:
                     logger.warning('  Skipped — test_patch does not fail on buggy code (pre-flight F2P)')
