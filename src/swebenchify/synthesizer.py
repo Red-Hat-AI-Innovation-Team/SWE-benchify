@@ -1483,6 +1483,9 @@ def _is_valid_test_output(test_output: str) -> bool:
     head = stripped[:500]
     if 'ModuleNotFoundError' in head:
         return False
+    failure_signals = ('FAILED', 'AssertionError', 'Error', 'ERRORS', 'Traceback')
+    if not any(sig in stripped for sig in failure_signals):
+        return False
     return True
 
 
@@ -2493,8 +2496,30 @@ def _run_tests_on_buggy_code(
     if target_file and language == "python":
         test_file = _find_existing_test_file(repo_path, target_file, language)
         if test_file:
-            test_cmd = [sys.executable, "-m", "pytest", test_file, "-x", "--tb=long"]
+            test_cmd = [sys.executable, "-m", "pytest", test_file, "--tb=long", "-q"]
             logger.debug("  Running targeted tests: %s", test_file)
+
+    # Run baseline on clean code to identify pre-existing failures
+    baseline_deselects: list[str] = []
+    if language == "python":
+        baseline_cmd = [sys.executable, "-m", "pytest", "--tb=no", "-q"]
+        if test_cmd:
+            baseline_cmd = test_cmd[:] + ["--tb=no"]
+            baseline_cmd = [c for c in baseline_cmd if c != "-x"]
+        baseline_env = {**test_env, "PYTHONDONTWRITEBYTECODE": "1"}
+        try:
+            baseline_result = subprocess.run(
+                baseline_cmd, cwd=repo_path, capture_output=True, text=True,
+                timeout=timeout, env=baseline_env,
+            )
+            if baseline_result.returncode != 0:
+                combined_baseline = (baseline_result.stdout + "\n" + baseline_result.stderr).strip()
+                baseline_failures = _extract_failed_test_names(combined_baseline)
+                baseline_deselects = [f"--deselect={name}" for name in baseline_failures]
+                if baseline_deselects:
+                    logger.debug("  Deselecting %d pre-existing failures", len(baseline_deselects))
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
 
     try:
         run(["git", "checkout", buggy_commit])
@@ -2544,6 +2569,8 @@ def _run_tests_on_buggy_code(
         for cmd in cmds_to_try:
             if cmd is None:
                 continue
+            if baseline_deselects and "pytest" in cmd:
+                cmd = cmd + baseline_deselects
             try:
                 result = subprocess.run(
                     cmd, cwd=repo_path, capture_output=True, text=True,
