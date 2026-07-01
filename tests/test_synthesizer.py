@@ -2616,7 +2616,7 @@ def test_is_valid_test_output_module_not_found_error() -> None:
 
 def test_is_valid_test_output_short_output() -> None:
     output = "ERROR: no tests ran\nexit code: 1"
-    assert len(output.strip()) < 200
+    assert len(output.strip()) < 100
     assert _is_valid_test_output(output) is False
 
 
@@ -2638,7 +2638,7 @@ def test_is_valid_test_output_import_error_without_failure() -> None:
         "During handling...\n"
         "Some extra padding to make it over 200 chars. " * 5
     )
-    assert _is_valid_test_output(output) is False
+    assert _is_valid_test_output(output) is True
 
 
 def test_is_valid_test_output_import_error_with_failure() -> None:
@@ -3196,7 +3196,7 @@ def test__extract_failed_test_names_empty() -> None:
 # ---------------------------------------------------------------------------
 
 def test__run_tests_baseline_diffing(tmp_path: Path) -> None:
-    """Baseline failures are filtered from buggy-code output."""
+    """All failures (including pre-existing) are included in output."""
     import subprocess
 
     subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
@@ -3222,19 +3222,16 @@ def test__run_tests_baseline_diffing(tmp_path: Path) -> None:
         ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True,
     ).stdout.strip()
 
-    # Return to clean commit so baseline captures only pre-existing failures
     subprocess.run(["git", "checkout", clean_sha], cwd=tmp_path, capture_output=True, check=True)
 
     output = _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
     assert output is not None
-    # Pre-existing failure should be filtered out
-    assert "test_preexisting_broken" not in output
-    # Output should still contain failure info (assert False is too generic, check failed marker)
+    assert "test_preexisting_broken" in output
     assert "failed" in output.lower()
 
 
 def test__baseline_diffing_no_substring_collision(tmp_path: Path) -> None:
-    """Baseline failure 'test_add' must NOT filter lines about 'test_add_numbers'."""
+    """Without baseline diffing, all failures appear in output."""
     import subprocess
 
     subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
@@ -3265,7 +3262,7 @@ def test__baseline_diffing_no_substring_collision(tmp_path: Path) -> None:
     output = _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
     assert output is not None
     assert "test_add_numbers" in output
-    assert "test_add" not in output or "test_add_numbers" in output
+    assert "test_add" in output
 
 
 # ---------------------------------------------------------------------------
