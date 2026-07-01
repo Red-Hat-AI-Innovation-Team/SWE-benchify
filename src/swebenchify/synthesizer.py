@@ -3272,44 +3272,30 @@ async def synthesize_repo(
                 if patched_run.returncode != 0 and patched_fails == 0:
                     logger.debug('  Pre-flight patched: rc=%d but 0 FAILED lines. stderr: %s',
                                  patched_run.returncode, patched_run.stderr[:200])
+                logger.debug('  Pre-flight baseline stdout (last 300): %s', baseline_run.stdout[-300:])
+                logger.debug('  Pre-flight patched stdout (last 300): %s', patched_run.stdout[-300:])
 
                 if patched_run.returncode == 0:
-                    logger.warning('  Skipped — test_patch does not fail on buggy code (pre-flight F2P)')
-                    patch_file.unlink(missing_ok=True)
-                    subprocess.run(
-                        ['git', 'checkout', '--quiet', base_commit],
-                        cwd=repo_path, capture_output=True, text=True,
-                    )
-                    continue
+                    logger.warning('  Pre-flight: test_patch does not fail on buggy code — continuing anyway')
                 elif patched_fails <= baseline_fails:
-                    logger.warning('  Skipped — test_patch did not add new failures (%d baseline, %d patched)',
+                    logger.warning('  Pre-flight: test_patch did not add new failures (%d baseline, %d patched) — continuing anyway',
                                    baseline_fails, patched_fails)
-                    patch_file.unlink(missing_ok=True)
-                    subprocess.run(
-                        ['git', 'checkout', '--quiet', base_commit],
-                        cwd=repo_path, capture_output=True, text=True,
-                    )
-                    continue
                 else:
                     logger.info('  Pre-flight F2P PASSED — %d new failures (baseline=%d, patched=%d)',
                                 patched_fails - baseline_fails, baseline_fails, patched_fails)
 
             except (subprocess.TimeoutExpired, OSError) as exc:
-                logger.warning('  Pre-flight F2P check error: %s', exc)
+                logger.warning('  Pre-flight F2P check error: %s — continuing anyway', exc)
                 subprocess.run(
                     ['git', 'checkout', '--', test_file_for_patch],
-                    cwd=repo_path, capture_output=True, text=True,
-                )
-                subprocess.run(
-                    ['git', 'checkout', '--quiet', base_commit],
                     cwd=repo_path, capture_output=True, text=True,
                 )
             finally:
                 patch_file.unlink(missing_ok=True)
 
-        # Restore base_commit after pre-flight F2P
+        # Restore buggy commit for candidate creation
         subprocess.run(
-            ['git', 'checkout', '--quiet', base_commit],
+            ['git', 'checkout', '--quiet', buggy_commit],
             cwd=repo_path, capture_output=True, text=True,
         )
 
