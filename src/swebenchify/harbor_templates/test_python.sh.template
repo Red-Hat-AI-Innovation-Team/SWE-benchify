@@ -1,0 +1,103 @@
+#!/bin/bash
+set -uxo pipefail
+
+cd /testbed
+
+# Ensure git trusts the directory
+git config --global --add safe.directory /testbed
+
+# --- Phase 1: Apply test patch ---
+# Reset to clean state
+git checkout -- . && git clean -fd -q
+
+# Apply test patch (adds/modifies test files that catch the bug)
+git apply /tests/test.patch 2>&1 || {
+    echo "TEST_PATCH_APPLY_FAILED"
+    echo 0 > /logs/verifier/reward.txt
+    exit 0
+}
+
+# --- Phase 2: Run tests ---
+# Capture test output for grading
+LOG_FILE=$(mktemp)
+exec > >(tee "$LOG_FILE") 2>&1
+
+echo '>>>>> Start Test Output'
+
+{test_command} 2>&1 || true
+
+echo '>>>>> End Test Output'
+
+# --- Phase 3: Grade results ---
+# Parse pytest output and check against expected FAIL_TO_PASS / PASS_TO_PASS
+# Load expected test lists from config.json
+FAIL_TO_PASS=$(python3 -c "
+import json, sys
+with open('/tests/config.json') as f:
+    cfg = json.load(f)
+f2p = cfg.get('FAIL_TO_PASS', '[]')
+if isinstance(f2p, str):
+    f2p = json.loads(f2p)
+print('\n'.join(f2p))
+" 2>/dev/null || true)
+
+PASS_TO_PASS=$(python3 -c "
+import json, sys
+with open('/tests/config.json') as f:
+    cfg = json.load(f)
+p2p = cfg.get('PASS_TO_PASS', '[]')
+if isinstance(p2p, str):
+    p2p = json.loads(p2p)
+print('\n'.join(p2p))
+" 2>/dev/null || true)
+
+# Check if all FAIL_TO_PASS tests now pass
+ALL_PASS=1
+while IFS= read -r test_name; do
+    [ -z "$test_name" ] && continue
+    if ! grep -q "PASSED.*${test_name}\|${test_name}.*PASSED" "$LOG_FILE" 2>/dev/null; then
+        ALL_PASS=0
+        break
+    fi
+done <<< "$FAIL_TO_PASS"
+
+# Check if all PASS_TO_PASS tests still pass
+while IFS= read -r test_name; do
+    [ -z "$test_name" ] && continue
+    if grep -q "FAILED.*${test_name}\|${test_name}.*FAILED" "$LOG_FILE" 2>/dev/null; then
+        ALL_PASS=0
+        break
+    fi
+done <<< "$PASS_TO_PASS"
+
+# Write reward
+if [ $ALL_PASS -eq 1 ] && [ -n "$FAIL_TO_PASS" ]; then
+    echo 1 > /logs/verifier/reward.txt
+else
+    echo 0 > /logs/verifier/reward.txt
+fi
+
+# Write detailed report
+python3 -c "
+import json, re
+
+log = open('$LOG_FILE').read()
+
+# Parse pytest verbose output
+results = {}
+for line in log.split('\n'):
+    m = re.match(r'(.+?) (PASSED|FAILED|ERROR)', line)
+    if m:
+        results[m.group(1).strip()] = m.group(2).lower()
+
+report = {
+    'test_results': results,
+    'total_tests': len(results),
+    'passed': sum(1 for v in results.values() if v == 'passed'),
+    'failed': sum(1 for v in results.values() if v in ('failed', 'error')),
+}
+with open('/logs/verifier/report.json', 'w') as f:
+    json.dump(report, f, indent=2)
+" 2>/dev/null || true
+
+exit 0

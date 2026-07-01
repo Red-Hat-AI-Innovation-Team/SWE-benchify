@@ -268,6 +268,13 @@ def _cmd_emit(args: argparse.Namespace) -> None:
     emit_dataset(filtered, config.output.dir, repo_slug=repo_slug)
     print(f"{len(filtered)}/{len(instances)} instances emitted to {config.output.dir}")
 
+    if args.harbor_output:
+        from swebenchify.harbor_emitter import emit_harbor_dataset
+
+        harbor_dir = args.harbor_output
+        emit_harbor_dataset(filtered, harbor_dir)
+        print(f"Harbor tasks emitted to {harbor_dir}")
+
 
 def _cmd_remote_validate(args: argparse.Namespace) -> None:
     """Dispatch validation to GitHub Actions runners."""
@@ -455,6 +462,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common_args(emit_parser)
     emit_parser.add_argument("--input", "-i", help="Input validated instances JSONL file")
+    emit_parser.add_argument(
+        "--harbor-output",
+        default=None,
+        help="Output directory for Harbor task format (alongside JSONL)",
+    )
 
     # remote-validate
     rv_parser = subparsers.add_parser(
