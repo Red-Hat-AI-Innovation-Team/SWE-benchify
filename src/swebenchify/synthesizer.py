@@ -2978,7 +2978,9 @@ async def synthesize_repo(
             dataset_examples=dataset_examples,
         )
 
-        test_patch = ''
+        test_patch = await generate_test_patch(
+            bug_spec, repo_path, language, model=model,
+        ) or ''
 
         synthesis_result = SynthesisResult(
             bug_spec=bug_spec,
