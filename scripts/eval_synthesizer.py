@@ -394,8 +394,8 @@ def main():
 
     if args.quick:
         targets = [EVAL_TARGETS[0].copy()]
-        targets[0]['n_synthetic'] = 1
-        targets[0]['n_real'] = 1
+        targets[0]['n_synthetic'] = 3
+        targets[0]['n_real'] = 3
     else:
         targets = EVAL_TARGETS
 
@@ -717,6 +717,12 @@ def main():
             ),
         }))
     else:
+        # Save instances for debugging
+        out_path = f'/tmp/synth-eval-results-r{round_num}-quick.json'
+        with open(out_path, 'w') as f:
+            json.dump({'synthetic_instances': all_synth_instances}, f, indent=2)
+        err(f'  Instance data saved: {out_path}')
+
         err('\n── Judge (SKIPPED in quick mode) ──')
         factory_score = 0.3 * diversity['overall']
         print(json.dumps({
