@@ -1947,6 +1947,9 @@ def test_run_tests_on_buggy_code_captures_failure(tmp_path: Path) -> None:
         ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True,
     ).stdout.strip()
 
+    # Checkout clean commit so baseline runs on correct code
+    subprocess.run(["git", "checkout", "HEAD~1"], cwd=tmp_path, capture_output=True, check=True)
+
     output = _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
     assert output is not None
     assert "FAILED" in output or "assert" in output.lower() or "Error" in output
@@ -2651,6 +2654,18 @@ def test_is_valid_test_output_import_error_with_failure() -> None:
     assert _is_valid_test_output(output) is True
 
 
+def test_is_valid_test_output_all_pass() -> None:
+    """Output with no failure signals (all tests pass) is rejected."""
+    output = (
+        "tests/test_core.py::test_add PASSED\n"
+        "tests/test_core.py::test_sub PASSED\n"
+        "tests/test_core.py::test_mul PASSED\n"
+        "======================== 10 passed in 1.23s ========================\n"
+        "Some extra padding to make it over 200 chars. " * 5
+    )
+    assert _is_valid_test_output(output) is False
+
+
 # ---------------------------------------------------------------------------
 # Exp-11: generate_issue_from_symptom — broken test_output triggers fallback
 # ---------------------------------------------------------------------------
@@ -3196,7 +3211,7 @@ def test__extract_failed_test_names_empty() -> None:
 # ---------------------------------------------------------------------------
 
 def test__run_tests_baseline_diffing(tmp_path: Path) -> None:
-    """All failures (including pre-existing) are included in output."""
+    """Pre-existing failures are deselected; only mutation-induced failures appear."""
     import subprocess
 
     subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
@@ -3226,23 +3241,23 @@ def test__run_tests_baseline_diffing(tmp_path: Path) -> None:
 
     output = _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
     assert output is not None
-    assert "test_preexisting_broken" in output
+    assert "test_add" in output
     assert "failed" in output.lower()
 
 
 def test__baseline_diffing_no_substring_collision(tmp_path: Path) -> None:
-    """Without baseline diffing, all failures appear in output."""
+    """Pre-existing failure is deselected; mutation-induced failure still runs."""
     import subprocess
 
     subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
     subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=True)
 
-    (tmp_path / "module.py").write_text("def add(a, b):\n    return a + b\n\ndef add_numbers(a, b):\n    return a + b\n")
+    (tmp_path / "module.py").write_text("def add(a, b):\n    return a + b\n\ndef multiply(a, b):\n    return a * b\n")
     (tmp_path / "test_module.py").write_text(
-        "from module import add, add_numbers\n\n"
-        "def test_add():\n    assert False\n\n"
-        "def test_add_numbers():\n    assert add_numbers(1, 2) == 3\n"
+        "from module import add, multiply\n\n"
+        "def test_preexisting_broken():\n    assert False\n\n"
+        "def test_multiply():\n    assert multiply(2, 3) == 6\n"
     )
     subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
     subprocess.run(["git", "commit", "-m", "initial"], cwd=tmp_path, capture_output=True, check=True)
@@ -3250,9 +3265,9 @@ def test__baseline_diffing_no_substring_collision(tmp_path: Path) -> None:
         ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True,
     ).stdout.strip()
 
-    (tmp_path / "module.py").write_text("def add(a, b):\n    return a + b\n\ndef add_numbers(a, b):\n    return 0  # always wrong\n")
+    (tmp_path / "module.py").write_text("def add(a, b):\n    return a + b\n\ndef multiply(a, b):\n    return 0\n")
     subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
-    subprocess.run(["git", "commit", "-m", "buggy add_numbers"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "buggy multiply"], cwd=tmp_path, capture_output=True, check=True)
     buggy_sha = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True,
     ).stdout.strip()
@@ -3261,13 +3276,103 @@ def test__baseline_diffing_no_substring_collision(tmp_path: Path) -> None:
 
     output = _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
     assert output is not None
-    assert "test_add_numbers" in output
-    assert "test_add" in output
+    assert "test_multiply" in output
 
 
 # ---------------------------------------------------------------------------
 # Exp-15: tone calibration
 # ---------------------------------------------------------------------------
+
+def test_run_tests_deselects_preexisting_failures(tmp_path: Path) -> None:
+    """Pre-existing failures are deselected so only mutation-induced failures appear."""
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=True)
+
+    (tmp_path / "module.py").write_text("def add(a, b):\n    return a + b\n")
+    (tmp_path / "test_module.py").write_text(
+        "from module import add\n\n"
+        "def test_add():\n    assert add(1, 2) == 3\n\n"
+        "def test_preexisting_broken():\n    assert False\n"
+    )
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "initial with broken test"], cwd=tmp_path, capture_output=True, check=True)
+
+    (tmp_path / "module.py").write_text("def add(a, b):\n    return a - b\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "buggy"], cwd=tmp_path, capture_output=True, check=True)
+    buggy_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    subprocess.run(["git", "checkout", "HEAD~1"], cwd=tmp_path, capture_output=True, check=True)
+
+    from unittest.mock import patch as mock_patch
+
+    original_run = subprocess.run
+    test_cmds_used: list = []
+
+    def tracking_run(cmd, **kwargs):
+        if isinstance(cmd, list) and "pytest" in str(cmd) and "--deselect" not in str(cmd) and "--tb=no" not in str(cmd):
+            pass
+        if isinstance(cmd, list) and "--deselect" in str(cmd):
+            test_cmds_used.append(cmd)
+        return original_run(cmd, **kwargs)
+
+    with mock_patch("swebenchify.synthesizer.subprocess.run", side_effect=tracking_run):
+        _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
+
+    assert any("--deselect" in str(c) for c in test_cmds_used), \
+        f"Expected --deselect in test commands, got: {test_cmds_used}"
+    deselect_args = [arg for cmd in test_cmds_used for arg in cmd if "--deselect=" in str(arg)]
+    assert any("test_preexisting_broken" in arg for arg in deselect_args)
+
+
+def test_run_tests_no_deselect_when_baseline_clean(tmp_path: Path) -> None:
+    """When baseline has no failures, no --deselect args are added."""
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=True)
+
+    (tmp_path / "module.py").write_text("def add(a, b):\n    return a + b\n")
+    (tmp_path / "test_module.py").write_text(
+        "from module import add\n\n"
+        "def test_add():\n    assert add(1, 2) == 3\n"
+    )
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=tmp_path, capture_output=True, check=True)
+
+    (tmp_path / "module.py").write_text("def add(a, b):\n    return a - b\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "buggy"], cwd=tmp_path, capture_output=True, check=True)
+    buggy_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    subprocess.run(["git", "checkout", "HEAD~1"], cwd=tmp_path, capture_output=True, check=True)
+
+    from unittest.mock import patch as mock_patch
+
+    original_run = subprocess.run
+    all_cmds: list = []
+
+    def tracking_run(cmd, **kwargs):
+        if isinstance(cmd, list):
+            all_cmds.append(cmd)
+        return original_run(cmd, **kwargs)
+
+    with mock_patch("swebenchify.synthesizer.subprocess.run", side_effect=tracking_run):
+        output = _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
+
+    deselect_cmds = [c for c in all_cmds if "--deselect" in str(c)]
+    assert len(deselect_cmds) == 0
+    assert output is not None
+    assert "FAILED" in output or "assert" in output.lower()
+
 
 def test_data_first_prompt_tone_calibration() -> None:
     """Data-first path uses matter-of-fact tone, not frustrated."""
