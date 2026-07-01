@@ -2536,7 +2536,8 @@ def test_generate_issue_from_symptom_data_first() -> None:
             repo_context={"version": "2.0", "lang_version": "3.11", "os_info": "Ubuntu 22.04"},
         ))
 
-    assert result.startswith("tests/test_parse.py::test_decode")
+    assert result.startswith("Decode")
+    assert "pytest tests/test_parse.py::test_decode" in result
     assert "UnicodeDecodeError" in result
     assert "```" in result
     assert "Environment:" in result
@@ -2570,7 +2571,8 @@ def test_generate_issue_from_symptom_data_first_fallback() -> None:
         ))
 
     assert "AssertionError" in result
-    assert result.startswith("tests/test_core.py::test_add")
+    assert result.startswith("Add")
+    assert "pytest tests/test_core.py::test_add" in result
 
 
 def test_generate_issue_from_symptom_with_social_context() -> None:
@@ -3480,7 +3482,8 @@ def test_data_first_no_llm_call() -> None:
         ))
 
     assert len(captured_prompts) == 0
-    assert result.startswith("tests/test_core.py::test_add")
+    assert result.startswith("Add")
+    assert "pytest tests/test_core.py::test_add" in result
     assert "##" not in result
 
 
