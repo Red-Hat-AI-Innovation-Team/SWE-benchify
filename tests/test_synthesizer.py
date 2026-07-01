@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import textwrap
 from pathlib import Path
 
@@ -2507,3 +2508,134 @@ def test_generate_issue_from_symptom_real_failure_uses_data_first() -> None:
     assert "FAILED" in result
     assert "AssertionError" in result
     assert "```" in result
+
+
+# ---------------------------------------------------------------------------
+# Exp-12: _run_tests_on_buggy_code — PYTHONPATH and pip install fallback
+# ---------------------------------------------------------------------------
+
+def test_run_tests_on_buggy_code_sets_pythonpath(tmp_path: Path) -> None:
+    """PYTHONPATH is set when running tests so repo source is importable."""
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=True)
+
+    (tmp_path / "module.py").write_text("def add(a, b):\n    return a + b\n")
+    (tmp_path / "test_module.py").write_text(
+        "from module import add\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+    )
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=tmp_path, capture_output=True, check=True)
+
+    (tmp_path / "module.py").write_text("def add(a, b):\n    return a - b\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "buggy"], cwd=tmp_path, capture_output=True, check=True)
+    buggy_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    from unittest.mock import patch as mock_patch
+
+    original_run = subprocess.run
+    env_used: dict = {}
+
+    def tracking_run(cmd, **kwargs):
+        if isinstance(cmd, list) and "pytest" in str(cmd):
+            env_used.update(kwargs.get("env", {}))
+        return original_run(cmd, **kwargs)
+
+    with mock_patch("swebenchify.synthesizer.subprocess.run", side_effect=tracking_run):
+        _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
+
+    assert "PYTHONPATH" in env_used
+    assert str(tmp_path) in env_used["PYTHONPATH"]
+
+
+def test_run_tests_on_buggy_code_pythonpath_src_layout(tmp_path: Path) -> None:
+    """When repo has src/ directory, PYTHONPATH includes src/ first."""
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=True)
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "module.py").write_text("def add(a, b):\n    return a + b\n")
+    (tmp_path / "test_module.py").write_text(
+        "from module import add\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+    )
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=tmp_path, capture_output=True, check=True)
+
+    (tmp_path / "src" / "module.py").write_text("def add(a, b):\n    return a - b\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "buggy"], cwd=tmp_path, capture_output=True, check=True)
+    buggy_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    from unittest.mock import patch as mock_patch
+
+    original_run = subprocess.run
+    env_used: dict = {}
+
+    def tracking_run(cmd, **kwargs):
+        if isinstance(cmd, list) and "pytest" in str(cmd):
+            env_used.update(kwargs.get("env", {}))
+        return original_run(cmd, **kwargs)
+
+    with mock_patch("swebenchify.synthesizer.subprocess.run", side_effect=tracking_run):
+        _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
+
+    assert "PYTHONPATH" in env_used
+    pythonpath = env_used["PYTHONPATH"]
+    parts = pythonpath.split(os.pathsep)
+    src_path = str(tmp_path / "src")
+    assert src_path in parts
+    assert str(tmp_path) in parts
+    assert parts.index(src_path) < parts.index(str(tmp_path))
+
+
+def test_run_tests_on_buggy_code_pip_install_fallback_order(tmp_path: Path) -> None:
+    """pip install tries with deps first, then --no-deps on failure."""
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=True)
+
+    (tmp_path / "setup.py").write_text("from setuptools import setup\nsetup(name='testpkg')\n")
+    (tmp_path / "module.py").write_text("def add(a, b):\n    return a + b\n")
+    (tmp_path / "test_module.py").write_text(
+        "from module import add\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+    )
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=tmp_path, capture_output=True, check=True)
+
+    (tmp_path / "module.py").write_text("def add(a, b):\n    return a - b\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "buggy"], cwd=tmp_path, capture_output=True, check=True)
+    buggy_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    from unittest.mock import patch as mock_patch
+
+    original_run = subprocess.run
+    pip_calls: list = []
+
+    def tracking_run(cmd, **kwargs):
+        if isinstance(cmd, list) and cmd and cmd[0] == "pip":
+            pip_calls.append(cmd)
+            if "--no-deps" not in cmd:
+                raise subprocess.CalledProcessError(1, cmd)
+        return original_run(cmd, **kwargs)
+
+    with mock_patch("swebenchify.synthesizer.subprocess.run", side_effect=tracking_run):
+        _run_tests_on_buggy_code(str(tmp_path), buggy_sha, "python")
+
+    assert len(pip_calls) == 2
+    assert "--no-deps" not in pip_calls[0]
+    assert "--no-deps" in pip_calls[1]
