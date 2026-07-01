@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -125,7 +128,9 @@ def compute_env_spec_hash(spec: GoEnvironmentSpec) -> str:
         "system_dependencies": sorted(spec.system_dependencies),
     }
     serialised = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(serialised.encode()).hexdigest()
+    digest = hashlib.sha256(serialised.encode()).hexdigest()
+    logger.debug("computed Go env_spec_hash=%s", digest[:12])
+    return digest
 
 
 def compute_python_env_spec_hash(spec: EnvironmentSpec) -> str:
@@ -142,7 +147,9 @@ def compute_python_env_spec_hash(spec: EnvironmentSpec) -> str:
         "base_image": spec.base_image,
     }
     serialised = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(serialised.encode()).hexdigest()
+    digest = hashlib.sha256(serialised.encode()).hexdigest()
+    logger.debug("computed Python env_spec_hash=%s", digest[:12])
+    return digest
 
 
 def compute_java_env_spec_hash(spec: EnvironmentSpec) -> str:
@@ -157,7 +164,9 @@ def compute_java_env_spec_hash(spec: EnvironmentSpec) -> str:
         "system_dependencies": sorted(spec.system_dependencies),
     }
     serialised = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(serialised.encode()).hexdigest()
+    digest = hashlib.sha256(serialised.encode()).hexdigest()
+    logger.debug("computed Java env_spec_hash=%s", digest[:12])
+    return digest
 
 
 @dataclass
@@ -201,7 +210,9 @@ def compute_rust_env_spec_hash(spec: RustEnvironmentSpec) -> str:
         "system_dependencies": sorted(spec.system_dependencies),
     }
     serialised = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(serialised.encode()).hexdigest()
+    digest = hashlib.sha256(serialised.encode()).hexdigest()
+    logger.debug("computed Rust env_spec_hash=%s", digest[:12])
+    return digest
 
 
 # Type alias used by pipeline code that accepts either language's spec.
@@ -216,6 +227,8 @@ def deserialize_env_spec(data: dict) -> AnyEnvironmentSpec:
     to empty strings.
     """
     language = data.get("language", "")
+    if not language:
+        logger.warning("missing language field in env spec data, defaulting to Go")
     if language == "go" or not language:
         valid = {k: v for k, v in data.items() if k in GoEnvironmentSpec.__dataclass_fields__}
         return GoEnvironmentSpec(**valid)
