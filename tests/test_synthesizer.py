@@ -941,9 +941,10 @@ def test_issue_description_no_file_leak() -> None:
         from swebenchify.synthesizer import generate_issue_description
         result = asyncio.run(generate_issue_description(bug_spec))
 
-    # First prompt is _bug_to_symptom; second is the issue generation
-    # Neither should contain file paths or function names
-    for p in captured_prompts:
+    # First prompt is _bug_to_symptom (may include file path for domain anchoring);
+    # second is the issue generation — must NOT contain file paths or function names
+    assert len(captured_prompts) >= 1
+    for p in captured_prompts[1:]:
         assert "src/internal/processor.py" not in p
         assert "process_data" not in p
     assert "Seeing an issue with" in result
@@ -2412,9 +2413,9 @@ def test_build_social_context_produces_references() -> None:
         ctx = _build_social_context(artifacts)
         if ctx:
             lines = [ln for ln in ctx.strip().split("\n") if ln.strip()]
-            assert len(lines) <= 2
+            assert len(lines) <= 1
             results.add(len(lines))
-    assert 1 in results or 2 in results
+    assert 1 in results
 
 
 def test_build_social_context_empty_artifacts() -> None:
@@ -2426,6 +2427,62 @@ def test_build_social_context_empty_artifacts() -> None:
     }
     result = _build_social_context(artifacts)
     assert result == ""
+
+
+# ---------------------------------------------------------------------------
+# _bug_to_symptom with file_path parameter
+# ---------------------------------------------------------------------------
+
+def test_bug_to_symptom_includes_file_context() -> None:
+    """When file_path is provided, the prompt anchors the symptom to that module."""
+    from unittest.mock import MagicMock, patch as mock_patch
+    import swebenchify.synthesizer as _synth
+
+    captured_prompts: list[str] = []
+    _RM = _synth.ResultMessage
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        msg = MagicMock(spec=_RM)
+        msg.content = [type("B", (), {"text": "logging breaks under heavy load"})()]
+        yield msg
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        result = asyncio.run(_synth._bug_to_symptom(
+            "wrong operator in log formatter",
+            file_path="src/flask/logging.py",
+        ))
+
+    assert len(captured_prompts) == 1
+    assert "logging" in captured_prompts[0]
+    assert "src/flask/logging.py" in captured_prompts[0]
+    assert result == "logging breaks under heavy load"
+
+
+def test_bug_to_symptom_no_file_path() -> None:
+    """Without file_path, no file context appears in the prompt."""
+    from unittest.mock import MagicMock, patch as mock_patch
+    import swebenchify.synthesizer as _synth
+
+    captured_prompts: list[str] = []
+    _RM = _synth.ResultMessage
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        msg = MagicMock(spec=_RM)
+        msg.content = [type("B", (), {"text": "broken parsing"})()]
+        yield msg
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        result = asyncio.run(_synth._bug_to_symptom("wrong operator in parser"))
+
+    assert len(captured_prompts) == 1
+    assert "module" not in captured_prompts[0].lower() or "module" in "wrong operator in parser"
+    assert result == "broken parsing"
 
 
 # ---------------------------------------------------------------------------
