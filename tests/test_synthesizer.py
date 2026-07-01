@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from swebenchify.synthesizer import (
+    _align_indentation,
     BugPlan,
     BugSpec,
     SynthesisResult,
@@ -2423,25 +2424,16 @@ def test_mine_social_artifacts_no_repo(tmp_path: Path) -> None:
 # H2: _build_social_context
 # ---------------------------------------------------------------------------
 
-def test_build_social_context_produces_natural_refs() -> None:
-    """_build_social_context produces short, natural social references."""
-    import random
-    random.seed(42)
+def test_build_social_context_disabled() -> None:
+    """_build_social_context is disabled and always returns empty string."""
     artifacts = {
         "contributors": ["Alice"],
         "shas": ["abc1234"],
         "issues": ["42"],
         "branches": ["main", "develop"],
     }
-    results = set()
     for _ in range(50):
-        r = _build_social_context(artifacts)
-        if r:
-            results.add(r.strip())
-    assert len(results) > 0
-    for r in results:
-        assert "cc abc1234" in r or "cc @Alice" in r or "see also #42" in r
-        assert "branch" not in r
+        assert _build_social_context(artifacts) == ''
 
 
 def test_build_social_context_empty_artifacts() -> None:
@@ -3646,3 +3638,26 @@ def test_test_generation_prompt_hard_constraint() -> None:
     assert "MUST NOT add any new" in prompt
     assert "will be validated and rejected" in prompt
     assert "AT MOST one new test function" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# _align_indentation
+# ---------------------------------------------------------------------------
+
+def test_align_indentation_fixes_mismatch() -> None:
+    original = "    def foo():\n        return 1"
+    buggy = "def foo():\n    return 2"
+    result = _align_indentation(original, buggy)
+    assert result == "    def foo():\n        return 2"
+
+
+def test_align_indentation_noop_when_matching() -> None:
+    original = "    def foo():\n        return 1\n"
+    buggy = "    def foo():\n        return 2\n"
+    result = _align_indentation(original, buggy)
+    assert result == buggy
+
+
+def test_align_indentation_empty_code() -> None:
+    assert _align_indentation("", "def foo(): pass") == "def foo(): pass"
+    assert _align_indentation("def foo(): pass", "") == ""

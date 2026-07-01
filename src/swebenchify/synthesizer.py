@@ -1131,6 +1131,9 @@ def _parse_bug_response(text: str, target: dict) -> BugSpec | None:
             lines = lines[:-1]
         buggy_code = "\n".join(lines)
 
+    # Auto-correct indentation to match original
+    buggy_code = _align_indentation(target['source'], buggy_code)
+
     if buggy_code == target["source"]:
         logger.warning("LLM returned identical code — no bug introduced")
         return None
@@ -1149,6 +1152,41 @@ def _parse_bug_response(text: str, target: dict) -> BugSpec | None:
         bug_category=category,
         secondary_changes=secondary_changes,
     )
+
+
+def _align_indentation(original_code: str, buggy_code: str) -> str:
+    """Align buggy_code indentation to match original_code."""
+    orig_lines = original_code.splitlines()
+    buggy_lines = buggy_code.splitlines()
+    if not orig_lines or not buggy_lines:
+        return buggy_code
+
+    orig_indent = 0
+    for line in orig_lines:
+        if line.strip():
+            orig_indent = len(line) - len(line.lstrip())
+            break
+
+    buggy_indent = 0
+    for line in buggy_lines:
+        if line.strip():
+            buggy_indent = len(line) - len(line.lstrip())
+            break
+
+    if orig_indent == buggy_indent:
+        return buggy_code
+
+    diff = orig_indent - buggy_indent
+    adjusted = []
+    for line in buggy_lines:
+        if not line.strip():
+            adjusted.append(line)
+        elif diff > 0:
+            adjusted.append(' ' * diff + line)
+        else:
+            remove = min(abs(diff), len(line) - len(line.lstrip()))
+            adjusted.append(line[remove:])
+    return '\n'.join(adjusted)
 
 
 def _parse_secondary_changes(text: str) -> list[SecondaryChange]:
@@ -1380,6 +1418,7 @@ def _mine_social_artifacts(repo_path: str) -> dict[str, list[str]]:
 
 def _build_social_context(artifacts: dict[str, list[str]]) -> str:
     """Build social context string from mined artifacts."""
+    return ''
     templates: list[str] = []
 
     if artifacts.get('shas'):
@@ -2720,21 +2759,21 @@ async def synthesize_repo(
             )
 
             if mutated_content == original_content:
-                logger.warning("  Skipped — could not apply mutation to file")
+                logger.warning('  Mutation could not be applied, retrying (%d/2)', attempt + 1)
                 bug_spec = None
-                break
+                continue
 
             if not _validate_mutation_parses(mutated_content, language):
-                logger.warning("  Skipped — mutated file does not parse (%s)", language)
+                logger.warning('  Mutation does not parse (%s), retrying (%d/2)', language, attempt + 1)
                 bug_spec = None
-                break
+                continue
 
             orig_stripped = [ln.strip() for ln in original_content.splitlines() if ln.strip()]
             mut_stripped = [ln.strip() for ln in mutated_content.splitlines() if ln.strip()]
             if orig_stripped == mut_stripped:
-                logger.warning("  Skipped — mutation is whitespace-only (no semantic change)")
+                logger.warning('  Mutation is whitespace-only, retrying (%d/2)', attempt + 1)
                 bug_spec = None
-                break
+                continue
 
             mutated_content = _normalize_test_whitespace(mutated_content, original_content)
 
