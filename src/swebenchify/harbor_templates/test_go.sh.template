@@ -20,11 +20,11 @@ git apply /tests/test.patch 2>&1 || {{
 # --- Phase 2: Run tests ---
 # Capture test output for grading
 LOG_FILE=$(mktemp)
-exec > >(tee "$LOG_FILE") 2>&1
 
 echo '>>>>> Start Test Output'
 
-{test_command} 2>&1 || true
+{test_command} > "$LOG_FILE" 2>&1 || true
+cat "$LOG_FILE"
 
 echo '>>>>> End Test Output'
 
@@ -55,7 +55,7 @@ print('\n'.join(p2p))
 ALL_PASS=1
 while IFS= read -r test_name; do
     [ -z "$test_name" ] && continue
-    if ! grep -q "--- PASS: ${{test_name}}" "$LOG_FILE" 2>/dev/null; then
+    if ! grep -q -- "--- PASS: ${{test_name}}" "$LOG_FILE" 2>/dev/null; then
         ALL_PASS=0
         break
     fi
@@ -64,7 +64,7 @@ done <<< "$FAIL_TO_PASS"
 # Check if all PASS_TO_PASS tests still pass
 while IFS= read -r test_name; do
     [ -z "$test_name" ] && continue
-    if grep -q "--- FAIL: ${{test_name}}" "$LOG_FILE" 2>/dev/null; then
+    if grep -q -- "--- FAIL: ${{test_name}}" "$LOG_FILE" 2>/dev/null; then
         ALL_PASS=0
         break
     fi

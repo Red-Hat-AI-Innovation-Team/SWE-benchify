@@ -20,11 +20,11 @@ git apply /tests/test.patch 2>&1 || {{
 # --- Phase 2: Run tests ---
 # Capture test output for grading
 LOG_FILE=$(mktemp)
-exec > >(tee "$LOG_FILE") 2>&1
 
 echo '>>>>> Start Test Output'
 
-{test_command} 2>&1 || true
+{test_command} > "$LOG_FILE" 2>&1 || true
+cat "$LOG_FILE"
 
 echo '>>>>> End Test Output'
 
