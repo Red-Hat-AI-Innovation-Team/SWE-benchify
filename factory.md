@@ -37,7 +37,7 @@ python -m mypy ./
 ## Project Eval
 
 - name: synthetic_detectability
-  command: python3 /tmp/eval_synthesizer.py
+  command: python3 scripts/eval_synthesizer.py
   parse: json
   weight: 1.0
   timeout: 1800
