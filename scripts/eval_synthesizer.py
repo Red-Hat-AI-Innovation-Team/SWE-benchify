@@ -193,6 +193,13 @@ def _check_strings(instance: dict) -> tuple[bool, str]:
 
 def _check_patch_applies(instance: dict, repo_path: str) -> tuple[bool, str]:
     """Tier 1: verify patches apply cleanly via git apply --check."""
+    base = instance.get("base_commit", "")
+    if base:
+        subprocess.run(
+            ["git", "checkout", "--quiet", "--force", base],
+            cwd=repo_path, capture_output=True,
+        )
+
     for field, label in [("patch", "patch"), ("test_patch", "test_patch")]:
         content = instance.get(field, "") or ""
         if not content.strip():
