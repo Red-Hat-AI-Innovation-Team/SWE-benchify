@@ -835,6 +835,7 @@ async def introduce_bug(
     target: dict,
     model: str = "sonnet",
     related_files: list[dict[str, str]] | None = None,
+    bug_plan: BugPlan | None = None,
 ) -> BugSpec | None:
     """Use Claude to introduce a realistic bug into a function.
 
@@ -859,6 +860,14 @@ async def introduce_bug(
         for rf in related_files[:2]:
             parts.append(f"File `{rf['file']}` (references {function_name}):\n```{language}\n{rf['snippet']}\n```")
         related_context = "\n\nRELATED CODE that uses this function:\n" + "\n\n".join(parts)
+
+    bug_plan_context = ""
+    if bug_plan is not None:
+        plan_parts = [f"\n\nMULTI-FILE BUG PLAN: {bug_plan.primary_description}"]
+        for secondary in bug_plan.secondary_descriptions:
+            plan_parts.append(f"Secondary change needed in {secondary['file']}: {secondary['plan']}")
+        plan_parts.append("Your bug MUST include the secondary changes described above. Show ALL modified files in your response.")
+        bug_plan_context = "\n".join(plan_parts)
 
     prompt = f"""You are a code mutation expert. Given the following {language} function, introduce ONE subtle, realistic bug. The bug should be the kind a developer might actually make — NOT a trivial syntax error.
 
@@ -888,6 +897,7 @@ Here is the function:
 {source}
 ```
 {related_context}
+{bug_plan_context}
 
 Return your response in EXACTLY this format:
 
@@ -1274,8 +1284,8 @@ async def generate_issue_from_symptom(
     name, or any code. This prevents the issue from betraying root-cause
     knowledge.
 
-    After initial generation, runs a critique-rewrite loop: a second LLM
-    call detects synthetic tells, and a third rewrites flagged sections.
+    Uses a character budget and style-conditioned generation to produce
+    concise, natural-sounding issue text in a single LLM call.
 
     Args:
         symptom: One-sentence user-facing symptom from _bug_to_symptom().
@@ -1367,11 +1377,11 @@ _BANNED_OPENERS = [
 ]
 
 _REPLACEMENT_OPENERS = [
-    'Has anyone else hit this?',
-    'Bug:',
-    'This broke after',
-    'Getting a weird',
-    'Not sure if this is right but',
+    'Has anyone seen this before?',
+    'Possible bug —',
+    'Something broke after the latest update.',
+    'Getting unexpected behavior.',
+    'Not sure if this is a bug, but...',
 ]
 
 
@@ -1391,8 +1401,7 @@ def _enforce_banned_openers(text: str) -> str:
     for banned in _BANNED_OPENERS:
         if first_lower.startswith(banned):
             replacement = random.choice(_REPLACEMENT_OPENERS)
-            rest = first_line.strip()[len(banned):].lstrip(' ,.-:')
-            lines[first_content_idx] = f"{replacement} {rest}" if rest else replacement
+            lines[first_content_idx] = replacement
             break
 
     return '\n'.join(lines)
@@ -1436,7 +1445,14 @@ def _truncate_issue(text: str) -> str:
                 continue
             continue
 
-    return '\n'.join(result_lines)
+    result = '\n'.join(result_lines)
+    if len(result) > 1500:
+        boundary = result.rfind('. ', 0, 1500)
+        if boundary != -1:
+            result = result[:boundary + 1]
+        else:
+            result = result[:1500]
+    return result
 
 
 async def generate_issue_description(
@@ -2258,6 +2274,7 @@ async def synthesize_repo(
         for attempt in range(3):
             bug_spec = await introduce_bug(
                 target, model=model, related_files=related_files,
+                bug_plan=bug_plan,
             )
             if bug_spec is None:
                 logger.warning("  Skipped — LLM did not produce a valid mutation")
