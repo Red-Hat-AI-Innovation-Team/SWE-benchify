@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
 import glob
 import json
 import logging
@@ -463,16 +464,14 @@ def main():
 
     random.seed(args.seed if args.seed is not None else 42 + round_num)
 
-    all_synth_instances = []
-    all_real_samples = []
-    structural_failures = []
-
-    # ── Phase 1: Synthesize + structural check per repo (bail early) ──
+    # ── Clone repos upfront (sequential to avoid git races) ──
     for target in targets:
-        repo_slug = target["repo_slug"]
-        err(f"\n── {repo_slug} ──")
+        ensure_repo(target)
 
-        repo_path = ensure_repo(target)
+    def _synthesize_target(target: dict, all_real: list[dict]) -> dict:
+        repo_slug = target["repo_slug"]
+        repo_path = target["repo_path"]
+        err(f"\n── {repo_slug} ──")
 
         base_commit = target.get('base_commit') or pick_base_commit(repo_slug, all_real)
         err(f"  Base commit: {base_commit[:12]}")
@@ -494,25 +493,57 @@ def main():
         synth_instances = [asdict(c) for c in candidates]
         err(f"  {len(synth_instances)} synthetic instances generated")
 
+        failures = []
         for inst in synth_instances:
             passed, reason = validate_instance(inst, repo_path)
             if not passed:
                 iid = inst.get("instance_id", "unknown")
-                structural_failures.append((iid, reason))
+                failures.append((iid, reason))
                 err(f"  VALIDATION FAIL: {iid} — {reason}")
-
-        all_synth_instances.extend(synth_instances)
-
-        # Bail before synthesizing remaining repos
-        if structural_failures:
-            err("\n  Structural gate failed — skipping remaining repos")
-            break
 
         repo_real = [i for i in all_real if i["repo"] == repo_slug]
         n_real = min(target["n_real"], len(repo_real))
-        real_samples = random.sample(repo_real, n_real)
-        all_real_samples.extend(real_samples)
+        real_samples = random.sample(repo_real, n_real) if repo_real else []
         err(f"  Sampled {len(real_samples)} real instances")
+
+        return {
+            "synth_instances": synth_instances,
+            "real_samples": real_samples,
+            "failures": failures,
+            "repo_slug": repo_slug,
+        }
+
+    # ── Phase 1: Synthesize all repos in parallel ──
+    all_synth_instances = []
+    all_real_samples = []
+    structural_failures = []
+
+    if len(targets) == 1:
+        results = [_synthesize_target(targets[0], all_real)]
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(targets)) as executor:
+            futures = {
+                executor.submit(_synthesize_target, t, all_real): t
+                for t in targets
+            }
+            results = []
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    results.append(future.result())
+                except Exception as exc:
+                    t = futures[future]
+                    err(f"  ERROR: {t['repo_slug']} synthesis failed: {exc}")
+                    results.append({
+                        "synth_instances": [],
+                        "real_samples": [],
+                        "failures": [(t["repo_slug"], str(exc))],
+                        "repo_slug": t["repo_slug"],
+                    })
+
+    for r in results:
+        all_synth_instances.extend(r["synth_instances"])
+        all_real_samples.extend(r["real_samples"])
+        structural_failures.extend(r["failures"])
 
     n_s = len(all_synth_instances)
     n_r = len(all_real_samples)
