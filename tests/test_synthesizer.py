@@ -1777,6 +1777,29 @@ def test_find_test_file_importing_not_found(tmp_path: Path) -> None:
     assert result is None
 
 
+def test_find_test_file_importing_prefers_specific_over_parent(tmp_path: Path) -> None:
+    """Specific module import is preferred even when a parent-only match sorts first."""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_async.py").write_text(
+        "from flask import Flask\n\ndef test_app(): pass\n"
+    )
+    (tmp_path / "tests" / "test_basic.py").write_text(
+        "from flask.debughelpers import DebugFilesKeyError\n\ndef test_debug(): pass\n"
+    )
+    result = _find_test_file_importing(tmp_path, "flask.debughelpers")
+    assert result == "tests/test_basic.py"
+
+
+def test_find_test_file_importing_falls_back_to_parent(tmp_path: Path) -> None:
+    """When no specific import exists, falls back to parent package match."""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_views.py").write_text(
+        "from flask import Flask, request\n\ndef test_request(): pass\n"
+    )
+    result = _find_test_file_importing(tmp_path, "flask.debughelpers")
+    assert result == "tests/test_views.py"
+
+
 # ---------------------------------------------------------------------------
 # _discover_repo_modules
 # ---------------------------------------------------------------------------
@@ -2399,23 +2422,15 @@ def test_mine_social_artifacts_no_repo(tmp_path: Path) -> None:
 # H2: _build_social_context
 # ---------------------------------------------------------------------------
 
-def test_build_social_context_produces_references() -> None:
-    import random as _random
-    _random.seed(42)
+def test_build_social_context_disabled() -> None:
+    """_build_social_context is disabled and always returns empty string."""
     artifacts = {
         "contributors": ["Alice", "Bob"],
         "shas": ["abc1234"],
         "issues": ["42"],
         "branches": ["main", "develop"],
     }
-    results = set()
-    for _ in range(50):
-        ctx = _build_social_context(artifacts)
-        if ctx:
-            lines = [ln for ln in ctx.strip().split("\n") if ln.strip()]
-            assert len(lines) <= 1
-            results.add(len(lines))
-    assert 1 in results
+    assert _build_social_context(artifacts) == ""
 
 
 def test_build_social_context_empty_artifacts() -> None:

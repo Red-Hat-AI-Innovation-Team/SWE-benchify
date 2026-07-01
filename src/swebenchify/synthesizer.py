@@ -992,6 +992,22 @@ async def introduce_bug(
 
 Categories include: off-by-one errors, wrong variable usage, missing null/bounds check, incorrect operator, swapped arguments, wrong return value, missing edge case handling, incorrect string formatting, race condition setup, wrong comparison.
 
+PREFERRED mutation types (these fool detection the best):
+- Condition inversions: `not in` → `in`, `>` → `>=`, `and` → `or`, `is None` → `is not None`
+- Wrong variable in similar scope: using `other_list` where `this_list` was intended, when both are in scope
+- Off-by-one errors: wrong loop bound (`range(n)` → `range(n-1)`), wrong slice index
+- Missing early return: removing a guard clause so execution falls through to the wrong code path
+- Swapped arguments: reordering args to a function call where both have the same type
+
+AVOID these mutation types (they are detectably artificial):
+- Return type changes (int → bool, str → None)
+- Attribute/method access changes (obj.x → obj.y, logger → logger.name)
+- Single-value constant swaps (True → False, 0 → 1, '' → None)
+- Type constructor changes (list() → dict(), set() → frozenset())
+- Adding entirely new code paths, conditions, or branches that didn't exist before
+
+Plausibility check: before finalizing, ask yourself — could this bug arise from a routine refactoring where a developer is moving, renaming, or reorganizing existing code? If not, pick a different mutation.
+
 CRITICAL CONSTRAINTS on bug subtlety:
 - The bug MUST NOT break the function's basic contract. If the function adds two numbers, don't make it subtract — that would be caught immediately by any test.
 - The bug should only manifest with specific inputs, edge cases, or unusual conditions. Think: boundary values, empty collections, negative numbers, Unicode strings, concurrent access, large inputs.
@@ -1384,6 +1400,7 @@ def _mine_social_artifacts(repo_path: str) -> dict[str, list[str]]:
 
 def _build_social_context(artifacts: dict[str, list[str]]) -> str:
     """Build social context string from mined artifacts."""
+    return ''
     templates: list[str] = []
 
     if artifacts.get("shas"):
@@ -1874,17 +1891,25 @@ def _source_to_module_name(source_file: str) -> str | None:
 
 
 def _find_test_file_importing(root: Path, module_name: str) -> str | None:
-    """Find a test_*.py file that imports the given module (or its parent package)."""
+    """Find a test_*.py file that imports the given module (or its parent package).
+
+    Uses two-pass matching: first scans for specific module imports, then
+    falls back to parent package imports.  This prevents alphabetically-first
+    files that only match the parent pattern from shadowing files that match
+    the specific module.
+    """
     parts = module_name.split(".")
-    import_patterns = [
-        re.compile(rf"^\s*(?:from|import)\s+{re.escape(module_name)}\b", re.MULTILINE),
-    ]
+    specific_pat = re.compile(
+        rf"^\s*(?:from|import)\s+{re.escape(module_name)}\b", re.MULTILINE,
+    )
+    parent_pat = None
     if len(parts) > 1:
         parent = ".".join(parts[:-1])
-        import_patterns.append(
-            re.compile(rf"^\s*from\s+{re.escape(parent)}\s+import\b", re.MULTILINE),
+        parent_pat = re.compile(
+            rf"^\s*from\s+{re.escape(parent)}\s+import\b", re.MULTILINE,
         )
 
+    test_files: list[tuple[Path, str]] = []
     for test_dir_name in ("tests", "test"):
         test_dir = root / test_dir_name
         if not test_dir.is_dir():
@@ -1894,9 +1919,17 @@ def _find_test_file_importing(root: Path, module_name: str) -> str | None:
                 content = f.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            for pat in import_patterns:
-                if pat.search(content):
-                    return str(f.relative_to(root))
+            test_files.append((f, content))
+
+    for f, content in test_files:
+        if specific_pat.search(content):
+            return str(f.relative_to(root))
+
+    if parent_pat is not None:
+        for f, content in test_files:
+            if parent_pat.search(content):
+                return str(f.relative_to(root))
+
     return None
 
 
