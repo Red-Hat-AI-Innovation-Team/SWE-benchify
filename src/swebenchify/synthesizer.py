@@ -3293,9 +3293,9 @@ async def synthesize_repo(
             finally:
                 patch_file.unlink(missing_ok=True)
 
-        # Restore buggy commit for candidate creation
+        # Restore base_commit for next iteration
         subprocess.run(
-            ['git', 'checkout', '--quiet', buggy_commit],
+            ['git', 'checkout', '--quiet', base_commit],
             cwd=repo_path, capture_output=True, text=True,
         )
 
