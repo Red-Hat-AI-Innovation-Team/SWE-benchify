@@ -2314,7 +2314,7 @@ def _create_buggy_commit_multi(
 
 _TEST_COMMANDS: dict[str, list[list[str]]] = {
     "python": [
-        ["python", "-m", "pytest", "--tb=short", "-q"],
+        ["python", "-m", "pytest", "--tb=long", "-q"],
         ["python", "-m", "unittest", "discover", "-s", "tests"],
     ],
     "go": [["go", "test", "./..."]],
@@ -2355,13 +2355,32 @@ def _run_tests_on_buggy_code(
     # Install the target package so imports resolve during test runs
     root = Path(repo_path)
     if any((root / cfg).is_file() for cfg in ("pyproject.toml", "setup.py", "setup.cfg")):
+        installed = False
         try:
             subprocess.run(
-                ["pip", "install", "-e", ".", "--quiet", "--no-deps"],
-                cwd=repo_path, capture_output=True, text=True, timeout=60,
+                ["pip", "install", "-e", ".", "--quiet"],
+                cwd=repo_path, capture_output=True, text=True, timeout=120,
             )
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            logger.debug("  pip install -e . failed, proceeding anyway")
+            installed = True
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                FileNotFoundError, OSError):
+            pass
+        if not installed:
+            try:
+                subprocess.run(
+                    ["pip", "install", "-e", ".", "--quiet", "--no-deps"],
+                    cwd=repo_path, capture_output=True, text=True, timeout=60,
+                )
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                logger.debug("  pip install -e . failed, proceeding anyway")
+
+    # Set PYTHONPATH so the repo's source is importable even without pip install
+    test_env = os.environ.copy()
+    src_dir = os.path.join(repo_path, "src")
+    if os.path.isdir(src_dir):
+        test_env["PYTHONPATH"] = src_dir + os.pathsep + repo_path + os.pathsep + test_env.get("PYTHONPATH", "")
+    else:
+        test_env["PYTHONPATH"] = repo_path + os.pathsep + test_env.get("PYTHONPATH", "")
 
     test_output: str | None = None
     try:
@@ -2370,7 +2389,7 @@ def _run_tests_on_buggy_code(
             try:
                 result = subprocess.run(
                     cmd, cwd=repo_path, capture_output=True, text=True,
-                    timeout=timeout,
+                    timeout=timeout, env=test_env,
                 )
                 combined = (result.stdout + "\n" + result.stderr).strip()
                 if result.returncode != 0 and combined:
