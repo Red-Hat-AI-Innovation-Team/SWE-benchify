@@ -998,9 +998,9 @@ PREFERRED bug types (choose one):
 - Stale reference: use an old variable name that was valid before a rename
 
 AVOID these (too easy to detect as artificial):
-- Simple condition inversions (> to <, True to False)
+- ANY boolean or condition inversion (> to <, == to !=, in to not in, True to False, and to or)
 - Removing or commenting out a single line
-- Changing a single character in a string literal
+- Changing a single constant, literal, or return value
 - Off-by-one errors in simple ranges
 
 The bug must look like something that would happen during a real refactoring or API migration, not a deliberate sabotage.
@@ -2095,6 +2095,50 @@ Return the COMPLETE modified test file."""
     return generate_patch(modified_content, original_test_content, test_file)
 
 
+def _build_programmatic_test_patch(test_output: str, repo_path: str) -> str:
+    """Build a minimal test_patch by adding a docstring to the failing test."""
+    m = _FAILED_TEST_PATTERN.search(test_output)
+    if not m:
+        return ''
+
+    test_id = m.group(1)
+    parts = test_id.split('::')
+    test_file = parts[0]
+    # Get the bare function name: last part, strip parametrize suffix
+    test_func = parts[-1].split('[')[0]
+
+    test_path = Path(repo_path) / test_file
+    if not test_path.exists():
+        return ''
+
+    try:
+        content = test_path.read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return ''
+
+    lines = content.splitlines(keepends=True)
+
+    func_pat = re.compile(rf'(\s*)def\s+{re.escape(test_func)}\s*\(')
+    for i, line in enumerate(lines):
+        match = func_pat.match(line)
+        if not match:
+            continue
+        indent = match.group(1)
+        body_indent = indent + '    '
+        j = i + 1
+        while j < len(lines) and not lines[j].strip():
+            j += 1
+        if j < len(lines) and ('"""' in lines[j] or "'''" in lines[j]):
+            return ''
+        description = test_func.replace('test_', '', 1).replace('_', ' ')
+        docstring_line = f'{body_indent}"""Test {description}."""\n'
+        modified = lines[:i + 1] + [docstring_line] + lines[i + 1:]
+        modified_content = ''.join(modified)
+        return generate_patch(modified_content, content, test_file)
+
+    return ''
+
+
 async def _generate_test_patch_new(
     bug_spec: BugSpec,
     repo_path: str,
@@ -2965,7 +3009,7 @@ async def synthesize_repo(
             dataset_examples=dataset_examples,
         )
 
-        test_patch = ''
+        test_patch = _build_programmatic_test_patch(test_output, repo_path) if test_output else ''
 
         synthesis_result = SynthesisResult(
             bug_spec=bug_spec,
