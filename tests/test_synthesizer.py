@@ -10,6 +10,7 @@ import pytest
 
 from swebenchify.synthesizer import (
     _align_indentation,
+    _preserve_unchanged_lines,
     BugPlan,
     BugSpec,
     SynthesisResult,
@@ -3712,3 +3713,49 @@ def test_synthesize_repo_skips_candidate_without_test_failures() -> None:
             max_mutations=1,
         ))
         assert len(result) == 0
+
+
+# ---------------------------------------------------------------------------
+# _preserve_unchanged_lines
+# ---------------------------------------------------------------------------
+
+def test_preserve_unchanged_lines_fixes_trailing_spaces() -> None:
+    """Lines with identical stripped content but trailing whitespace are restored."""
+    original = "def foo():\n    return 1\n    x = 2"
+    buggy = "def foo():  \n    return 1  \n    x = 3"
+    result = _preserve_unchanged_lines(original, buggy)
+    lines = result.splitlines()
+    assert lines[0] == "def foo():"
+    assert lines[1] == "    return 1"
+    assert lines[2] == "    x = 3"
+
+
+def test_preserve_unchanged_lines_fixes_tab_space_mixing() -> None:
+    """Lines where tabs were swapped for spaces are restored from original."""
+    original = "\treturn 1\n\tx = 2"
+    buggy = "    return 1\n    x = 3"
+    result = _preserve_unchanged_lines(original, buggy)
+    lines = result.splitlines()
+    assert lines[0] == "\treturn 1"
+    assert lines[1] == "    x = 3"
+
+
+def test_preserve_unchanged_lines_no_change_needed() -> None:
+    """When buggy code already matches original whitespace, nothing changes."""
+    original = "def foo():\n    return 1"
+    buggy = "def foo():\n    return 2"
+    result = _preserve_unchanged_lines(original, buggy)
+    lines = result.splitlines()
+    assert lines[0] == "def foo():"
+    assert lines[1] == "    return 2"
+
+
+def test_preserve_unchanged_lines_identical() -> None:
+    """Identical code is returned unchanged."""
+    code = "def foo():\n    return 1"
+    assert _preserve_unchanged_lines(code, code) == code
+
+
+def test_preserve_unchanged_lines_empty() -> None:
+    """Empty inputs are handled gracefully."""
+    assert _preserve_unchanged_lines("", "") == ""
