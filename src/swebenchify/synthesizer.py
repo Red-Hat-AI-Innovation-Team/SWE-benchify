@@ -3227,10 +3227,11 @@ def _run_tests_on_buggy_code(
 
     test_output: str | None = None
     try:
-        cmds_to_try = [test_cmd] if test_cmd else [
+        generic_cmds = [
             [py_exe if c == "python" else c for c in t]
             for t in _TEST_COMMANDS.get(language, [])
         ]
+        cmds_to_try = ([test_cmd] + generic_cmds) if test_cmd else generic_cmds
         for cmd in cmds_to_try:
             if cmd is None:
                 continue
