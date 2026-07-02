@@ -10,6 +10,7 @@ import pytest
 
 from swebenchify.synthesizer import (
     _align_indentation,
+    _extract_test_functions,
     _preserve_unchanged_lines,
     BugPlan,
     BugSpec,
@@ -3550,3 +3551,66 @@ def test_preserve_unchanged_lines_identical() -> None:
 def test_preserve_unchanged_lines_empty() -> None:
     """Empty inputs are handled gracefully."""
     assert _preserve_unchanged_lines("", "") == ""
+
+
+# ---------------------------------------------------------------------------
+# _extract_test_functions — Rust
+# ---------------------------------------------------------------------------
+
+def test_extract_test_functions_rust() -> None:
+    source = textwrap.dedent("""\
+        use rayon::prelude::*;
+
+        #[test]
+        fn test_collect() {
+            let v: Vec<i32> = (0..10).collect();
+            assert_eq!(v.len(), 10);
+        }
+
+        fn helper() {
+            // not a test
+        }
+
+        #[test]
+        fn test_sum() {
+            let s: i32 = vec![1, 2, 3].par_iter().sum();
+            assert_eq!(s, 6);
+        }
+    """)
+    fns = _extract_test_functions(source, "rust")
+    assert len(fns) == 2
+    assert fns[0]["name"] == "test_collect"
+    assert fns[1]["name"] == "test_sum"
+    assert "#[test]" in fns[0]["source"]
+
+
+# ---------------------------------------------------------------------------
+# _extract_test_functions — Java
+# ---------------------------------------------------------------------------
+
+def test_extract_test_functions_java() -> None:
+    source = textwrap.dedent("""\
+        import org.junit.jupiter.api.Test;
+        import static org.junit.jupiter.api.Assertions.*;
+
+        public class FooTest {
+            @Test
+            public void testAdd() {
+                assertEquals(3, 1 + 2);
+            }
+
+            private void helper() {
+                // not a test
+            }
+
+            @Test
+            public void testSubtract() {
+                assertEquals(1, 3 - 2);
+            }
+        }
+    """)
+    fns = _extract_test_functions(source, "java")
+    assert len(fns) == 2
+    assert fns[0]["name"] == "testAdd"
+    assert fns[1]["name"] == "testSubtract"
+    assert "@Test" in fns[0]["source"]
