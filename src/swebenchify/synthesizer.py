@@ -404,10 +404,14 @@ def find_mutation_targets(
             lines = content.splitlines()
             functions = extractor(lines)
 
-            for func in functions[:max_functions]:
+            added = 0
+            for func in functions:
                 source_lines = func["source"].strip().splitlines()
                 if len(source_lines) < 8:
                     continue
+                if added >= max_functions:
+                    break
+                added += 1
                 targets.append({
                     "file": rel_path,
                     "function_name": func["function_name"],
