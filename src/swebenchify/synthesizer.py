@@ -3530,6 +3530,12 @@ async def synthesize_repo(
 
         test_patch = ''.join(test_patch_parts)
 
+        generated_tp = await generate_test_patch(
+            bug_spec, repo_path, language, model=model, test_output=test_output,
+        )
+        if generated_tp:
+            test_patch = generated_tp
+
         synthesis_result = SynthesisResult(
             bug_spec=bug_spec,
             patch=patch,
