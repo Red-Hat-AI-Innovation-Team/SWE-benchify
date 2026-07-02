@@ -437,10 +437,10 @@ def main():
                         help='Fast mode: 1 repo, 1 instance, skip Docker F2P and judge')
     parser.add_argument('--seed', type=int, default=None,
                         help='Random seed (default: 42 + round_num)')
-    parser.add_argument('--mode', choices=['generator', 'discriminator'],
+    parser.add_argument('--mode', choices=['generator', 'discriminator', 'adversarial'],
                         default='generator',
-                        help='Adversarial loop mode: optimize generator (evasion) '
-                             'or discriminator (detection)')
+                        help='generator: optimize evasion. discriminator: optimize detection. '
+                             'adversarial: auto-switch between phases based on state file.')
     parser.add_argument('--judge-prompt', type=str, default=None,
                         help='Path to custom judge system prompt file '
                              '(discriminator mode)')
@@ -448,6 +448,35 @@ def main():
                         help='Path to saved instances JSON (discriminator mode '
                              'reuses prior generator output instead of synthesizing)')
     args = parser.parse_args()
+
+    # Adversarial mode: resolve to generator or discriminator based on state file
+    ADVERSARIAL_STATE_PATH = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        '.factory', 'adversarial_state.json',
+    )
+    GENERATOR_THRESHOLD = 0.4
+    DISCRIMINATOR_THRESHOLD = 0.8
+
+    if args.mode == 'adversarial':
+        state = {'phase': 'generator', 'history': []}
+        if os.path.exists(ADVERSARIAL_STATE_PATH):
+            with open(ADVERSARIAL_STATE_PATH) as f:
+                state = json.load(f)
+
+        phase = state.get('phase', 'generator')
+        args.mode = phase
+
+        if phase == 'discriminator':
+            latest_instances = state.get('latest_instances_path')
+            if latest_instances and os.path.exists(latest_instances) and not args.instances:
+                args.instances = latest_instances
+                log.info("adversarial: discriminator phase, loading instances from %s", latest_instances)
+            elif not args.instances:
+                log.warning("adversarial: discriminator phase but no saved instances, falling back to generator")
+                args.mode = 'generator'
+
+        log.info("adversarial: running %s phase (gen_threshold=%.2f, disc_threshold=%.2f)",
+                 args.mode, GENERATOR_THRESHOLD, DISCRIMINATOR_THRESHOLD)
 
     if args.judge_prompt:
         global JUDGE_SYSTEM
@@ -888,6 +917,33 @@ def main():
             output["instances_path"] = instances_path
             log.info("saved %d instances to %s", len(all_synth_instances), instances_path)
         print(json.dumps(output))
+
+        # Adversarial state update: switch phase when threshold crossed
+        if os.path.exists(os.path.dirname(ADVERSARIAL_STATE_PATH)):
+            state = {'phase': 'generator', 'history': []}
+            if os.path.exists(ADVERSARIAL_STATE_PATH):
+                with open(ADVERSARIAL_STATE_PATH) as f:
+                    state = json.load(f)
+
+            entry = {
+                'round': round_num, 'mode': args.mode,
+                'score': round(factory_score, 3), 'repo_scores': repo_scores,
+            }
+            state.setdefault('history', []).append(entry)
+
+            if args.mode == 'generator' and factory_score >= GENERATOR_THRESHOLD:
+                state['phase'] = 'discriminator'
+                state['latest_instances_path'] = output.get('instances_path', '')
+                log.info("adversarial: generator score %.3f >= %.2f, switching to DISCRIMINATOR",
+                         factory_score, GENERATOR_THRESHOLD)
+            elif args.mode == 'discriminator' and factory_score >= DISCRIMINATOR_THRESHOLD:
+                state['phase'] = 'generator'
+                log.info("adversarial: discriminator score %.3f >= %.2f, switching to GENERATOR",
+                         factory_score, DISCRIMINATOR_THRESHOLD)
+
+            with open(ADVERSARIAL_STATE_PATH, 'w') as f:
+                json.dump(state, f, indent=2)
+            log.info("adversarial: state saved (phase=%s)", state['phase'])
     else:
         out_path = f'/tmp/synth-eval-results-r{round_num}-quick.json'
         with open(out_path, 'w') as f:

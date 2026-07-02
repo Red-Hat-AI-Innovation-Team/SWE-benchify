@@ -12,6 +12,12 @@ Generate synthetic SWE-bench instances that:
 
 Score = 0.7 × judge_evasion + 0.3 × diversity. Structural, F2P, and diversity failures gate the score to 0.0.
 
+Adversarial GAN loop: eval alternates between generator (optimize evasion) and discriminator (optimize detection) phases.
+Generator phase: optimize synthesizer code to fool the judge (score = evasion × f2p × 0.7 + diversity × 0.3).
+Discriminator phase: optimize judge prompt/logic to detect fakes (score = recall × specificity, multiplicative — no degenerate strategies).
+Phase switches when threshold is crossed (generator ≥ 0.4 → discriminator, discriminator ≥ 0.8 → generator).
+State tracked in .factory/adversarial_state.json.
+
 ## Language
 
 Python
@@ -38,11 +44,11 @@ python -m mypy ./
 ## Project Eval
 
 - name: synthetic_detectability
-  command: python3 scripts/eval_synthesizer.py
+  command: python3 scripts/eval_synthesizer.py --mode adversarial
   parse: json
   weight: 1.0
   timeout: 3600
-  description: Multi-language eval (Python, Go, Java, Rust). Gates: structural → patch applies → diversity → F2P/P2P Docker → judge. Score = 0.7 × judge_evasion + 0.3 × diversity.
+  description: Adversarial GAN loop. Generator phase optimizes evasion, discriminator phase optimizes detection. Auto-switches when thresholds crossed.
 
 ## Eval Weights
 
