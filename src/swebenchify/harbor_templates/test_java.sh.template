@@ -6,6 +6,10 @@ cd /testbed
 # Ensure git trusts the directory
 git config --global --add safe.directory /testbed
 
+# Capture agent's patch before any reverts (for analysis/dashboard)
+git diff HEAD > /logs/artifacts/candidate_patch.diff 2>/dev/null || true
+git diff HEAD --stat > /logs/artifacts/patch_stat.txt 2>/dev/null || true
+
 # --- Phase 1: Apply test patch ---
 # Anti-reward-hacking: revert ONLY test file modifications
 # Agent's source changes are preserved for grading

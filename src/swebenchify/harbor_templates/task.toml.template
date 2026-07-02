@@ -25,6 +25,8 @@ user = "root"
 network_mode = "{agent_network_mode}"
 {agent_allowed_hosts}
 
+artifacts = ["/logs/artifacts/candidate_patch.diff", "/logs/artifacts/patch_stat.txt", "/logs/verifier/report.json"]
+
 [environment]
 {environment_block}
 build_timeout_sec = 1200.0
