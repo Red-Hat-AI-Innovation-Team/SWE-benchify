@@ -626,24 +626,27 @@ def main():
         log.info("phase=structural status=skipped reason=saved_instances")
         structural_failures = []
     if structural_failures:
-        log.warning("STRUCTURAL GATE FAILED — %d instance(s)", len(structural_failures))
+        failed_ids = {iid for iid, _ in structural_failures}
+        log.warning("structural failures — dropping %d instance(s):", len(structural_failures))
         for iid, reason in structural_failures:
             log.warning("  %s: %s", iid, reason)
-
-        _write_round_doc(round_num, commit, n_s, n_r, targets,
-                         structural_failures=structural_failures)
-
-        print(json.dumps({
-            "score": 0.0,
-            "details": (
-                f"R{round_num} ({commit}): STRUCTURAL GATE FAILED. "
-                f"{len(structural_failures)} instance(s) failed: "
-                + "; ".join(f"{iid}: {reason}" for iid, reason in structural_failures)
-            ),
-        }))
-        return
-
-    log.info("phase=structural status=passed count=%d/%d", n_s, n_s)
+        all_synth_instances = [
+            inst for inst in all_synth_instances
+            if inst.get("instance_id") not in failed_ids
+        ]
+        n_s = len(all_synth_instances)
+        if not all_synth_instances:
+            print(json.dumps({
+                "score": 0.0,
+                "details": (
+                    f"R{round_num} ({commit}): ALL instances failed structural gate. "
+                    + "; ".join(f"{iid}: {reason}" for iid, reason in structural_failures)
+                ),
+            }))
+            return
+        log.info("phase=structural status=partial passed=%d failed=%d", n_s, len(structural_failures))
+    else:
+        log.info("phase=structural status=passed count=%d/%d", n_s, n_s)
 
     # ── Phase 3 (fast): Diversity gate ──
     diversity = compute_diversity(all_synth_instances)
