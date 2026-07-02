@@ -211,6 +211,36 @@ class TestHarborTaskGenerator:
         dockerfile = (tmp_path / "owner__repo-1" / "environment" / "Dockerfile").read_text()
         assert "cargo fetch" in dockerfile
 
+    def test_test_sh_has_no_blanket_git_checkout(self, tmp_path: Path) -> None:
+        for lang in ("go", "python", "java", "rust"):
+            inst = _make_instance(instance_id=f"owner__repo-{lang}", repo_language=lang)
+            gen = HarborTaskGenerator(instances=[inst])
+            gen.generate_all(tmp_path)
+            test_sh = (tmp_path / f"owner__repo-{lang}" / "tests" / "test.sh").read_text()
+            assert "git checkout -- ." not in test_sh, (
+                f"{lang} test.sh still contains blanket 'git checkout -- .'"
+            )
+
+    def test_test_sh_has_anti_reward_hacking(self, tmp_path: Path) -> None:
+        for lang in ("go", "python", "java", "rust"):
+            inst = _make_instance(instance_id=f"owner__repo-{lang}", repo_language=lang)
+            gen = HarborTaskGenerator(instances=[inst])
+            gen.generate_all(tmp_path)
+            test_sh = (tmp_path / f"owner__repo-{lang}" / "tests" / "test.sh").read_text()
+            assert "anti-reward-hacking" in test_sh.lower(), (
+                f"{lang} test.sh missing anti-reward-hacking logic"
+            )
+
+    def test_test_sh_uses_3way_for_test_patch(self, tmp_path: Path) -> None:
+        for lang in ("go", "python", "java", "rust"):
+            inst = _make_instance(instance_id=f"owner__repo-{lang}", repo_language=lang)
+            gen = HarborTaskGenerator(instances=[inst])
+            gen.generate_all(tmp_path)
+            test_sh = (tmp_path / f"owner__repo-{lang}" / "tests" / "test.sh").read_text()
+            assert "--3way" in test_sh, (
+                f"{lang} test.sh missing --3way fallback for test.patch"
+            )
+
     def test_empty_instances_returns_empty(self, tmp_path: Path) -> None:
         gen = HarborTaskGenerator(instances=[])
         generated = gen.generate_all(tmp_path)

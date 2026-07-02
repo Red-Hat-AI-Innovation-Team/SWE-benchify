@@ -12,4 +12,6 @@
 Fix the bug described above. The repository is checked out at the base
 commit in `/testbed`. Make your changes there.
 
-Do NOT modify any test files.
+Do NOT modify any files in test directories (test/, tests/, e2e/, testing/, testdata/).
+Do NOT modify any test files (*_test.go, test_*.py, *_test.py, *_test.rs, *.test.*, *_spec.*, *.spec.*).
+Focus on making the minimal change needed to fix the described issue.

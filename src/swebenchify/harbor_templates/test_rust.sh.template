@@ -7,11 +7,29 @@ cd /testbed
 git config --global --add safe.directory /testbed
 
 # --- Phase 1: Apply test patch ---
-# Reset to clean state
-git checkout -- . && git clean -fd -q
+# Anti-reward-hacking: revert ONLY test file modifications
+# Agent's source changes are preserved for grading
+python3 -c "
+import re, subprocess, os
+test_patterns = [
+    r'(^|/)tests?/', r'(^|/)e2e/', r'(^|/)testing/', r'(^|/)testdata/',
+    r'(^|/)src/test/', r'_test\\.go$', r'_test\\.rs$', r'_test\\.py$',
+    r'^test_', r'\\.test\\.', r'_spec\\.', r'\\.spec\\.',
+]
+combined = re.compile('|'.join(test_patterns))
+result = subprocess.run(['git', 'diff', '--name-only'], capture_output=True, text=True)
+for f in result.stdout.strip().split('\\n'):
+    if f and combined.search(f):
+        subprocess.run(['git', 'checkout', '--', f], capture_output=True)
+result = subprocess.run(['git', 'ls-files', '--others', '--exclude-standard'], capture_output=True, text=True)
+for f in result.stdout.strip().split('\\n'):
+    if f and combined.search(f):
+        try: os.remove(f)
+        except: pass
+" 2>/dev/null || true
 
 # Apply test patch (adds/modifies test files that catch the bug)
-git apply /tests/test.patch 2>&1 || {{
+git apply --3way /tests/test.patch 2>&1 || git apply /tests/test.patch 2>&1 || {{
     echo "TEST_PATCH_APPLY_FAILED"
     echo 0 > /logs/verifier/reward.txt
     exit 0
