@@ -445,9 +445,10 @@ def main():
     commit = detect_commit()
 
     if args.quick:
-        targets = [EVAL_TARGETS[0].copy()]
-        targets[0]['n_synthetic'] = 3
-        targets[0]['n_real'] = 3
+        targets = [t.copy() for t in EVAL_TARGETS]
+        for t in targets:
+            t['n_synthetic'] = 1
+            t['n_real'] = 1
     else:
         targets = EVAL_TARGETS
 

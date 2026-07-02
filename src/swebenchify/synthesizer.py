@@ -54,6 +54,8 @@ _EXCLUDE_DIRS: set[str] = {
 _LANGUAGE_EXCLUDE_PATTERNS: dict[str, list[re.Pattern[str]]] = {
     "python": [
         re.compile(r"(^|/)tests?/"),
+        re.compile(r"(^|/)pytests?/"),
+        re.compile(r"(^|/)test_[^/]*\.py$"),
         re.compile(r"(^|/)__init__\.py$"),
         re.compile(r"(^|/)setup\.py$"),
         re.compile(r"(^|/)conftest\.py$"),
@@ -1571,7 +1573,10 @@ def _is_valid_test_output(test_output: str) -> bool:
         return False
     if 'ImportError while loading conftest' in stripped:
         return False
-    failure_signals = ('FAILED', 'AssertionError', 'Error', 'ERRORS', 'Traceback')
+    failure_signals = (
+        'FAILED', 'FAIL', 'AssertionError', 'Error', 'error:',
+        'ERRORS', 'Traceback', 'panicked', 'BUILD FAILURE',
+    )
     if not any(sig in stripped for sig in failure_signals):
         return False
     return True
@@ -1888,8 +1893,8 @@ def _find_existing_test_file(
         for c in candidates:
             if (root / c).is_file():
                 return c
-        # Fuzzy match: any test file in tests/ or repo root whose name contains the stem
-        for test_dir_name in ("tests", "test"):
+        # Fuzzy match: any test file in tests/, pytests/, or repo root whose name contains the stem
+        for test_dir_name in ("tests", "test", "pytests", "pytest"):
             tests_dir = root / test_dir_name
             if tests_dir.is_dir():
                 for f in tests_dir.rglob("*.py"):
@@ -1911,7 +1916,7 @@ def _find_existing_test_file(
             search_dirs = [pkg_dir]
             if len(pkg_parts) > 1:
                 search_dirs.append(Path(*pkg_parts[1:]))
-            for test_dir_name in ("tests", "test"):
+            for test_dir_name in ("tests", "test", "pytests", "pytest"):
                 for sub in search_dirs:
                     pkg_test_dir = root / test_dir_name / sub
                     if pkg_test_dir.is_dir():
@@ -2950,18 +2955,17 @@ async def synthesize_repo(
         "Finding mutation targets in %s (%s)", repo_path, language,
     )
     all_targets = find_mutation_targets(repo_path, language)
-    # Pre-filter to targets with existing test files to avoid wasted LLM calls
-    targets = [
+    with_tests = [
         t for t in all_targets
         if _find_existing_test_file(repo_path, t["file"], language) is not None
     ]
+    without_tests = [t for t in all_targets if t not in with_tests]
     logger.info(
         "Found %d mutation targets (%d with test files)",
-        len(all_targets), len(targets),
+        len(all_targets), len(with_tests),
     )
-    if not targets:
-        targets = all_targets
-        logger.warning("No targets with test files, falling back to all targets")
+    # Prioritize targets with test files, pad with others to fill attempt budget
+    targets = with_tests + without_tests
 
     _ensure_venv(repo_path, language)
 
