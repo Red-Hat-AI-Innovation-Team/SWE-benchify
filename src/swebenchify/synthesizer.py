@@ -2354,8 +2354,23 @@ async def _generate_new_test_in_existing_file(
         if go_name and go_name[0].islower():
             go_name = go_name[0].upper() + go_name[1:]
         test_prefix = f"func Test{go_name}"
+    elif language == "rust":
+        func_keyword = "fn"
+        test_prefix = f"fn test_{bug_spec.function_name}"
+    elif language == "java":
+        func_keyword = "void"
+        java_name = bug_spec.function_name
+        if java_name and java_name[0].islower():
+            java_name = java_name[0].upper() + java_name[1:]
+        test_prefix = f"public void test{java_name}"
     else:
         return None
+
+    annotation = ""
+    if language == "rust":
+        annotation = "Include the `#[test]` annotation above the function. "
+    elif language == "java":
+        annotation = "Include the `@Test` annotation above the method. "
 
     prompt = f"""You are adding a NEW test function to an existing test file. The new test must detect a specific bug.
 
@@ -2382,7 +2397,7 @@ Write a SINGLE new test function that:
 - Uses the existing imports and test style from the file
 - Has a descriptive name starting with `{test_prefix}`
 
-HARD CONSTRAINT: Return ONLY the new {func_keyword} definition. Do NOT return imports or file-level code.
+{annotation}HARD CONSTRAINT: Return ONLY the new {func_keyword} definition (with annotation if applicable). Do NOT return imports or file-level code.
 Keep the function short (3-8 lines of real code). Do NOT add any comments. Make assertions specific to the bug."""
 
     new_func: str | None = None
@@ -2400,12 +2415,18 @@ Keep the function short (3-8 lines of real code). Do NOT add any comments. Make 
     if not new_func or func_keyword not in new_func:
         return None
 
-    # Trim to just the function definition
+    # Trim to just the function definition (including annotation for Rust/Java)
     lines = new_func.splitlines(keepends=True)
     start_idx = -1
+    annotation_markers = {"rust": "#[test]", "java": "@Test"}
+    ann_marker = annotation_markers.get(language)
     for i, line in enumerate(lines):
-        if line.strip().startswith(func_keyword):
+        stripped = line.strip()
+        if ann_marker and stripped.startswith(ann_marker) and start_idx == -1:
             start_idx = i
+        elif stripped.startswith(func_keyword) or stripped.startswith(f"pub {func_keyword}"):
+            if start_idx == -1:
+                start_idx = i
             break
     if start_idx > 0:
         new_func = "".join(lines[start_idx:])
