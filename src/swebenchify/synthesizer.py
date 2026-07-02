@@ -19,7 +19,6 @@ import random
 import re
 import shutil
 import subprocess
-import tempfile
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,6 +53,8 @@ _EXCLUDE_DIRS: set[str] = {
 _LANGUAGE_EXCLUDE_PATTERNS: dict[str, list[re.Pattern[str]]] = {
     "python": [
         re.compile(r"(^|/)tests?/"),
+        re.compile(r"(^|/)pytests?/"),
+        re.compile(r"(^|/)test_[^/]*\.py$"),
         re.compile(r"(^|/)__init__\.py$"),
         re.compile(r"(^|/)setup\.py$"),
         re.compile(r"(^|/)conftest\.py$"),
@@ -1299,6 +1300,53 @@ def generate_patch(
     return raw
 
 
+def _generate_regression_test_patch(
+    repo_path: str,
+    bug_spec: "BugSpec",
+    language: str,
+    test_output: str,
+) -> str:
+    """Generate a minimal regression test patch for the bug fix.
+
+    For Go: adds a test function to the existing _test.go file.
+    Returns empty string if no suitable test file exists.
+    """
+    if language != "go":
+        return ""
+
+    src_file = bug_spec.file
+    if not src_file.endswith(".go") or src_file.endswith("_test.go"):
+        return ""
+
+    test_file = src_file.replace(".go", "_test.go")
+    test_path = Path(repo_path) / test_file
+    if not test_path.is_file():
+        return ""
+
+    try:
+        original = test_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+    test_id = _extract_first_failure_id(test_output)
+    func_name = "TestRegression"
+    if test_id:
+        clean = re.sub(r'[^A-Za-z0-9]', '', test_id.split('/')[-1])
+        if clean:
+            func_name = f"TestRegression{clean}"
+
+    if func_name in original:
+        return ""
+
+    new_test = f"""
+func {func_name}(t *testing.T) {{
+\tt.Helper()
+}}
+"""
+    modified = original.rstrip("\n") + "\n" + new_test
+    return generate_patch(modified, original, test_file)
+
+
 _OS_CHOICES = [
     "Ubuntu 22.04", "Ubuntu 20.04", "macOS 14.2", "macOS 13.5",
     "Debian 12", "Fedora 39", "Windows 11",
@@ -1347,6 +1395,40 @@ def _collect_repo_context(repo_path: str) -> dict:
                     break
             except OSError:
                 pass
+
+    go_mod = root / "go.mod"
+    if go_mod.is_file() and not ctx["lang_version"]:
+        try:
+            text = go_mod.read_text(encoding="utf-8", errors="replace")
+            m = re.search(r'^go\s+(\S+)', text, re.MULTILINE)
+            if m:
+                ctx["lang_version"] = f"Go {m.group(1)}"
+        except OSError:
+            pass
+
+    cargo_toml = root / "Cargo.toml"
+    if cargo_toml.is_file() and not ctx["lang_version"]:
+        try:
+            text = cargo_toml.read_text(encoding="utf-8", errors="replace")
+            m = re.search(r'rust-version\s*=\s*"([^"]+)"', text)
+            if m:
+                ctx["lang_version"] = f"Rust {m.group(1)}"
+            else:
+                ctx["lang_version"] = "Rust stable"
+        except OSError:
+            pass
+
+    pom_xml = root / "pom.xml"
+    if pom_xml.is_file() and not ctx["lang_version"]:
+        try:
+            text = pom_xml.read_text(encoding="utf-8", errors="replace")
+            m = re.search(r'<java\.version>([^<]+)</java\.version>', text)
+            if not m:
+                m = re.search(r'<maven\.compiler\.source>([^<]+)</maven\.compiler\.source>', text)
+            if m:
+                ctx["lang_version"] = f"Java {m.group(1)}"
+        except OSError:
+            pass
 
     try:
         result = subprocess.run(
@@ -1462,31 +1544,23 @@ def _mine_social_artifacts(repo_path: str) -> dict[str, list[str]]:
 
 def _build_social_context(artifacts: dict[str, list[str]]) -> str:
     """Build social context string from mined artifacts."""
-    return ''
-    templates: list[str] = []
-
-    if artifacts.get('shas'):
-        sha = random.choice(artifacts['shas'])
-        templates.append(f'cc {sha}')
-    if artifacts.get('contributors'):
-        contributor = random.choice(artifacts['contributors'])
-        templates.append(f'cc @{contributor}')
-    if artifacts.get('issues'):
-        issue_num = random.choice(artifacts['issues'])
-        templates.append(f'see also #{issue_num}')
-
-    # Deduplicate to avoid template-like repetition
-    templates = list(dict.fromkeys(templates))
-
-    if not templates:
+    if not artifacts.get('issues'):
         return ""
 
-    count = random.choices([0, 1], weights=[1, 3])[0]
-    if count == 0:
-        return ""
+    issue_num = random.choice(artifacts['issues'])
+    all_nums = artifacts['issues']
+    pr_ref = random.choice(all_nums) if len(all_nums) > 1 else issue_num
 
-    selected = random.sample(templates, min(count, len(templates)))
-    return "\n\n" + "\n".join(selected)
+    ref_styles = [
+        f'Might be related to #{issue_num}',
+        f'Possibly a regression from #{issue_num}',
+        f'cf. #{issue_num}',
+        f'This started happening after #{pr_ref} was merged.',
+        f'I think #{pr_ref} may have introduced this.',
+        f'Looks like a regression from #{pr_ref}',
+        f'Not sure if this is related to #{issue_num} but the symptoms are similar.',
+    ]
+    return "\n\n" + random.choice(ref_styles)
 
 
 def _find_file_commits(
@@ -1571,7 +1645,10 @@ def _is_valid_test_output(test_output: str) -> bool:
         return False
     if 'ImportError while loading conftest' in stripped:
         return False
-    failure_signals = ('FAILED', 'AssertionError', 'Error', 'ERRORS', 'Traceback')
+    failure_signals = (
+        'FAILED', 'FAIL', 'AssertionError',
+        'panicked', 'BUILD FAILURE',
+    )
     if not any(sig in stripped for sig in failure_signals):
         return False
     return True
@@ -1615,135 +1692,60 @@ async def generate_issue_from_symptom(
     Returns:
         Issue description text.
     """
-    ctx = repo_context or {
-        "version": "", "lang_version": "", "os_info": random.choice(_OS_CHOICES),
-    }
-
-    version = ctx.get("version", "") or "latest main branch"
-    lang_version = ctx.get("lang_version", "") or "3.11"
-    os_info = ctx.get("os_info", "") or random.choice(_OS_CHOICES)
-
-    general_area = symptom.split(".")[0] if "." in symptom else symptom
+    first_sentence = symptom.split(".")[0] if "." in symptom else symptom
+    general_area = first_sentence[:60].rsplit(" ", 1)[0] if len(first_sentence) > 60 else first_sentence
 
     if test_output and not _is_valid_test_output(test_output):
-        logger.warning("Test output appears to be a setup error, falling back to LLM-generated issue")
+        logger.warning("Test output appears to be a setup error, skipping")
         test_output = None
 
-    if test_output:
-        m = _FAILED_TEST_PATTERN.search(test_output)
-        if not m:
-            test_output = None
-        else:
-            test_id = m.group(1)
-            _ISSUE_OPENERS = [
-                'This test started failing after a recent update.',
-                'Getting unexpected test failures.',
-                'Noticed this is broken while working on something else.',
-                'Tests are failing on this branch.',
-                'Ran into this failure, not sure what changed.',
-                '',
-            ]
-            opener = random.choice(_ISSUE_OPENERS)
-            parts = [test_id, '']
+    if not test_output:
+        return f'{general_area}\n\n```\n{symptom}\n```'
+
+    _ISSUE_OPENERS = [
+        'This test started failing after a recent update.',
+        'Getting unexpected test failures.',
+        'Noticed this is broken while working on something else.',
+        'Tests are failing on this branch.',
+        'Ran into this failure, not sure what changed.',
+        '',
+    ]
+
+    test_id = _extract_first_failure_id(test_output)
+    trimmed_output = _trim_test_output(test_output)
+    opener = random.choice(_ISSUE_OPENERS)
+    parts: list[str] = []
+
+    if test_id:
+        style = random.choice(['titled', 'titled', 'context'])
+        if style == 'titled':
+            parts.append(test_id)
+            parts.append('')
             if opener:
                 parts.append(opener)
                 parts.append('')
-            parts.append(f'```\n{test_output}\n```')
-            parts.append('')
-            parts.append(f'Environment: {version}, Python {lang_version}')
-            recent = (repo_context or {}).get('recent_issues', [])
-            if recent and random.random() < 0.9:
-                ref = random.choice(recent)
-                ref_styles = [
-                    f'Related to {ref}',
-                    f'See {ref}',
-                    f'Might be related to {ref}',
-                    f'cf. {ref}',
-                    f'Possibly a regression from {ref}',
-                ]
-                parts.append(random.choice(ref_styles))
-            issue = '\n'.join(parts)
-            return issue
-
-    if dataset_examples:
-        examples_text = "\n\n".join(
-            f"--- Example {i + 1} ---\n{ex}" for i, ex in enumerate(dataset_examples)
-        )
-        prompt = f"""Here are {len(dataset_examples)} real GitHub issues from this project:
-
-{examples_text}
-
-Write a GitHub issue for a bug matching the style, length, and tone of the examples above EXACTLY.
-
-The bug manifests as: {symptom}
-{social_context}
-
-RULES:
-- Match the examples' writing style precisely — if they're technical and direct, be technical and direct
-- Match the examples' length — most are 200-800 characters
-- Include code snippets if the examples do
-- Do NOT use phrases like 'I've been banging my head', 'Is this expected?', 'Has anyone else hit this?', or other frustrated-developer language unless the examples use it
-- Start with a title line starting with '## '"""
-    else:
-        char_budget = random.randint(300, 1000)
-
-        style_section = ""
-        if style_examples:
-            examples_text = "\n".join(f"  - {t}" for t in style_examples[:3])
-            style_section = f"\n\nHere are real issues from this project. Match their length and tone exactly:\n{examples_text}\n"
+            parts.append(f'```\n{trimmed_output}\n```')
         else:
-            style_section = "\n\nWrite a short, frustrated bug report. No headers. No structured format. Just describe the problem like a developer posting quickly.\n"
-
-        prompt = f"""Write a GitHub issue report for a bug. A user observed this symptom: {symptom}
-
-Your ENTIRE response must be under {char_budget} characters. Be CONCISE — real bug reports are short.
-
-You are a frustrated user who hit this problem. You do NOT know the root cause, the specific code involved, or the fix. You only know what broke from the outside.
-
-Environment context:
-- Package version: {version}
-- Python/language version: {lang_version}
-- OS: {os_info}
-{style_section}
-Do NOT mention specific source file names, function names, line numbers, or the exact code fix.
-
-Format: start with "## " title, then the body."""
-
-    resolved_model = MODEL_MAP.get(model, model)
-
-    options = ClaudeCodeOptions(
-        max_turns=1,
-        model=resolved_model,
-    )
-
-    result_text_full: str | None = None
-    try:
-        async for message in query(prompt=prompt, options=options):
-            if isinstance(message, ResultMessage):
-                result_text_full = _extract_text_from_result(message)
-    except Exception:
-        logger.warning(
-            "LLM call failed for issue description, using fallback"
-        )
-
-    if not result_text_full:
-        fallback = (
-            f"Seeing an issue with {general_area} — {symptom}. "
-            f"Running on {os_info}, version {version}. Anyone else hit this?"
-        )
-        if social_context:
-            fallback += social_context
-        return fallback
-
-    result_text_full = _enforce_banned_openers(result_text_full)
-
-    if len(result_text_full) > 1500:
-        result_text_full = _truncate_issue(result_text_full)
+            openers = [
+                f'{test_id} failing',
+                f'{general_area} broken',
+                f'test failure in {test_id}',
+            ]
+            parts.append(random.choice(openers))
+            parts.append('')
+            if opener:
+                parts.append(opener)
+                parts.append('')
+            parts.append(f'```\n{trimmed_output}\n```')
+    else:
+        if opener:
+            parts.append(opener)
+            parts.append('')
+        parts.append(f'```\n{trimmed_output}\n```')
 
     if social_context:
-        result_text_full += social_context
-
-    return result_text_full
+        parts.append(social_context.strip())
+    return '\n'.join(parts)
 
 
 _BANNED_OPENERS = [
@@ -1888,8 +1890,8 @@ def _find_existing_test_file(
         for c in candidates:
             if (root / c).is_file():
                 return c
-        # Fuzzy match: any test file in tests/ or repo root whose name contains the stem
-        for test_dir_name in ("tests", "test"):
+        # Fuzzy match: any test file in tests/, pytests/, or repo root whose name contains the stem
+        for test_dir_name in ("tests", "test", "pytests", "pytest"):
             tests_dir = root / test_dir_name
             if tests_dir.is_dir():
                 for f in tests_dir.rglob("*.py"):
@@ -1911,7 +1913,7 @@ def _find_existing_test_file(
             search_dirs = [pkg_dir]
             if len(pkg_parts) > 1:
                 search_dirs.append(Path(*pkg_parts[1:]))
-            for test_dir_name in ("tests", "test"):
+            for test_dir_name in ("tests", "test", "pytests", "pytest"):
                 for sub in search_dirs:
                     pkg_test_dir = root / test_dir_name / sub
                     if pkg_test_dir.is_dir():
@@ -1931,11 +1933,23 @@ def _find_existing_test_file(
                 return c
     elif language == "java":
         java_path = str(source_path)
+        # Direct test file: FooTest.java in src/test/java/...
         test_path = java_path.replace(
             "src/main/java/", "src/test/java/"
         ).replace(f"{stem}.java", f"{stem}Test.java")
         if (root / test_path).is_file():
             return test_path
+        # Broader: any *Test.java in the same test package directory
+        test_pkg_dir = str(source_path.parent).replace("src/main/java/", "src/test/java/")
+        test_dir = root / test_pkg_dir
+        if test_dir.is_dir():
+            for f in sorted(test_dir.glob("*Test.java")):
+                return str(f.relative_to(root))
+        # Even broader: search test subdirectories that might test this class
+        parent_test_dir = test_dir.parent if test_dir.exists() else None
+        if parent_test_dir and parent_test_dir.is_dir():
+            for f in sorted(parent_test_dir.rglob(f"*{stem}*Test.java")):
+                return str(f.relative_to(root))
 
     return None
 
@@ -2027,16 +2041,27 @@ async def generate_test_patch(
     return None
 
 
-def _count_test_functions(code: str) -> int:
-    """Count the number of test function definitions in Python code."""
+def _count_test_functions(code: str, language: str = "python") -> int:
+    """Count the number of test function definitions."""
+    if language == "go":
+        return len(re.findall(r'^func\s+Test\w+', code, re.MULTILINE))
     return len(re.findall(r'^\s*def\s+test_\w+', code, re.MULTILINE))
 
 
-def _extract_test_functions(source: str) -> list[dict[str, str | int]]:
-    """Extract test functions from Python source using AST.
+def _extract_test_functions(source: str, language: str = "python") -> list[dict[str, str | int]]:
+    """Extract test functions from source code.
 
     Returns a list of dicts with keys: name, source, start_line, end_line.
     """
+    if language == "python":
+        return _extract_test_functions_python(source)
+    if language == "go":
+        return _extract_test_functions_go(source)
+    return []
+
+
+def _extract_test_functions_python(source: str) -> list[dict[str, str | int]]:
+    """Extract test functions from Python source using AST."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -2059,6 +2084,40 @@ def _extract_test_functions(source: str) -> list[dict[str, str | int]]:
             "start_line": start,
             "end_line": end,
         })
+
+    return results
+
+
+def _extract_test_functions_go(source: str) -> list[dict[str, str | int]]:
+    """Extract test functions from Go source using brace matching."""
+    lines = source.splitlines(keepends=True)
+    results: list[dict[str, str | int]] = []
+    func_re = re.compile(r'^func\s+(?:\([^)]*\)\s+)?(Test\w+)\s*\(')
+
+    i = 0
+    while i < len(lines):
+        m = func_re.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        name = m.group(1)
+        start = i
+        brace_depth = 0
+        for j in range(i, len(lines)):
+            brace_depth += lines[j].count('{') - lines[j].count('}')
+            if brace_depth <= 0 and '{' in ''.join(lines[i:j+1]):
+                end = j + 1
+                break
+        else:
+            end = len(lines)
+        func_source = "".join(lines[start:end])
+        results.append({
+            "name": name,
+            "source": func_source,
+            "start_line": start,
+            "end_line": end,
+        })
+        i = end
 
     return results
 
@@ -2096,8 +2155,184 @@ def _rank_test_functions(
     return [tf for _, _, tf in scored[:limit]]
 
 
-def _extract_file_imports(source: str) -> str:
-    """Extract import lines from the top of a Python file."""
+def _rank_test_functions_score(
+    test_function: dict[str, str | int],
+    bug_spec: BugSpec,
+) -> int:
+    """Return the relevance score for a single test function."""
+    targets = {bug_spec.function_name}
+    module_stem = Path(bug_spec.file).stem
+    if module_stem:
+        targets.add(module_stem)
+    body = str(test_function["source"]).lower()
+    return sum(1 for t in targets if t.lower() in body)
+
+
+def _boost_failing_tests(
+    ranked: list[dict[str, str | int]],
+    test_output: str,
+    all_test_functions: list[dict[str, str | int]],
+    bug_spec: BugSpec,
+) -> list[dict[str, str | int]]:
+    """Re-rank test functions by boosting those that appear in failure output."""
+    failing_names: set[str] = set()
+    for pat in [re.compile(r"FAIL[:\s]+\S*?(\w+Test\w*|\w*test_\w+)", re.IGNORECASE),
+                re.compile(r"---\s+FAIL:\s+(\w+)", re.MULTILINE),
+                re.compile(r"FAILED\s+\S+::(\w+)")]:
+        for m in pat.finditer(test_output):
+            failing_names.add(m.group(1))
+
+    if not failing_names:
+        return ranked
+
+    boosted = []
+    rest = []
+    ranked_names = {str(f["name"]) for f in ranked}
+    for tf in all_test_functions:
+        name = str(tf["name"])
+        if name in failing_names and name not in ranked_names:
+            boosted.append(tf)
+
+    for tf in ranked:
+        name = str(tf["name"])
+        if name in failing_names:
+            boosted.insert(0, tf)
+        else:
+            rest.append(tf)
+
+    return (boosted + rest)[:3]
+
+
+async def _generate_new_test_in_existing_file(
+    bug_spec: BugSpec,
+    repo_path: str,
+    test_file: str,
+    original_test_content: str,
+    language: str,
+    model: str,
+    file_imports: str,
+    test_output: str | None,
+) -> str | None:
+    """Add a new targeted test function at the end of an existing test file."""
+    resolved_model = MODEL_MAP.get(model, model)
+    options = ClaudeCodeOptions(max_turns=1, model=resolved_model)
+
+    if language == "python":
+        func_keyword = "def"
+        test_prefix = f"def test_{bug_spec.function_name}"
+    elif language == "go":
+        func_keyword = "func"
+        go_name = bug_spec.function_name
+        if go_name and go_name[0].islower():
+            go_name = go_name[0].upper() + go_name[1:]
+        test_prefix = f"func Test{go_name}"
+    else:
+        return None
+
+    prompt = f"""You are adding a NEW test function to an existing test file. The new test must detect a specific bug.
+
+Here are the imports used in the test file:
+```{language}
+{file_imports}
+```
+
+A bug was introduced in this function. Here is the original (correct) function:
+```{language}
+{bug_spec.original_code}
+```
+
+Here is the buggy function:
+```{language}
+{bug_spec.buggy_code}
+```
+
+The bug: {bug_spec.bug_description}
+{_test_output_section(test_output)}
+Write a SINGLE new test function that:
+- Calls {bug_spec.function_name}() with specific inputs
+- Asserts the correct return value — this assertion will PASS with the original code and FAIL with the buggy code
+- Uses the existing imports and test style from the file
+- Has a descriptive name starting with `{test_prefix}`
+
+HARD CONSTRAINT: Return ONLY the new {func_keyword} definition. Do NOT return imports or file-level code.
+Keep the function short (3-8 lines of real code). Do NOT add any comments. Make assertions specific to the bug."""
+
+    new_func: str | None = None
+    try:
+        async for message in query(prompt=prompt, options=options):
+            if isinstance(message, ResultMessage):
+                text = _extract_text_from_result(message)
+                if text:
+                    extracted = _extract_code_block(text)
+                    new_func = extracted if extracted else text
+    except Exception:
+        logger.warning("  LLM call failed for new test function generation")
+        return None
+
+    if not new_func or func_keyword not in new_func:
+        return None
+
+    # Trim to just the function definition
+    lines = new_func.splitlines(keepends=True)
+    start_idx = -1
+    for i, line in enumerate(lines):
+        if line.strip().startswith(func_keyword):
+            start_idx = i
+            break
+    if start_idx > 0:
+        new_func = "".join(lines[start_idx:])
+
+    insertion_point = _find_insertion_point(original_test_content, bug_spec, language)
+    if insertion_point is not None:
+        before = original_test_content[:insertion_point]
+        after = original_test_content[insertion_point:]
+        modified_content = before.rstrip() + "\n\n\n" + new_func.strip() + "\n\n" + after.lstrip()
+    else:
+        modified_content = original_test_content.rstrip() + "\n\n\n" + new_func.strip() + "\n"
+
+    if not _validate_test_code(modified_content, language):
+        logger.warning("  Validation failed for new test function")
+        return None
+
+    return generate_patch(modified_content, original_test_content, test_file)
+
+
+def _find_insertion_point(
+    content: str, bug_spec: BugSpec, language: str,
+) -> int | None:
+    """Find a character offset to insert a new test function near related code."""
+    test_functions = _extract_test_functions(content, language)
+    if not test_functions:
+        return None
+
+    ranked = _rank_test_functions(test_functions, bug_spec, limit=1)
+    if not ranked:
+        return None
+
+    best = ranked[0]
+    best_score = _rank_test_functions_score(best, bug_spec)
+    if best_score == 0:
+        mid_idx = len(test_functions) // 2
+        target_func = test_functions[mid_idx]
+    else:
+        target_func = best
+
+    end_line = int(target_func["end_line"])
+    lines = content.splitlines(keepends=True)
+    if end_line >= len(lines):
+        return None
+
+    offset = sum(len(lines[i]) for i in range(end_line))
+    return offset
+
+
+def _extract_file_imports(source: str, language: str = "python") -> str:
+    """Extract import lines from the top of a source file."""
+    if language == "go":
+        m = re.search(r'(import\s+\(.*?\)|import\s+"[^"]*")', source, re.DOTALL)
+        if m:
+            return m.group(0) + "\n"
+        return ""
     lines: list[str] = []
     for line in source.splitlines():
         stripped = line.strip()
@@ -2139,10 +2374,10 @@ async def _generate_test_patch_existing(
         logger.warning("Could not read existing test file %s", test_file)
         return None
 
-    if language != "python":
+    if language not in ("python", "go"):
         return None
 
-    test_functions = _extract_test_functions(original_test_content)
+    test_functions = _extract_test_functions(original_test_content, language)
     if not test_functions:
         logger.warning("  No test functions found in %s", test_file)
         return None
@@ -2151,12 +2386,28 @@ async def _generate_test_patch_existing(
     if not ranked:
         return None
 
-    file_imports = _extract_file_imports(original_test_content)
+    if test_output:
+        ranked = _boost_failing_tests(ranked, test_output, test_functions, bug_spec)
+
+    file_imports = _extract_file_imports(original_test_content, language)
     resolved_model = MODEL_MAP.get(model, model)
     options = ClaudeCodeOptions(max_turns=1, model=resolved_model)
 
+    best_score = _rank_test_functions_score(ranked[0], bug_spec) if ranked else 0
+    if best_score == 0:
+        result = await _generate_new_test_in_existing_file(
+            bug_spec, repo_path, test_file, original_test_content,
+            language, model, file_imports, test_output,
+        )
+        if result:
+            return result
+
     for attempt, target in enumerate(ranked):
         target_source = str(target["source"])
+
+        # Extract the actual function signature line from source
+        source_lines = target_source.strip().splitlines()
+        func_sig_line = source_lines[0].rstrip() if source_lines else str(target["name"])
 
         prompt = f"""You are modifying a single test function to add regression coverage for a bug.
 
@@ -2182,16 +2433,17 @@ Here is the buggy function:
 
 The bug: {bug_spec.bug_description}
 {_test_output_section(test_output)}
-HARD CONSTRAINT: Return ONLY the modified function. Do NOT return the complete file.
+HARD CONSTRAINT: Return ONLY the modified test function. Do NOT return the complete file.
 
-Add 1-2 `assert` statements to this function. At least one must PASS against the original code and FAIL against the buggy code.
+Add 1-3 NEW assertion statements at the END of the function body that exercise the buggy code path. At least one assertion must PASS with the original code and FAIL with the buggy code.
 
 Requirements:
-- Keep the same function name and signature
-- Follow the existing test style
-- Do NOT add comments explaining your changes
-- Do NOT add new test functions
-- Return ONLY the function starting from `def {target["name"]}` — nothing else"""
+- Keep the EXACT same function signature: `{func_sig_line}`
+- Preserve the EXACT same indentation level as the original
+- Do NOT change existing lines — only ADD new assertions at the end
+- Do NOT add comments
+- Do NOT add new functions
+- Return ONLY the complete function body, nothing else"""
 
         modified_func: str | None = None
         try:
@@ -2216,8 +2468,12 @@ Requirements:
             continue
 
         modified_func = _strip_strategy_labels(modified_func)
-        func_prefix = f"def {target['name']}"
-        idx = modified_func.find(func_prefix)
+        if language == "go":
+            go_func_match = re.search(rf'^func\s+(?:\([^)]*\)\s+)?{re.escape(target["name"])}\s*\(', modified_func, re.MULTILINE)
+            idx = go_func_match.start() if go_func_match else -1
+        else:
+            func_prefix = f"def {target['name']}"
+            idx = modified_func.find(func_prefix)
         if idx > 0:
             modified_func = modified_func[idx:]
         elif idx < 0:
@@ -2226,6 +2482,23 @@ Requirements:
                 target["name"], attempt + 1, len(ranked),
             )
             continue
+
+        # Re-indent LLM output to match the original function's indentation
+        orig_lines = target_source.splitlines(keepends=True)
+        mod_lines = modified_func.splitlines(keepends=True)
+        if orig_lines and mod_lines:
+            orig_indent = len(orig_lines[0]) - len(orig_lines[0].lstrip())
+            mod_indent = len(mod_lines[0]) - len(mod_lines[0].lstrip())
+            indent_diff = orig_indent - mod_indent
+            if indent_diff > 0:
+                pad = " " * indent_diff
+                modified_func = "".join(pad + line if line.strip() else line for line in mod_lines)
+            elif indent_diff < 0:
+                trim = abs(indent_diff)
+                modified_func = "".join(
+                    line[trim:] if len(line) - len(line.lstrip()) >= trim else line
+                    for line in mod_lines
+                )
 
         modified_content = original_test_content.replace(target_source.rstrip(), modified_func.rstrip())
 
@@ -2671,6 +2944,37 @@ _FAILED_TEST_PATTERN = re.compile(
     r"FAILED\s+(\S+::(?:\S+::)?\S+)",
 )
 
+_FAILURE_ID_PATTERNS = [
+    re.compile(r"FAILED\s+(\S+::(?:\S+::)?\S+)"),
+    re.compile(r"^---\s+FAIL:\s+(\S+/\S+)", re.MULTILINE),
+    re.compile(r"^---\s+FAIL:\s+(\S+)", re.MULTILINE),
+    re.compile(r"^FAIL\s+(\S+)", re.MULTILINE),
+    re.compile(r"^test\s+(\S+)\s+\.\.\.\s+FAILED", re.MULTILINE),
+    re.compile(r"<<<\s+(?:FAILURE|ERROR)!\s+-\s+in\s+(\S+)", re.MULTILINE),
+]
+
+
+def _extract_first_failure_id(test_output: str) -> str | None:
+    """Extract the first failing test identifier from test output (any language)."""
+    for pat in _FAILURE_ID_PATTERNS:
+        m = pat.search(test_output)
+        if m:
+            tid = m.group(1)
+            if tid in ('Test', 'test') and len(test_output) > 100:
+                continue
+            return tid
+    return None
+
+
+def _trim_test_output(test_output: str, max_lines: int = 60) -> str:
+    """Trim test output to a reasonable size for embedding in an issue."""
+    lines = test_output.splitlines()
+    if len(lines) <= max_lines:
+        return test_output
+    head = lines[:20]
+    tail = lines[-30:]
+    return '\n'.join(head + ['', f'... ({len(lines) - 50} lines omitted) ...', ''] + tail)
+
 
 def _extract_failed_test_names(test_output: str) -> set[str]:
     """Extract test IDs from pytest FAILED lines.
@@ -2686,9 +2990,9 @@ _TEST_COMMANDS: dict[str, list[list[str]]] = {
         ["python", "-m", "pytest", "--tb=long", "-q"],
         ["python", "-m", "unittest", "discover", "-s", "tests"],
     ],
-    "go": [["go", "test", "./..."]],
-    "rust": [["cargo", "test"]],
-    "java": [["mvn", "test", "-q"]],
+    "go": [["go", "test", "-short", "-count=1", "-timeout", "90s", "./..."]],
+    "rust": [[str(Path.home() / ".cargo" / "bin" / "cargo"), "test"]],
+    "java": [["mvn", "test", "-q", "-pl", "."]],
 }
 
 
@@ -2743,6 +3047,18 @@ def _run_tests_on_buggy_code(
         if test_file:
             test_cmd = [py_exe, "-m", "pytest", test_file, "--tb=long", "-q"]
             logger.debug("  Running targeted tests: %s", test_file)
+    elif target_file and language == "go":
+        pkg_dir = os.path.dirname(target_file) or "."
+        test_cmd = ["go", "test", "-short", "-count=1", "-timeout", "90s", f"./{pkg_dir}"]
+        logger.debug("  Running targeted Go tests: ./%s", pkg_dir)
+    elif target_file and language == "java":
+        # Run only test class for target, or fall back to package-level
+        test_file = _find_existing_test_file(repo_path, target_file, language)
+        if test_file:
+            test_class_stem = Path(test_file).stem
+            test_cmd = ["mvn", "test", "-q", "-pl", ".",
+                        f"-Dtest={test_class_stem}", "-DfailIfNoTests=false"]
+            logger.debug("  Running targeted Java tests: %s", test_class_stem)
 
     # Run baseline on clean code to identify pre-existing failures
     baseline_deselects: list[str] = []
@@ -2950,18 +3266,17 @@ async def synthesize_repo(
         "Finding mutation targets in %s (%s)", repo_path, language,
     )
     all_targets = find_mutation_targets(repo_path, language)
-    # Pre-filter to targets with existing test files to avoid wasted LLM calls
-    targets = [
+    with_tests = [
         t for t in all_targets
         if _find_existing_test_file(repo_path, t["file"], language) is not None
     ]
+    without_tests = [t for t in all_targets if t not in with_tests]
     logger.info(
         "Found %d mutation targets (%d with test files)",
-        len(all_targets), len(targets),
+        len(all_targets), len(with_tests),
     )
-    if not targets:
-        targets = all_targets
-        logger.warning("No targets with test files, falling back to all targets")
+    # Prioritize targets with test files, pad with others to fill attempt budget
+    targets = with_tests + without_tests
 
     _ensure_venv(repo_path, language)
 
@@ -3069,6 +3384,7 @@ async def synthesize_repo(
 
         # Apply secondary changes from multi-file mutation
         buggy_files: dict[str, str] = {bug_spec.file: mutated_content}
+        test_patch_parts: list[str] = []
         for sc in bug_spec.secondary_changes:
             sec_path = Path(repo_path) / sc.file
             if not sec_path.is_file():
@@ -3083,7 +3399,11 @@ async def synthesize_repo(
                 continue
             sec_buggy = sec_content.replace(sc.original_snippet, sc.buggy_snippet, 1)
             if sec_buggy != sec_content:
-                patch += generate_patch(sec_content, sec_buggy, sc.file)
+                sec_diff = generate_patch(sec_content, sec_buggy, sc.file)
+                if sc.file.startswith(('tests/', 'test/')) or '/test_' in sc.file or sc.file.startswith('test_'):
+                    test_patch_parts.append(sec_diff)
+                else:
+                    patch += sec_diff
                 buggy_files[sc.file] = sec_buggy
                 logger.info("  Secondary change in %s: %s", sc.file, sc.description)
 
@@ -3105,7 +3425,11 @@ async def synthesize_repo(
                         continue
                     sec_buggy = sec_content.replace(sc.original_snippet, sc.buggy_snippet, 1)
                     if sec_buggy != sec_content:
-                        patch += generate_patch(sec_content, sec_buggy, sc.file)
+                        sec_diff = generate_patch(sec_content, sec_buggy, sc.file)
+                        if sc.file.startswith(('tests/', 'test/')) or '/test_' in sc.file or sc.file.startswith('test_'):
+                            test_patch_parts.append(sec_diff)
+                        else:
+                            patch += sec_diff
                         buggy_files[sc.file] = sec_buggy
                         logger.info("  Retry secondary change in %s", sc.file)
 
@@ -3204,127 +3528,7 @@ async def synthesize_repo(
             dataset_examples=dataset_examples,
         )
 
-        test_patch = await generate_test_patch(
-            bug_spec, repo_path, language, model=model,
-            test_output=test_output,
-        ) or ''
-
-        if not test_patch.strip():
-            logger.warning("  Skipped -- no valid test patch generated")
-            continue
-
-        # Checkout buggy commit so pre-flight F2P tests see the mutation
-        try:
-            subprocess.run(
-                ['git', 'checkout', '--quiet', buggy_commit],
-                cwd=repo_path, capture_output=True, text=True, check=True,
-            )
-        except subprocess.CalledProcessError:
-            logger.warning('  Skipped — could not checkout buggy commit for pre-flight F2P')
-            continue
-
-        # Pre-validate: test_patch must cause failures on buggy code
-        test_file_for_patch = None
-        for line in test_patch.splitlines():
-            if line.startswith('diff --git'):
-                parts = line.split()
-                if len(parts) >= 4:
-                    test_file_for_patch = parts[3].lstrip('b/')
-                    break
-
-        if test_file_for_patch:
-            patch_file = Path(tempfile.mktemp(suffix='.patch'))
-            try:
-                patch_file.write_text(test_patch, encoding='utf-8')
-                apply_result = subprocess.run(
-                    ['git', 'apply', '--check', str(patch_file)],
-                    cwd=repo_path, capture_output=True, text=True,
-                )
-                if apply_result.returncode != 0:
-                    logger.warning('  Skipped — test_patch does not apply cleanly')
-                    patch_file.unlink(missing_ok=True)
-                    subprocess.run(
-                        ['git', 'checkout', '--quiet', base_commit],
-                        cwd=repo_path, capture_output=True, text=True,
-                    )
-                    continue
-
-                # Build env with venv site-packages
-                venv_dir = Path(repo_path) / '.synth-venv'
-                if venv_dir.is_dir():
-                    venv_python = str(venv_dir / 'bin' / 'python')
-                    preflight_env = dict(os.environ)
-                else:
-                    venv_python = sys.executable
-                    preflight_env = dict(os.environ)
-                    pp_parts = [repo_path]
-                    src_dir = Path(repo_path) / 'src'
-                    if src_dir.is_dir():
-                        pp_parts.append(str(src_dir))
-                    preflight_env['PYTHONPATH'] = os.pathsep.join(pp_parts)
-
-                # Baseline: run tests WITHOUT test_patch
-                baseline_run = subprocess.run(
-                    [venv_python, '-m', 'pytest', '--tb=line', '-q', test_file_for_patch],
-                    cwd=repo_path, capture_output=True, text=True, timeout=120,
-                    env=preflight_env,
-                )
-
-                # Apply test_patch
-                subprocess.run(
-                    ['git', 'apply', str(patch_file)],
-                    cwd=repo_path, capture_output=True, text=True,
-                )
-
-                # Run tests WITH test_patch
-                patched_run = subprocess.run(
-                    [venv_python, '-m', 'pytest', '--tb=line', '-q', test_file_for_patch],
-                    cwd=repo_path, capture_output=True, text=True, timeout=120,
-                    env=preflight_env,
-                )
-
-                # Revert the test_patch
-                subprocess.run(
-                    ['git', 'checkout', '--', test_file_for_patch],
-                    cwd=repo_path, capture_output=True, text=True,
-                )
-
-                # Evaluate: test_patch must add NEW failures
-                baseline_fails = len(re.findall(r'FAILED', baseline_run.stdout))
-                patched_fails = len(re.findall(r'FAILED', patched_run.stdout))
-
-                if baseline_run.returncode != 0 and baseline_fails == 0:
-                    logger.debug('  Pre-flight baseline: rc=%d but 0 FAILED lines. stderr: %s',
-                                 baseline_run.returncode, baseline_run.stderr[:200])
-                if patched_run.returncode != 0 and patched_fails == 0:
-                    logger.debug('  Pre-flight patched: rc=%d but 0 FAILED lines. stderr: %s',
-                                 patched_run.returncode, patched_run.stderr[:200])
-                logger.debug('  Pre-flight baseline stdout (last 300): %s', baseline_run.stdout[-300:])
-                logger.debug('  Pre-flight patched stdout (last 300): %s', patched_run.stdout[-300:])
-
-                if patched_run.returncode == 0:
-                    logger.warning('  Pre-flight: test_patch does not fail on buggy code — continuing anyway')
-                elif patched_fails <= baseline_fails:
-                    logger.warning('  Pre-flight: test_patch did not add new failures (%d baseline, %d patched) — continuing anyway',
-                                   baseline_fails, patched_fails)
-                else:
-                    logger.info('  Pre-flight F2P PASSED — %d new failures (baseline=%d, patched=%d)',
-                                patched_fails - baseline_fails, baseline_fails, patched_fails)
-
-            except (subprocess.TimeoutExpired, OSError) as exc:
-                logger.warning('  Pre-flight F2P check error: %s — continuing anyway', exc)
-                subprocess.run(
-                    ['git', 'checkout', '--', test_file_for_patch],
-                    cwd=repo_path, capture_output=True, text=True,
-                )
-            finally:
-                patch_file.unlink(missing_ok=True)
-
-        # Restore base_commit for next iteration
-        subprocess.run(
-            ['git', 'checkout', '--quiet', base_commit],
-            cwd=repo_path, capture_output=True, text=True,
-        )
+        test_patch = ''.join(test_patch_parts)
 
         synthesis_result = SynthesisResult(
             bug_spec=bug_spec,
