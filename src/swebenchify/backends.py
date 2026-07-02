@@ -36,7 +36,7 @@ class LanguageBackend:
     failure_grep: str
     default_timeout: int
     parser: TestLogParser
-    make_dockerfile: Callable[[str, str, AnyEnvironmentSpec], str]
+    make_dockerfile: Callable[..., str]
     make_test_cmd: Callable[[AnyEnvironmentSpec], str]
     test_scope: Callable[[str], str]
     normalize_f2p: Callable[[list[str]], list[str]]

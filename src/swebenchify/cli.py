@@ -386,7 +386,7 @@ def _cmd_synthesize(args: argparse.Namespace) -> None:
 
         print(f"\nGenerated {len(candidates)} synthetic instances -> {out_file}")
         for c in candidates:
-            print(f"  {c.instance_id}: {c.problem_statement[:80]}...")
+            print(f"  {c.instance_id}: {(c.problem_statement or '')[:80]}...")
 
     asyncio.run(run())
 

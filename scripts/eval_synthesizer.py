@@ -108,7 +108,7 @@ async def _vertex_query(prompt, options=None):
         max_tokens=4096,
         messages=[{"role": "user", "content": prompt}],
     )
-    text = resp.content[0].text if resp.content else ""
+    text = resp.content[0].text if resp.content else ""  # type: ignore[union-attr]
     yield _FakeResultMessage(text)
 
 class _FakeOptions:
@@ -120,9 +120,9 @@ import swebenchify.synthesizer as synth_mod  # noqa: E402
 from swebenchify.grader import compute_f2p  # noqa: E402
 from swebenchify.models import EnvironmentSpec, GoEnvironmentSpec, RustEnvironmentSpec  # noqa: E402
 
-synth_mod.query = _vertex_query
-synth_mod.ResultMessage = _FakeResultMessage
-synth_mod.ClaudeCodeOptions = _FakeOptions
+synth_mod.query = _vertex_query  # type: ignore[assignment]
+synth_mod.ResultMessage = _FakeResultMessage  # type: ignore[assignment,misc]
+synth_mod.ClaudeCodeOptions = _FakeOptions  # type: ignore[assignment,misc]
 
 log = logging.getLogger("eval_synthesizer")
 log.setLevel(logging.DEBUG)
@@ -287,9 +287,9 @@ def validate_instance(instance: dict, repo_path: str) -> tuple[bool, str]:
     """Run all validation tiers in order, short-circuiting on first failure."""
     for tier_name, check_fn, needs_repo in VALIDATION_TIERS:
         if needs_repo:
-            passed, reason = check_fn(instance, repo_path)
+            passed, reason = check_fn(instance, repo_path)  # type: ignore[operator]
         else:
-            passed, reason = check_fn(instance)
+            passed, reason = check_fn(instance)  # type: ignore[operator]
         if not passed:
             return False, f"[{tier_name}] {reason}"
     return True, "ok"
@@ -395,7 +395,7 @@ def judge_instance(instance: dict) -> dict:
         system=JUDGE_SYSTEM,
         messages=[{"role": "user", "content": prompt}],
     )
-    text = resp.content[0].text
+    text = resp.content[0].text  # type: ignore[union-attr]
 
     cls_match = re.search(r"<classification>\s*(REAL|SYNTHETIC)\s*</classification>", text)
     conf_match = re.search(r"<confidence>\s*(HIGH|MEDIUM|LOW)\s*</confidence>", text)

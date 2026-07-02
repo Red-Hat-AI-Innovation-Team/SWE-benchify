@@ -405,7 +405,7 @@ def find_mutation_targets(
             functions = extractor(lines)
 
             for func in functions[:max_functions]:
-                source_lines = func["source"].strip().splitlines()
+                source_lines = str(func["source"]).strip().splitlines()
                 if len(source_lines) < 8:
                     continue
                 targets.append({
@@ -2469,7 +2469,7 @@ Requirements:
 
         modified_func = _strip_strategy_labels(modified_func)
         if language == "go":
-            go_func_match = re.search(rf'^func\s+(?:\([^)]*\)\s+)?{re.escape(target["name"])}\s*\(', modified_func, re.MULTILINE)
+            go_func_match = re.search(rf'^func\s+(?:\([^)]*\)\s+)?{re.escape(str(target["name"]))}\s*\(', modified_func, re.MULTILINE)
             idx = go_func_match.start() if go_func_match else -1
         else:
             func_prefix = f"def {target['name']}"
