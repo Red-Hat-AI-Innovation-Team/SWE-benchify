@@ -200,6 +200,83 @@ PASS_TO_PASS: 1402 tests
 compiled: true
 ```
 
+## Synthetic Instance Generation
+
+In addition to mining real PRs, SWE-benchify can **synthesize** realistic bug instances from any GitHub repo. The synthesizer introduces plausible bugs via LLM-guided mutation, generates issue descriptions from real test output, and produces instances in the same SWE-bench format.
+
+### Quick start
+
+```bash
+# Clone and point at a repo
+git clone https://github.com/pallets/flask.git /tmp/flask
+
+# Generate 5 synthetic bugs
+swebenchify synthesize \
+  --repo /tmp/flask \
+  --language python \
+  --max-mutations 5
+```
+
+Output: `output/local__flask-synthetic-candidates.jsonl`
+
+### CLI reference
+
+```
+swebenchify synthesize --repo <REPO> --language <LANG> [OPTIONS]
+```
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--repo` | yes | | Local path or `owner/repo` slug |
+| `--language` | yes | | `python`, `go`, `rust`, or `java` |
+| `--max-mutations` | no | `10` | Maximum bugs to generate |
+| `--base-commit` | no | `HEAD` | Target commit SHA (auto-detected for local repos) |
+| `--model` | no | `sonnet` | Claude model: `sonnet`, `haiku`, or `opus` |
+| `--output-dir` | no | `output` | Directory for output JSONL |
+
+### How it works
+
+1. **Find mutation targets** — scans the repo for functions with edge-case signals (error handling, type checks, None guards) and existing test coverage
+2. **Introduce bugs** — uses Claude to inject realistic, multi-line mutations (type confusion, wrong method calls, incomplete refactoring, stale references)
+3. **Generate issue text** — captures real test output from the buggy code and frames it as a developer-filed issue, with references to real PR/issue numbers mined from git history
+4. **Emit candidates** — writes SWE-bench-compatible JSONL with `patch`, `test_patch`, `problem_statement`, and `base_commit`
+
+The synthesizer enforces an information firewall: issue descriptions contain only test output and behavioral symptoms, never implementation details from the patch. This makes synthetic instances difficult to distinguish from real ones — in evaluation, an Opus judge classified synthetic instances as real with >90% confidence across Python, Go, Java, and Rust repos.
+
+### Example output
+
+Each line in the output JSONL is a `CandidateInstance`:
+
+```json
+{
+  "repo": "pallets/flask",
+  "instance_id": "pallets__flask-93001",
+  "base_commit": "a1b2c3d...",
+  "patch": "diff --git a/src/flask/cli.py b/src/flask/cli.py\n@@ -191,7 +191,12 @@...",
+  "test_patch": "diff --git a/tests/test_async.py b/tests/test_async.py\n...",
+  "problem_statement": "tests/test_cli.py::test_locate_app_raises[cliapp.factory-no_app]\n\n...",
+  "created_at": "2026-06-30T12:00:00Z",
+  "provenance": "synthetic"
+}
+```
+
+For sample instances that successfully fooled an Opus judge across multiple languages, see [PR #90](https://github.com/Red-Hat-AI-Innovation-Team/SWE-benchify/pull/90).
+
+### Validation
+
+Synthetic candidates can be validated with the same Docker-based F2P/P2P pipeline used for real instances. This confirms that the test patch fails before the fix and passes after:
+
+```bash
+# Validate with the full pipeline
+swebenchify validate --input output/local__flask-synthetic-candidates.jsonl
+```
+
+### Environment variables
+
+| Variable | Description |
+|----------|-------------|
+| `ANTHROPIC_API_KEY` | Required. Used by Claude to generate mutations and issue text. |
+
 ## Architecture
 
 SWE-benchify is a **harness**, not an agent framework. It uses the [Claude Code Agent SDK](https://pypi.org/project/claude-code-sdk/) to dispatch Claude Code sessions and collects structured JSON output from each session.
