@@ -685,6 +685,7 @@ def main():
 
             results.append({
                 "instance_id": iid,
+                "repo": inst.get("repo", "unknown"),
                 "true_label": true_label,
                 "predicted": predicted,
                 "confidence": verdict["confidence"],
@@ -760,9 +761,31 @@ def main():
                          results=results, metrics=m, diversity=diversity)
 
         # ── Factory-compatible JSON output (stdout) ──
-        judge_evasion = 1.0 - recall
-        f2p_rate = len(judged_synth) / n_s if n_s > 0 else 0
-        factory_score = 0.7 * judge_evasion * f2p_rate + 0.3 * diversity["overall"]
+        # Per-repo scoring: each repo contributes independently
+        repo_scores = {}
+        for t in targets:
+            slug = t["repo_slug"]
+            repo_synth = [inst for inst in all_synth_instances if inst.get("repo") == slug]
+            if not repo_synth:
+                repo_scores[slug] = 0.0
+                log.info("repo_score %s=0.000 (no instances)", slug)
+                continue
+            repo_judged = [inst for inst in judged_synth if inst.get("repo") == slug]
+            repo_f2p_rate = len(repo_judged) / len(repo_synth)
+            repo_results = [r for r in results if r["repo"] == slug and r["true_label"] == "SYNTHETIC"]
+            repo_tp = sum(1 for r in repo_results if r["predicted"] == "SYNTHETIC")
+            repo_fn = sum(1 for r in repo_results if r["predicted"] == "REAL")
+            repo_recall = repo_tp / (repo_tp + repo_fn) if (repo_tp + repo_fn) else 0
+            repo_evasion = 1.0 - repo_recall
+            repo_div = compute_diversity(repo_synth)
+            repo_score = 0.7 * repo_evasion * repo_f2p_rate + 0.3 * repo_div["overall"]
+            repo_scores[slug] = round(repo_score, 3)
+            log.info(
+                "repo_score %s=%.3f evasion=%.2f f2p=%.2f div=%.2f",
+                slug, repo_score, repo_evasion, repo_f2p_rate, repo_div["overall"],
+            )
+
+        factory_score = sum(repo_scores.values()) / len(targets)
 
         conf_counts = {}
         for r in results:
@@ -771,15 +794,17 @@ def main():
                 conf_counts[c] = conf_counts.get(c, 0) + 1
         conf_summary = ", ".join(f"{v} {k}" for k, v in sorted(conf_counts.items()))
 
+        repo_detail = " | ".join(f"{s}={v:.3f}" for s, v in repo_scores.items())
         print(json.dumps({
             "score": round(factory_score, 3),
+            "repo_scores": repo_scores,
             "details": (
                 f"R{round_num} ({commit}): "
                 f"{m['fn']}/{m['tp']+m['fn']} synthetic fooled judge. "
                 f"Detection: {recall:.0%}. "
                 f"FP: {m['fp']}/{m['fp']+m['tn']}. "
                 f"Diversity: {diversity['overall']:.2f}. "
-                f"Repos: {', '.join(t['repo_slug'] for t in targets)}. "
+                f"Per-repo: {repo_detail}. "
                 f"Confidence: {conf_summary or 'n/a'}"
             ),
         }))
@@ -790,13 +815,25 @@ def main():
         log.info("quick mode — instances saved to %s", out_path)
 
         log.info("phase=judge status=skipped reason=quick_mode")
-        factory_score = 0.3 * diversity['overall']
+        repo_scores = {}
+        for t in targets:
+            slug = t["repo_slug"]
+            repo_synth = [inst for inst in all_synth_instances if inst.get("repo") == slug]
+            if not repo_synth:
+                repo_scores[slug] = 0.0
+                continue
+            repo_div = compute_diversity(repo_synth)
+            repo_scores[slug] = round(0.3 * repo_div["overall"], 3)
+        factory_score = sum(repo_scores.values()) / len(targets)
+        repo_detail = " | ".join(f"{s}={v:.3f}" for s, v in repo_scores.items())
         print(json.dumps({
             'score': round(factory_score, 3),
+            'repo_scores': repo_scores,
             'details': (
                 f'R{round_num} ({commit}): QUICK MODE. '
                 f'{n_s} synthetic generated. '
                 f'Diversity: {diversity["overall"]:.2f}. '
+                f'Per-repo: {repo_detail}. '
                 f'Docker F2P and judge skipped.'
             ),
         }))
