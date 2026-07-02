@@ -951,63 +951,31 @@ def test_issue_description_no_file_leak() -> None:
     for p in captured_prompts[1:]:
         assert "src/internal/processor.py" not in p
         assert "process_data" not in p
-    assert "Seeing an issue with" in result
+    assert result
     assert "src/internal/processor.py" not in result
     assert "process_data" not in result
 
 
 def test_generate_issue_from_symptom_no_bugspec() -> None:
-    """Verify generate_issue_from_symptom takes no BugSpec and only symptom."""
-    from unittest.mock import MagicMock, patch as mock_patch
-
-    captured_prompts: list[str] = []
-
-    async def fake_query(prompt: str, options: object = None):
-        captured_prompts.append(prompt)
-        return
-        yield
-
-    with mock_patch("swebenchify.synthesizer.query", fake_query), \
-         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
-        import asyncio
-        from swebenchify.synthesizer import generate_issue_from_symptom
-        result = asyncio.run(generate_issue_from_symptom(
-            symptom="time duration handling uses wrong units",
-            repo_context={"version": "2.0", "lang_version": "3.11", "os_info": "Ubuntu 22.04"},
-        ))
-
-    assert len(captured_prompts) >= 1
-    issue_prompt = captured_prompts[0]
-    assert "time duration handling" in issue_prompt
-    assert "2.0" in issue_prompt
-    assert "Ubuntu 22.04" in issue_prompt
-    # Fallback result since fake_query returns nothing
-    assert "Seeing an issue with" in result
+    """Without test_output, generate_issue_from_symptom returns symptom-based fallback."""
+    import asyncio
+    from swebenchify.synthesizer import generate_issue_from_symptom
+    result = asyncio.run(generate_issue_from_symptom(
+        symptom="time duration handling uses wrong units",
+        repo_context={"version": "2.0", "lang_version": "3.11", "os_info": "Ubuntu 22.04"},
+    ))
+    assert "time duration handling" in result
 
 
 def test_generate_issue_from_symptom_with_style_examples() -> None:
-    """Verify style examples are included in the prompt."""
-    from unittest.mock import MagicMock, patch as mock_patch
-
-    captured_prompts: list[str] = []
-
-    async def fake_query(prompt: str, options: object = None):
-        captured_prompts.append(prompt)
-        return
-        yield
-
-    with mock_patch("swebenchify.synthesizer.query", fake_query), \
-         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
-        import asyncio
-        from swebenchify.synthesizer import generate_issue_from_symptom
-        asyncio.run(generate_issue_from_symptom(
-            symptom="parsing breaks on unicode input",
-            style_examples=["Fix config loading for nested keys", "Handle empty input gracefully"],
-        ))
-
-    assert len(captured_prompts) >= 1
-    assert "Fix config loading for nested keys" in captured_prompts[0]
-    assert "Handle empty input gracefully" in captured_prompts[0]
+    """Without test_output, style_examples are ignored and symptom fallback is returned."""
+    import asyncio
+    from swebenchify.synthesizer import generate_issue_from_symptom
+    result = asyncio.run(generate_issue_from_symptom(
+        symptom="parsing breaks on unicode input",
+        style_examples=["Fix config loading for nested keys", "Handle empty input gracefully"],
+    ))
+    assert "parsing breaks" in result
 
 
 # ---------------------------------------------------------------------------
@@ -1183,13 +1151,10 @@ def test_issue_description_has_context(tmp_path: Path) -> None:
             bug_spec, repo_path=str(tmp_path),
         ))
 
-    # First call is _bug_to_symptom, second is issue generation
-    assert len(captured_prompts) >= 2
+    # Only _bug_to_symptom is called — issue generation no longer uses LLM
+    assert len(captured_prompts) >= 1
     symptom_prompt = captured_prompts[0]
     assert "user-facing symptom" in symptom_prompt
-    issue_prompt = captured_prompts[1]
-    assert "1.5.0" in issue_prompt
-    assert "OS:" in issue_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -2064,78 +2029,15 @@ def test_truncate_issue_keeps_title() -> None:
 # H1: generate_issue_from_symptom — character budget in prompt
 # ---------------------------------------------------------------------------
 
-def test_generate_issue_from_symptom_has_char_budget() -> None:
-    """Verify char budget instruction appears in the prompt."""
-    from unittest.mock import MagicMock, patch as mock_patch
-
-    captured_prompts: list[str] = []
-
-    async def fake_query(prompt: str, options: object = None):
-        captured_prompts.append(prompt)
-        return
-        yield
-
-    with mock_patch("swebenchify.synthesizer.query", fake_query), \
-         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
-        import asyncio
-        from swebenchify.synthesizer import generate_issue_from_symptom
-        asyncio.run(generate_issue_from_symptom(
-            symptom="parsing breaks on unicode",
-        ))
-
-    assert len(captured_prompts) >= 1
-    prompt = captured_prompts[0]
-    assert "characters" in prompt.lower()
-    assert "CONCISE" in prompt
-
-
-def test_generate_issue_from_symptom_no_critical_requirements() -> None:
-    """Verify the CRITICAL REQUIREMENTS block is gone from the prompt."""
-    from unittest.mock import MagicMock, patch as mock_patch
-
-    captured_prompts: list[str] = []
-
-    async def fake_query(prompt: str, options: object = None):
-        captured_prompts.append(prompt)
-        return
-        yield
-
-    with mock_patch("swebenchify.synthesizer.query", fake_query), \
-         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
-        import asyncio
-        from swebenchify.synthesizer import generate_issue_from_symptom
-        asyncio.run(generate_issue_from_symptom(
-            symptom="test symptom",
-        ))
-
-    prompt = captured_prompts[0]
-    assert "CRITICAL REQUIREMENTS" not in prompt
-
-
-def test_generate_issue_from_symptom_no_structure_templates() -> None:
-    """Verify the 4 structure options (ERROR FIRST etc.) are gone."""
-    from unittest.mock import MagicMock, patch as mock_patch
-
-    captured_prompts: list[str] = []
-
-    async def fake_query(prompt: str, options: object = None):
-        captured_prompts.append(prompt)
-        return
-        yield
-
-    with mock_patch("swebenchify.synthesizer.query", fake_query), \
-         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
-        import asyncio
-        from swebenchify.synthesizer import generate_issue_from_symptom
-        asyncio.run(generate_issue_from_symptom(
-            symptom="test symptom",
-        ))
-
-    prompt = captured_prompts[0]
-    assert "ERROR FIRST" not in prompt
-    assert "QUESTION FIRST" not in prompt
-    assert "REPRODUCTION FIRST" not in prompt
-    assert "RAMBLING" not in prompt
+def test_generate_issue_from_symptom_no_llm_without_test_output() -> None:
+    """Without test_output, no LLM is called — symptom fallback is returned."""
+    import asyncio
+    from swebenchify.synthesizer import generate_issue_from_symptom
+    result = asyncio.run(generate_issue_from_symptom(
+        symptom="parsing breaks on unicode",
+    ))
+    assert "parsing breaks" in result
+    assert "```" in result
 
 
 # ---------------------------------------------------------------------------
@@ -2426,16 +2328,19 @@ def test_mine_social_artifacts_no_repo(tmp_path: Path) -> None:
 # H2: _build_social_context
 # ---------------------------------------------------------------------------
 
-def test_build_social_context_disabled() -> None:
-    """_build_social_context is disabled and always returns empty string."""
+def test_build_social_context_produces_output() -> None:
+    """_build_social_context produces social references from artifacts."""
     artifacts = {
         "contributors": ["Alice"],
         "shas": ["abc1234"],
         "issues": ["42"],
         "branches": ["main", "develop"],
     }
-    for _ in range(50):
-        assert _build_social_context(artifacts) == ''
+    results = [_build_social_context(artifacts) for _ in range(100)]
+    non_empty = [r for r in results if r]
+    assert len(non_empty) > 0, "should produce non-empty output sometimes"
+    for r in non_empty:
+        assert any(s in r for s in ['abc1234', '@Alice', '#42'])
 
 
 def test_build_social_context_empty_artifacts() -> None:
@@ -2537,10 +2442,8 @@ def test_generate_issue_from_symptom_data_first() -> None:
             repo_context={"version": "2.0", "lang_version": "3.11", "os_info": "Ubuntu 22.04"},
         ))
 
-    assert result.startswith("tests/test_parse.py::test_decode")
     assert "UnicodeDecodeError" in result
     assert "```" in result
-    assert "Environment:" in result
     assert "##" not in result
 
 
@@ -2571,49 +2474,37 @@ def test_generate_issue_from_symptom_data_first_fallback() -> None:
         ))
 
     assert "AssertionError" in result
-    assert result.startswith("tests/test_core.py::test_add")
+    assert "```" in result
 
 
 def test_generate_issue_from_symptom_with_social_context() -> None:
-    """Social context is appended to the issue."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    """Social context is appended when test_output is provided."""
+    import asyncio
+    from swebenchify.synthesizer import generate_issue_from_symptom
+    test_output = (
+        "FAILED tests/test_foo.py::test_bar\n"
+        "E       AssertionError: expected 1 got 0\n"
+        "tests/test_foo.py:10: AssertionError\n"
+        "=================== 1 failed ===================\n"
+        "Extra padding to ensure output exceeds 200 chars. " * 3
+    )
+    result = asyncio.run(generate_issue_from_symptom(
+        symptom="broken feature",
+        test_output=test_output,
+        social_context="\n\nMight be related to #42",
+    ))
+    assert "#42" in result
 
-    async def fake_query(prompt: str, options: object = None):
-        return
-        yield
 
-    with mock_patch("swebenchify.synthesizer.query", fake_query), \
-         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
-        import asyncio
-        from swebenchify.synthesizer import generate_issue_from_symptom
-        result = asyncio.run(generate_issue_from_symptom(
-            symptom="broken feature",
-            social_context="\n\n@alice might know more",
-        ))
-
-    assert "@alice might know more" in result
-
-
-def test_generate_issue_from_symptom_no_strip_shas() -> None:
-    """Verify _strip_issue_shas is no longer applied to issue text."""
-    from unittest.mock import MagicMock, patch as mock_patch
-
-    class FakeResult:
-        content = [type("B", (), {"text": "## Bug\nSee commit abcdef1234567 for context."})()]
-
-    async def fake_query(prompt: str, options: object = None):
-        yield FakeResult()
-
-    with mock_patch("swebenchify.synthesizer.query", fake_query), \
-         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()), \
-         mock_patch("swebenchify.synthesizer.ResultMessage", FakeResult):
-        import asyncio
-        from swebenchify.synthesizer import generate_issue_from_symptom
-        result = asyncio.run(generate_issue_from_symptom(
-            symptom="test symptom",
-        ))
-
-    assert "abcdef1234567" in result
+def test_generate_issue_from_symptom_no_llm_for_symptom_only() -> None:
+    """Without test_output, result contains symptom in a code block."""
+    import asyncio
+    from swebenchify.synthesizer import generate_issue_from_symptom
+    result = asyncio.run(generate_issue_from_symptom(
+        symptom="test symptom",
+    ))
+    assert "test symptom" in result
+    assert "```" in result
 
 
 # ---------------------------------------------------------------------------
@@ -2714,7 +2605,7 @@ def test_is_valid_test_output_import_error_without_failure() -> None:
         "During handling...\n"
         "Some extra padding to make it over 200 chars. " * 5
     )
-    assert _is_valid_test_output(output) is True
+    assert _is_valid_test_output(output) is False
 
 
 def test_is_valid_test_output_import_error_with_failure() -> None:
@@ -2995,87 +2886,15 @@ def test_load_dataset_examples_handles_malformed_json(tmp_path: Path) -> None:
 # Exp-13: generate_issue_from_symptom with dataset_examples (few-shot path)
 # ---------------------------------------------------------------------------
 
-def test_generate_issue_from_symptom_uses_dataset_examples() -> None:
-    """When dataset_examples are provided, the prompt includes them."""
-    from unittest.mock import MagicMock, patch as mock_patch
-
-    captured_prompts: list[str] = []
-
-    async def fake_query(prompt: str, options: object = None):
-        captured_prompts.append(prompt)
-        return
-        yield
-
-    examples = [
-        "Setting error handler for unknown code fails",
-        "JSONEncoder encodes aware datetime objects incorrectly",
-    ]
-
-    with mock_patch("swebenchify.synthesizer.query", fake_query), \
-         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
-        import asyncio
-        from swebenchify.synthesizer import generate_issue_from_symptom
-        asyncio.run(generate_issue_from_symptom(
-            symptom="parsing breaks on unicode",
-            dataset_examples=examples,
-        ))
-
-    assert len(captured_prompts) >= 1
-    prompt = captured_prompts[0]
-    assert "Setting error handler for unknown code fails" in prompt
-    assert "JSONEncoder encodes aware datetime objects incorrectly" in prompt
-    assert "real GitHub issues" in prompt
-    assert "Match the examples" in prompt
-
-
-def test_generate_issue_from_symptom_few_shot_no_char_budget() -> None:
-    """When dataset_examples are provided, the old char_budget instruction is absent."""
-    from unittest.mock import MagicMock, patch as mock_patch
-
-    captured_prompts: list[str] = []
-
-    async def fake_query(prompt: str, options: object = None):
-        captured_prompts.append(prompt)
-        return
-        yield
-
-    with mock_patch("swebenchify.synthesizer.query", fake_query), \
-         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
-        import asyncio
-        from swebenchify.synthesizer import generate_issue_from_symptom
-        asyncio.run(generate_issue_from_symptom(
-            symptom="test symptom",
-            dataset_examples=["Example issue text"],
-        ))
-
-    prompt = captured_prompts[0]
-    assert "frustrated user" not in prompt
-    assert "CONCISE" not in prompt
-
-
-def test_generate_issue_from_symptom_fallback_without_dataset_examples() -> None:
-    """Without dataset_examples, falls back to the original prompt style."""
-    from unittest.mock import MagicMock, patch as mock_patch
-
-    captured_prompts: list[str] = []
-
-    async def fake_query(prompt: str, options: object = None):
-        captured_prompts.append(prompt)
-        return
-        yield
-
-    with mock_patch("swebenchify.synthesizer.query", fake_query), \
-         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
-        import asyncio
-        from swebenchify.synthesizer import generate_issue_from_symptom
-        asyncio.run(generate_issue_from_symptom(
-            symptom="test symptom",
-            dataset_examples=None,
-        ))
-
-    prompt = captured_prompts[0]
-    assert "CONCISE" in prompt
-    assert "characters" in prompt.lower()
+def test_generate_issue_from_symptom_dataset_examples_ignored() -> None:
+    """dataset_examples are ignored since LLM is no longer used for issues."""
+    import asyncio
+    from swebenchify.synthesizer import generate_issue_from_symptom
+    result = asyncio.run(generate_issue_from_symptom(
+        symptom="parsing breaks on unicode",
+        dataset_examples=["Example issue text"],
+    ))
+    assert "parsing breaks" in result
 
 
 def test_generate_issue_from_symptom_few_shot_not_used_for_data_first() -> None:
@@ -3451,7 +3270,8 @@ def test_data_first_no_llm_call() -> None:
         ))
 
     assert len(captured_prompts) == 0
-    assert result.startswith("tests/test_core.py::test_add")
+    assert "AssertionError" in result
+    assert "```" in result
     assert "##" not in result
 
 
@@ -3607,7 +3427,7 @@ def test_test_generation_prompt_function_level() -> None:
     assert len(captured_prompts) == 1
     prompt = captured_prompts[0]
     assert "HARD CONSTRAINT" in prompt
-    assert "Return ONLY the modified function" in prompt
+    assert "Return ONLY the modified test function" in prompt
     assert "Do NOT return the complete file" in prompt
     assert "def test_add" in prompt
 

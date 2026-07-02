@@ -187,8 +187,12 @@ def _go_make_test_cmd(env_spec: AnyEnvironmentSpec) -> str:
 
 
 def _go_test_scope(test_patch: str) -> str:
-    """Return Go package scope from diff headers."""
-    seen: dict[str, list[str]] = {}
+    """Return Go package scope from diff headers.
+
+    In Go, the test scope is the directory containing the test file,
+    expressed as a relative package path (e.g. ./internal/foo).
+    """
+    pkgs: set[str] = set()
     for line in test_patch.splitlines():
         if not line.startswith("diff --git"):
             continue
@@ -197,22 +201,13 @@ def _go_test_scope(test_patch: str) -> str:
             continue
         b_path = parts[3]
         path = b_path[2:] if b_path.startswith("b/") else b_path
-        top = Path(path).parts[0] if Path(path).parts else "."
-        rel_pkg = str(Path(*Path(path).parts[1:-1])) if len(Path(path).parts) > 2 else "."
-        pkg = f"./{rel_pkg}" if rel_pkg != "." else "./..."
-        if top not in seen:
-            seen[top] = []
-        if pkg not in seen[top]:
-            seen[top].append(pkg)
-
-    cmds: list[str] = []
-    for root, pkgs in seen.items():
-        if root == ".":
-            cmds.extend(pkgs)
+        pkg_dir = str(Path(path).parent)
+        if pkg_dir == ".":
+            pkgs.add("./...")
         else:
-            for pkg in pkgs:
-                cmds.append(f"./{root}/{pkg.lstrip('./')}")
-    return " ".join(cmds) if cmds else "./..."
+            pkgs.add(f"./{pkg_dir}")
+
+    return " ".join(sorted(pkgs)) if pkgs else "./..."
 
 
 # ---------------------------------------------------------------------------

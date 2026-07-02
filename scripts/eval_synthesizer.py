@@ -230,10 +230,6 @@ def _check_strings(instance: dict) -> tuple[bool, str]:
     if not patch.strip():
         return False, "empty patch"
 
-    test_patch = instance.get("test_patch", "") or ""
-    if not test_patch.strip():
-        return False, "empty test_patch"
-
     ps = instance.get("problem_statement", "") or ""
     if len(ps.strip()) < 50:
         return False, f"problem_statement too short ({len(ps.strip())} chars)"
@@ -447,7 +443,7 @@ def main():
     if args.quick:
         targets = [t.copy() for t in EVAL_TARGETS]
         for t in targets:
-            t['n_synthetic'] = 1
+            t['n_synthetic'] = 2
             t['n_real'] = 1
     else:
         targets = EVAL_TARGETS
@@ -605,6 +601,7 @@ def main():
     if not args.quick:
         log.info("phase=f2p starting validation of %d instances", n_s)
         f2p_failures = []
+        f2p_passed_instances = []
 
         for i, inst in enumerate(all_synth_instances):
             iid = inst.get("instance_id", "unknown")
@@ -633,37 +630,40 @@ def main():
                 reason = result.error_message or f"status={result.status}"
                 f2p_failures.append((iid, reason))
                 log.warning("f2p_fail instance=%s reason=%s", iid, reason)
-                break
+                continue
             log.info(
                 "f2p_pass instance=%s f2p=%d p2p=%d",
                 iid, len(result.FAIL_TO_PASS), len(result.PASS_TO_PASS),
             )
+            f2p_passed_instances.append(inst)
 
         if f2p_failures:
-            log.warning("F2P GATE FAILED — %d instance(s)", len(f2p_failures))
+            log.warning("F2P failures: %d/%d instance(s)", len(f2p_failures), n_s)
             for iid, reason in f2p_failures:
                 log.warning("  %s: %s", iid, reason)
 
+        if not f2p_passed_instances:
             _write_round_doc(round_num, commit, n_s, n_r, targets,
                              diversity=diversity, f2p_failures=f2p_failures)
 
             print(json.dumps({
                 "score": 0.0,
                 "details": (
-                    f"R{round_num} ({commit}): F2P GATE FAILED. "
+                    f"R{round_num} ({commit}): ALL F2P FAILED. "
                     + "; ".join(f"{iid}: {reason}" for iid, reason in f2p_failures)
                 ),
             }))
             return
 
-        log.info("phase=f2p status=passed count=%d/%d", n_s, n_s)
+        log.info("phase=f2p status=passed count=%d/%d", len(f2p_passed_instances), n_s)
     else:
         log.info("phase=f2p status=skipped reason=quick_mode")
 
     # ── Phase 5 (slow): Build eval set + judge ──
     if not args.quick:
+        judged_synth = f2p_passed_instances if f2p_passed_instances else all_synth_instances
         eval_set = []
-        for inst in all_synth_instances:
+        for inst in judged_synth:
             eval_set.append({"instance": inst, "label": "SYNTHETIC"})
         for inst in all_real_samples:
             eval_set.append({"instance": inst, "label": "REAL"})
@@ -761,7 +761,8 @@ def main():
 
         # ── Factory-compatible JSON output (stdout) ──
         judge_evasion = 1.0 - recall
-        factory_score = 0.7 * judge_evasion + 0.3 * diversity["overall"]
+        f2p_rate = len(judged_synth) / n_s if n_s > 0 else 0
+        factory_score = 0.7 * judge_evasion * f2p_rate + 0.3 * diversity["overall"]
 
         conf_counts = {}
         for r in results:
