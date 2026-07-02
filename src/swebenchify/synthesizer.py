@@ -270,13 +270,22 @@ def _extract_go_functions(lines: list[str]) -> list[dict[str, str | int]]:
 
 
 def _extract_rust_functions(lines: list[str]) -> list[dict[str, str | int]]:
-    """Extract function bodies from Rust source using brace counting."""
+    """Extract function bodies from Rust source using brace counting.
+
+    Skips functions inside #[cfg(test)] blocks (inline test modules).
+    """
     functions: list[dict[str, str | int]] = []
     pat = _FUNC_PATTERNS["rust"]
+    # Find where #[cfg(test)] starts so we can exclude test-only functions
+    test_block_start = len(lines)
+    for idx, line in enumerate(lines):
+        if line.strip().startswith("#[cfg(test)]"):
+            test_block_start = idx
+            break
     i = 0
     while i < len(lines):
         m = pat.match(lines[i])
-        if m:
+        if m and i < test_block_start:
             name = m.group("name")
             start = i
             brace_count = 0
@@ -404,14 +413,10 @@ def find_mutation_targets(
             lines = content.splitlines()
             functions = extractor(lines)
 
-            added = 0
             for func in functions:
                 source_lines = func["source"].strip().splitlines()
                 if len(source_lines) < 8:
                     continue
-                if added >= max_functions:
-                    break
-                added += 1
                 targets.append({
                     "file": rel_path,
                     "function_name": func["function_name"],
@@ -422,7 +427,15 @@ def find_mutation_targets(
                 })
 
     targets.sort(key=_edge_case_score, reverse=True)
-    return targets
+    # Limit to max_functions per file AFTER sorting by quality
+    per_file_counts: dict[str, int] = {}
+    filtered: list[dict] = []
+    for t in targets:
+        f = t["file"]
+        per_file_counts[f] = per_file_counts.get(f, 0) + 1
+        if per_file_counts[f] <= max_functions:
+            filtered.append(t)
+    return filtered
 
 
 _EDGE_CASE_SIGNALS = [
@@ -1928,6 +1941,14 @@ def _find_existing_test_file(
         if (root / test_file).is_file():
             return test_file
     elif language == "rust":
+        # Rust inline tests: the source file itself may contain #[test] functions
+        if (root / source_file).is_file():
+            try:
+                content = (root / source_file).read_text(errors="replace")
+                if "#[test]" in content:
+                    return source_file
+            except OSError:
+                pass
         rust_candidates = [
             f"tests/{stem}.rs",
             str(source_path.parent / f"{stem}_test.rs"),
@@ -1935,6 +1956,12 @@ def _find_existing_test_file(
         for c in rust_candidates:
             if (root / c).is_file():
                 return c
+        # Broader: any .rs file in tests/ whose name contains the stem
+        tests_dir = root / "tests"
+        if tests_dir.is_dir():
+            for f in sorted(tests_dir.rglob("*.rs")):
+                if stem in f.stem:
+                    return str(f.relative_to(root))
     elif language == "java":
         java_path = str(source_path)
         # Direct test file: FooTest.java in src/test/java/...
@@ -1953,6 +1980,13 @@ def _find_existing_test_file(
         parent_test_dir = test_dir.parent if test_dir.exists() else None
         if parent_test_dir and parent_test_dir.is_dir():
             for f in sorted(parent_test_dir.rglob(f"*{stem}*Test.java")):
+                return str(f.relative_to(root))
+        # Broadest: search entire src/test/java/ for any test referencing this class
+        test_root = root / "src" / "test" / "java"
+        if test_root.is_dir():
+            for f in sorted(test_root.rglob(f"*{stem}*Test.java")):
+                return str(f.relative_to(root))
+            for f in sorted(test_root.rglob(f"*Test*{stem}*.java")):
                 return str(f.relative_to(root))
 
     return None
@@ -3162,15 +3196,23 @@ def _run_tests_on_buggy_code(
     elif target_file and language == "rust":
         cargo = str(Path.home() / ".cargo" / "bin" / "cargo")
         test_file = _find_existing_test_file(repo_path, target_file, language)
-        if test_file:
-            test_name = Path(test_file).stem
-            test_cmd = [cargo, "test", "--test", test_name]
-            logger.debug("  Running targeted Rust tests: --test %s", test_name)
-        else:
-            pkg_dir = os.path.dirname(target_file) or "."
+        if test_file and test_file == target_file:
+            # Inline tests in the source file — run by module name
             mod_name = Path(target_file).stem
             test_cmd = [cargo, "test", mod_name]
-            logger.debug("  Running targeted Rust tests: %s", mod_name)
+            logger.debug("  Running targeted Rust tests (inline): %s", mod_name)
+        elif test_file:
+            test_name = Path(test_file).stem
+            if test_file.startswith("tests/"):
+                test_cmd = [cargo, "test", "--test", test_name]
+                logger.debug("  Running targeted Rust tests: --test %s", test_name)
+            else:
+                test_cmd = [cargo, "test", test_name]
+                logger.debug("  Running targeted Rust tests: %s", test_name)
+        else:
+            mod_name = Path(target_file).stem
+            test_cmd = [cargo, "test", mod_name]
+            logger.debug("  Running targeted Rust tests (fallback): %s", mod_name)
 
     # Run baseline on clean code to identify pre-existing failures
     baseline_deselects: list[str] = []
