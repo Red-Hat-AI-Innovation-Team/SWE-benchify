@@ -2032,16 +2032,27 @@ async def generate_test_patch(
     return None
 
 
-def _count_test_functions(code: str) -> int:
-    """Count the number of test function definitions in Python code."""
+def _count_test_functions(code: str, language: str = "python") -> int:
+    """Count the number of test function definitions."""
+    if language == "go":
+        return len(re.findall(r'^func\s+Test\w+', code, re.MULTILINE))
     return len(re.findall(r'^\s*def\s+test_\w+', code, re.MULTILINE))
 
 
-def _extract_test_functions(source: str) -> list[dict[str, str | int]]:
-    """Extract test functions from Python source using AST.
+def _extract_test_functions(source: str, language: str = "python") -> list[dict[str, str | int]]:
+    """Extract test functions from source code.
 
     Returns a list of dicts with keys: name, source, start_line, end_line.
     """
+    if language == "python":
+        return _extract_test_functions_python(source)
+    if language == "go":
+        return _extract_test_functions_go(source)
+    return []
+
+
+def _extract_test_functions_python(source: str) -> list[dict[str, str | int]]:
+    """Extract test functions from Python source using AST."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -2064,6 +2075,40 @@ def _extract_test_functions(source: str) -> list[dict[str, str | int]]:
             "start_line": start,
             "end_line": end,
         })
+
+    return results
+
+
+def _extract_test_functions_go(source: str) -> list[dict[str, str | int]]:
+    """Extract test functions from Go source using brace matching."""
+    lines = source.splitlines(keepends=True)
+    results: list[dict[str, str | int]] = []
+    func_re = re.compile(r'^func\s+(Test\w+)\s*\(')
+
+    i = 0
+    while i < len(lines):
+        m = func_re.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        name = m.group(1)
+        start = i
+        brace_depth = 0
+        for j in range(i, len(lines)):
+            brace_depth += lines[j].count('{') - lines[j].count('}')
+            if brace_depth <= 0 and '{' in ''.join(lines[i:j+1]):
+                end = j + 1
+                break
+        else:
+            end = len(lines)
+        func_source = "".join(lines[start:end])
+        results.append({
+            "name": name,
+            "source": func_source,
+            "start_line": start,
+            "end_line": end,
+        })
+        i = end
 
     return results
 
@@ -2101,8 +2146,13 @@ def _rank_test_functions(
     return [tf for _, _, tf in scored[:limit]]
 
 
-def _extract_file_imports(source: str) -> str:
-    """Extract import lines from the top of a Python file."""
+def _extract_file_imports(source: str, language: str = "python") -> str:
+    """Extract import lines from the top of a source file."""
+    if language == "go":
+        m = re.search(r'(import\s+\(.*?\)|import\s+"[^"]*")', source, re.DOTALL)
+        if m:
+            return m.group(0) + "\n"
+        return ""
     lines: list[str] = []
     for line in source.splitlines():
         stripped = line.strip()
@@ -2144,10 +2194,10 @@ async def _generate_test_patch_existing(
         logger.warning("Could not read existing test file %s", test_file)
         return None
 
-    if language != "python":
+    if language not in ("python", "go"):
         return None
 
-    test_functions = _extract_test_functions(original_test_content)
+    test_functions = _extract_test_functions(original_test_content, language)
     if not test_functions:
         logger.warning("  No test functions found in %s", test_file)
         return None
@@ -2156,7 +2206,7 @@ async def _generate_test_patch_existing(
     if not ranked:
         return None
 
-    file_imports = _extract_file_imports(original_test_content)
+    file_imports = _extract_file_imports(original_test_content, language)
     resolved_model = MODEL_MAP.get(model, model)
     options = ClaudeCodeOptions(max_turns=1, model=resolved_model)
 
@@ -2196,7 +2246,7 @@ Requirements:
 - Follow the existing test style
 - Do NOT add comments explaining your changes
 - Do NOT add new test functions
-- Return ONLY the function starting from `def {target["name"]}` — nothing else"""
+- Return ONLY the function starting from `{"func " + target["name"] if language == "go" else "def " + str(target["name"])}` — nothing else"""
 
         modified_func: str | None = None
         try:
@@ -2221,7 +2271,7 @@ Requirements:
             continue
 
         modified_func = _strip_strategy_labels(modified_func)
-        func_prefix = f"def {target['name']}"
+        func_prefix = f"func {target['name']}" if language == "go" else f"def {target['name']}"
         idx = modified_func.find(func_prefix)
         if idx > 0:
             modified_func = modified_func[idx:]
