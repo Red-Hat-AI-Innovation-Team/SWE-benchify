@@ -437,7 +437,23 @@ def main():
                         help='Fast mode: 1 repo, 1 instance, skip Docker F2P and judge')
     parser.add_argument('--seed', type=int, default=None,
                         help='Random seed (default: 42 + round_num)')
+    parser.add_argument('--mode', choices=['generator', 'discriminator'],
+                        default='generator',
+                        help='Adversarial loop mode: optimize generator (evasion) '
+                             'or discriminator (detection)')
+    parser.add_argument('--judge-prompt', type=str, default=None,
+                        help='Path to custom judge system prompt file '
+                             '(discriminator mode)')
+    parser.add_argument('--instances', type=str, default=None,
+                        help='Path to saved instances JSON (discriminator mode '
+                             'reuses prior generator output instead of synthesizing)')
     args = parser.parse_args()
+
+    if args.judge_prompt:
+        global JUDGE_SYSTEM
+        with open(args.judge_prompt) as f:
+            JUDGE_SYSTEM = f.read()
+        log.info("loaded custom judge prompt from %s", args.judge_prompt)
 
     round_num = detect_round()
     commit = detect_commit()
@@ -520,7 +536,26 @@ def main():
     all_real_samples = []
     structural_failures = []
 
-    if len(targets) == 1:
+    # In discriminator mode with saved instances, skip synthesis entirely
+    if args.instances:
+        with open(args.instances) as f:
+            saved = json.load(f)
+        if isinstance(saved, list):
+            all_synth_instances = saved
+        else:
+            all_synth_instances = saved.get("synthetic_instances", [])
+        n_s = len(all_synth_instances)
+        log.info("loaded %d saved synthetic instances from %s", n_s, args.instances)
+        # Sample real instances per repo
+        for t in targets:
+            slug = t["repo_slug"]
+            n_real = t.get("n_real", 3)
+            repo_real = [r for r in all_real if r.get("repo") == slug]
+            if repo_real:
+                all_real_samples.extend(random.sample(repo_real, min(n_real, len(repo_real))))
+        n_r = len(all_real_samples)
+        log.info("totals: synthetic=%d real=%d (from saved)", n_s, n_r)
+    elif len(targets) == 1:
         results = [_synthesize_target(targets[0], all_real)]
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(targets)) as executor:
@@ -542,14 +577,15 @@ def main():
                         "repo_slug": t["repo_slug"],
                     })
 
-    for r in results:
-        all_synth_instances.extend(r["synth_instances"])
-        all_real_samples.extend(r["real_samples"])
-        structural_failures.extend(r["failures"])
+    if not args.instances:
+        for r in results:
+            all_synth_instances.extend(r["synth_instances"])
+            all_real_samples.extend(r["real_samples"])
+            structural_failures.extend(r["failures"])
 
-    n_s = len(all_synth_instances)
-    n_r = len(all_real_samples)
-    log.info("totals: synthetic=%d real=%d", n_s, n_r)
+        n_s = len(all_synth_instances)
+        n_r = len(all_real_samples)
+        log.info("totals: synthetic=%d real=%d", n_s, n_r)
 
     if not all_synth_instances:
         log.error("no synthetic instances generated across any repo")
@@ -557,6 +593,9 @@ def main():
         sys.exit(0)
 
     # ── Phase 2 (fast): Structural gate ──
+    if args.instances:
+        log.info("phase=structural status=skipped reason=saved_instances")
+        structural_failures = []
     if structural_failures:
         log.warning("STRUCTURAL GATE FAILED — %d instance(s)", len(structural_failures))
         for iid, reason in structural_failures:
@@ -601,7 +640,10 @@ def main():
         return
 
     # ── Phase 4 (expensive): F2P/P2P Docker validation ──
-    if not args.quick:
+    if args.instances:
+        log.info("phase=f2p status=skipped reason=saved_instances")
+        f2p_passed_instances = all_synth_instances[:]
+    elif not args.quick:
         log.info("phase=f2p starting validation of %d instances", n_s)
         f2p_failures = []
         f2p_passed_instances = []
@@ -775,18 +817,35 @@ def main():
                 continue
             repo_judged = [inst for inst in judged_synth if inst.get("repo") == slug]
             repo_f2p_rate = len(repo_judged) / len(repo_synth)
-            repo_results = [r for r in results if r["repo"] == slug and r["true_label"] == "SYNTHETIC"]
-            repo_tp = sum(1 for r in repo_results if r["predicted"] == "SYNTHETIC")
-            repo_fn = sum(1 for r in repo_results if r["predicted"] == "REAL")
+            repo_results_synth = [r for r in results if r["repo"] == slug and r["true_label"] == "SYNTHETIC"]
+            repo_tp = sum(1 for r in repo_results_synth if r["predicted"] == "SYNTHETIC")
+            repo_fn = sum(1 for r in repo_results_synth if r["predicted"] == "REAL")
             repo_recall = repo_tp / (repo_tp + repo_fn) if (repo_tp + repo_fn) else 0
             repo_evasion = 1.0 - repo_recall
             repo_div = compute_diversity(repo_synth)
-            repo_score = 0.7 * repo_evasion * repo_f2p_rate + 0.3 * repo_div["overall"]
-            repo_scores[slug] = round(repo_score, 3)
-            log.info(
-                "repo_score %s=%.3f evasion=%.2f f2p=%.2f div=%.2f",
-                slug, repo_score, repo_evasion, repo_f2p_rate, repo_div["overall"],
-            )
+
+            if args.mode == "discriminator":
+                # Discriminator mode: recall * specificity (multiplicative).
+                # Both must be high — "call everything fake" → specificity=0 → score=0.
+                # "Call everything real" → recall=0 → score=0. No degenerate strategy works.
+                repo_results_real = [r for r in results if r["repo"] == slug and r["true_label"] == "REAL"]
+                repo_fp = sum(1 for r in repo_results_real if r["predicted"] == "SYNTHETIC")
+                repo_tn = sum(1 for r in repo_results_real if r["predicted"] == "REAL")
+                repo_specificity = repo_tn / (repo_fp + repo_tn) if (repo_fp + repo_tn) else 0
+                repo_score = repo_recall * repo_specificity
+                repo_scores[slug] = round(repo_score, 3)
+                log.info(
+                    "repo_score %s=%.3f recall=%.2f specificity=%.2f (fp=%d tn=%d)",
+                    slug, repo_score, repo_recall, repo_specificity, repo_fp, repo_tn,
+                )
+            else:
+                # Generator mode: reward evasion
+                repo_score = 0.7 * repo_evasion * repo_f2p_rate + 0.3 * repo_div["overall"]
+                repo_scores[slug] = round(repo_score, 3)
+                log.info(
+                    "repo_score %s=%.3f evasion=%.2f f2p=%.2f div=%.2f",
+                    slug, repo_score, repo_evasion, repo_f2p_rate, repo_div["overall"],
+                )
 
         factory_score = sum(repo_scores.values()) / len(targets)
 
@@ -798,19 +857,37 @@ def main():
         conf_summary = ", ".join(f"{v} {k}" for k, v in sorted(conf_counts.items()))
 
         repo_detail = " | ".join(f"{s}={v:.3f}" for s, v in repo_scores.items())
-        print(json.dumps({
-            "score": round(factory_score, 3),
-            "repo_scores": repo_scores,
-            "details": (
-                f"R{round_num} ({commit}): "
+        if args.mode == "discriminator":
+            details = (
+                f"R{round_num} ({commit}) [DISCRIMINATOR]: "
+                f"Recall={recall:.0%} ({m['tp']}/{m['tp']+m['fn']} synthetic detected). "
+                f"FP={m['fp']}/{m['fp']+m['tn']} real misclassified as fake. "
+                f"Per-repo: {repo_detail}. "
+                f"Confidence: {conf_summary or 'n/a'}"
+            )
+        else:
+            details = (
+                f"R{round_num} ({commit}) [GENERATOR]: "
                 f"{m['fn']}/{m['tp']+m['fn']} synthetic fooled judge. "
                 f"Detection: {recall:.0%}. "
                 f"FP: {m['fp']}/{m['fp']+m['tn']}. "
                 f"Diversity: {diversity['overall']:.2f}. "
                 f"Per-repo: {repo_detail}. "
                 f"Confidence: {conf_summary or 'n/a'}"
-            ),
-        }))
+            )
+        output = {
+            "score": round(factory_score, 3),
+            "mode": args.mode,
+            "repo_scores": repo_scores,
+            "details": details,
+        }
+        if args.mode == "generator":
+            instances_path = f'/tmp/synth-eval-instances-r{round_num}.json'
+            with open(instances_path, 'w') as f:
+                json.dump(all_synth_instances, f, indent=2)
+            output["instances_path"] = instances_path
+            log.info("saved %d instances to %s", len(all_synth_instances), instances_path)
+        print(json.dumps(output))
     else:
         out_path = f'/tmp/synth-eval-results-r{round_num}-quick.json'
         with open(out_path, 'w') as f:
