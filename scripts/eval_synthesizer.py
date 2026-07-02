@@ -124,10 +124,15 @@ synth_mod.query = _vertex_query
 synth_mod.ResultMessage = _FakeResultMessage
 synth_mod.ClaudeCodeOptions = _FakeOptions
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
+log = logging.getLogger("eval_synthesizer")
+log.setLevel(logging.DEBUG)
 
-def err(*a, **kw):
-    print(*a, **kw, file=sys.stderr)
+_stderr = logging.StreamHandler(sys.stderr)
+_stderr.setLevel(logging.DEBUG)
+_stderr.setFormatter(logging.Formatter(
+    "%(asctime)s %(levelname)-5s %(message)s", datefmt="%H:%M:%S"
+))
+log.addHandler(_stderr)
 
 # ── Auto-detect round number and synthesizer commit ──────────────────────
 
@@ -156,7 +161,7 @@ def ensure_repo(target: dict) -> str:
     """Clone repo if not present. Returns base_commit from dataset."""
     repo_path = target["repo_path"]
     if not os.path.isdir(os.path.join(repo_path, ".git")):
-        err(f"  Cloning {target['repo_url']} → {repo_path}")
+        log.info("cloning %s → %s", target['repo_url'], repo_path)
         subprocess.run(
             ["git", "clone", "--quiet", target["repo_url"], repo_path],
             check=True,
@@ -446,11 +451,8 @@ def main():
     else:
         targets = EVAL_TARGETS
 
-    mode_str = ' [QUICK]' if args.quick else ''
-    err("=" * 72)
-    err(f"ROUND {round_num} — SYNTHESIZER COMMIT {commit} — OPUS 4.6 JUDGE{mode_str}")
-    err(f"Multi-repo eval: {', '.join(t['repo_slug'] for t in targets)}")
-    err("=" * 72)
+    log.info("round=%d commit=%s mode=%s", round_num, commit, 'quick' if args.quick else 'full')
+    log.info("targets: %s", ', '.join(t['repo_slug'] for t in targets))
 
     # ── Load dataset (merge all instance files) ──
     all_real = []
@@ -458,9 +460,9 @@ def main():
         if os.path.isfile(ds_path):
             with open(ds_path) as f:
                 all_real.extend(json.loads(line) for line in f)
-            err(f"  Loaded {ds_path}")
+            log.debug("loaded dataset %s", ds_path)
         else:
-            err(f"  Skipped (not found): {ds_path}")
+            log.warning("dataset not found: %s", ds_path)
 
     random.seed(args.seed if args.seed is not None else 42 + round_num)
 
@@ -471,17 +473,17 @@ def main():
     def _synthesize_target(target: dict, all_real: list[dict]) -> dict:
         repo_slug = target["repo_slug"]
         repo_path = target["repo_path"]
-        err(f"\n── {repo_slug} ──")
+        log.info("phase=synthesize repo=%s", repo_slug)
 
         base_commit = target.get('base_commit') or pick_base_commit(repo_slug, all_real)
-        err(f"  Base commit: {base_commit[:12]}")
+        log.info("base_commit=%s", base_commit[:12])
 
         subprocess.run(
             ["git", "checkout", "--quiet", "--force", base_commit],
             cwd=repo_path, check=True,
         )
 
-        err(f"  Synthesizing {target['n_synthetic']} instances...")
+        log.info("synthesizing n=%d instances", target['n_synthetic'])
         candidates = asyncio.run(synth_mod.synthesize_repo(
             repo_path=repo_path,
             repo_slug=repo_slug,
@@ -491,7 +493,7 @@ def main():
             model="sonnet",
         ))
         synth_instances = [asdict(c) for c in candidates]
-        err(f"  {len(synth_instances)} synthetic instances generated")
+        log.info("synthesized %d instances", len(synth_instances))
 
         failures = []
         for inst in synth_instances:
@@ -499,12 +501,12 @@ def main():
             if not passed:
                 iid = inst.get("instance_id", "unknown")
                 failures.append((iid, reason))
-                err(f"  VALIDATION FAIL: {iid} — {reason}")
+                log.warning("validation_fail instance=%s reason=%s", iid, reason)
 
         repo_real = [i for i in all_real if i["repo"] == repo_slug]
         n_real = min(target["n_real"], len(repo_real))
         real_samples = random.sample(repo_real, n_real) if repo_real else []
-        err(f"  Sampled {len(real_samples)} real instances")
+        log.info("sampled %d real instances for %s", len(real_samples), repo_slug)
 
         return {
             "synth_instances": synth_instances,
@@ -532,7 +534,7 @@ def main():
                     results.append(future.result())
                 except Exception as exc:
                     t = futures[future]
-                    err(f"  ERROR: {t['repo_slug']} synthesis failed: {exc}")
+                    log.error("synthesis failed repo=%s: %s", t['repo_slug'], exc)
                     results.append({
                         "synth_instances": [],
                         "real_samples": [],
@@ -547,19 +549,18 @@ def main():
 
     n_s = len(all_synth_instances)
     n_r = len(all_real_samples)
-    err(f"\n── Totals: {n_s} synthetic, {n_r} real ──")
+    log.info("totals: synthetic=%d real=%d", n_s, n_r)
 
     if not all_synth_instances:
-        err("ERROR: No synthetic instances generated across any repo.")
+        log.error("no synthetic instances generated across any repo")
         print(json.dumps({"score": 0.0, "details": f"R{round_num}: no synthetic instances generated"}))
         sys.exit(0)
 
     # ── Phase 2 (fast): Structural gate ──
     if structural_failures:
-        err(f"\n  STRUCTURAL GATE FAILED — {len(structural_failures)} instance(s):")
+        log.warning("STRUCTURAL GATE FAILED — %d instance(s)", len(structural_failures))
         for iid, reason in structural_failures:
-            err(f"    {iid}: {reason}")
-        err("  Score: 0.0 (skipping diversity and judge)")
+            log.warning("  %s: %s", iid, reason)
 
         _write_round_doc(round_num, commit, n_s, n_r, targets,
                          structural_failures=structural_failures)
@@ -574,18 +575,19 @@ def main():
         }))
         return
 
-    err("  Structural validation: all passed ✓")
+    log.info("phase=structural status=passed count=%d/%d", n_s, n_s)
 
     # ── Phase 3 (fast): Diversity gate ──
     diversity = compute_diversity(all_synth_instances)
-    err("\n── Diversity ──")
-    err(f"  Files touched: {diversity['unique_files']} unique")
-    err(f"  Avg patch complexity: {diversity['avg_changed_lines']} changed lines")
-    err(f"  Issue length CV: {diversity['issue_length_cv']}")
-    err(f"  Diversity score: {diversity['overall']}")
+    log.info(
+        "phase=diversity unique_files=%d avg_changed_lines=%.1f "
+        "issue_length_cv=%.3f score=%.3f",
+        diversity['unique_files'], diversity['avg_changed_lines'],
+        diversity['issue_length_cv'], diversity['overall'],
+    )
 
     if diversity["overall"] == 0.0 and not args.quick:
-        err("  Diversity score is 0.0 — skipping F2P and judge")
+        log.warning("DIVERSITY GATE FAILED — score 0.0, skipping F2P and judge")
 
         _write_round_doc(round_num, commit, n_s, n_r, targets, diversity=diversity)
 
@@ -600,7 +602,7 @@ def main():
 
     # ── Phase 4 (expensive): F2P/P2P Docker validation ──
     if not args.quick:
-        err("\n── F2P/P2P validation ──")
+        log.info("phase=f2p starting validation of %d instances", n_s)
         f2p_failures = []
 
         for i, inst in enumerate(all_synth_instances):
@@ -613,7 +615,7 @@ def main():
                 f2p_failures.append((iid, "no matching target config"))
                 break
 
-            err(f"  [{i+1}/{n_s}] {iid}...")
+            log.info("f2p [%d/%d] instance=%s", i + 1, n_s, iid)
             env_spec = _make_env_spec(target)
 
             result = compute_f2p(
@@ -629,18 +631,17 @@ def main():
             if result.status != "valid":
                 reason = result.error_message or f"status={result.status}"
                 f2p_failures.append((iid, reason))
-                err(f"    FAILED: {reason}")
+                log.warning("f2p_fail instance=%s reason=%s", iid, reason)
                 break
-            err(
-                f"    PASSED: f2p={len(result.FAIL_TO_PASS)}"
-                f" p2p={len(result.PASS_TO_PASS)}"
+            log.info(
+                "f2p_pass instance=%s f2p=%d p2p=%d",
+                iid, len(result.FAIL_TO_PASS), len(result.PASS_TO_PASS),
             )
 
         if f2p_failures:
-            err(f"\n  F2P GATE FAILED — {len(f2p_failures)} instance(s):")
+            log.warning("F2P GATE FAILED — %d instance(s)", len(f2p_failures))
             for iid, reason in f2p_failures:
-                err(f"    {iid}: {reason}")
-            err("  Score: 0.0 (skipping judge)")
+                log.warning("  %s: %s", iid, reason)
 
             _write_round_doc(round_num, commit, n_s, n_r, targets,
                              diversity=diversity, f2p_failures=f2p_failures)
@@ -654,9 +655,9 @@ def main():
             }))
             return
 
-        err(f"  F2P/P2P validation: {n_s}/{n_s} passed ✓")
+        log.info("phase=f2p status=passed count=%d/%d", n_s, n_s)
     else:
-        err('\n── F2P/P2P validation (SKIPPED in quick mode) ──')
+        log.info("phase=f2p status=skipped reason=quick_mode")
 
     # ── Phase 5 (slow): Build eval set + judge ──
     if not args.quick:
@@ -668,18 +669,14 @@ def main():
 
         random.shuffle(eval_set)
 
-        err(f"\n── Evaluation set: {len(eval_set)} instances ({n_s} synthetic, {n_r} real) ──")
+        log.info("phase=judge eval_set=%d (synthetic=%d real=%d)", len(eval_set), n_s, n_r)
 
-        # ── Judge ──
-        err("\n── Running Opus 4.6 judge ──\n")
         results = []
 
         for i, item in enumerate(eval_set):
             inst = item["instance"]
             true_label = item["label"]
             iid = inst.get("instance_id", "unknown")
-
-            err(f"[{i+1}/{len(eval_set)}] {iid}")
 
             verdict = judge_instance(inst)
             predicted = verdict["classification"]
@@ -694,33 +691,22 @@ def main():
                 "reasoning": verdict["reasoning"],
             })
 
-            icon = "CORRECT" if correct else "WRONG"
-            err(f"  true={true_label:<10} pred={predicted:<10} conf={verdict['confidence']:<6} [{icon}]")
-            err(f"  {verdict['reasoning'][:160]}")
-            err()
-
-        # ── Results ──
-        err("=" * 72)
-        err("RESULTS")
-        err("=" * 72)
+            log.info(
+                "judge [%d/%d] instance=%s true=%s pred=%s conf=%s %s",
+                i + 1, len(eval_set), iid, true_label, predicted,
+                verdict['confidence'], "CORRECT" if correct else "WRONG",
+            )
+            log.debug("reasoning: %s", verdict['reasoning'][:200])
 
         m = compute_metrics(results)
 
-        err(f"\n  Round:       {round_num} (commit {commit})")
-        err(f"  Repos:       {', '.join(t['repo_slug'] for t in targets)}")
-        err(f"  Instances:   {m['total']} ({n_r} real, {n_s} synthetic)")
-        err(f"  Accuracy:    {m['accuracy']:.0%}")
-        err(f"  Precision:   {m['precision']:.0%}")
-        err(f"  Recall:      {m['recall']:.0%}")
-        err(f"  F1:          {m['f1']:.0%}")
-        err("\n  Confusion matrix:")
-        err("                    Predicted REAL    Predicted SYNTH")
-        err(f"  Actual REAL       {m['tn']:>8}          {m['fp']:>8}")
-        err(f"  Actual SYNTH      {m['fn']:>8}          {m['tp']:>8}")
-
-        err(f"\n{'=' * 72}")
-        err("JUDGE REASONING BY OUTCOME")
-        err("=" * 72)
+        log.info(
+            "results round=%d accuracy=%.0f%% precision=%.0f%% "
+            "recall=%.0f%% f1=%.0f%% tp=%d tn=%d fp=%d fn=%d",
+            round_num, m['accuracy'] * 100, m['precision'] * 100,
+            m['recall'] * 100, m['f1'] * 100,
+            m['tp'], m['tn'], m['fp'], m['fn'],
+        )
 
         for label_pair, title in [
             (("SYNTHETIC", True), "Correctly identified SYNTHETIC"),
@@ -732,14 +718,10 @@ def main():
                         if r["true_label"] == label_pair[0] and r["correct"] == label_pair[1]]
             if not matching:
                 continue
-            err(f"\n  {title} ({len(matching)}):")
+            log.info("%s (%d):", title, len(matching))
             for r in matching:
-                err(f"    {r['instance_id']} [{r['confidence']}]")
-                err(f"      {r['reasoning'][:300]}")
-
-        err(f"\n{'=' * 72}")
-        err("DISCRIMINABILITY VERDICT")
-        err("=" * 72)
+                log.info("  %s [%s]", r['instance_id'], r['confidence'])
+                log.debug("  %s", r['reasoning'][:300])
 
         recall = m["recall"]
         if recall >= 0.9:
@@ -751,11 +733,11 @@ def main():
         else:
             grade = "HARD TO DISCRIMINATE"
 
-        err(f"\n  Round {round_num}: {recall:.0%} detected ({m['tp']}/{m['tp']+m['fn']})")
         far = m["fp"] / (m["fp"] + m["tn"]) if (m["fp"] + m["tn"]) else 0
-        err(f"  False alarm rate: {far:.0%}")
-        err(f"  Verdict: {grade}")
-        err()
+        log.info(
+            "verdict=%s detection=%.0f%% far=%.0f%%",
+            grade, recall * 100, far * 100,
+        )
 
         out_path = f"/tmp/synth-eval-results-r{round_num}.json"
         with open(out_path, "w") as f:
@@ -770,7 +752,7 @@ def main():
                 "results": results,
                 "synthetic_instances": all_synth_instances,
             }, f, indent=2)
-        err(f"  Full results: {out_path}")
+        log.info("results saved to %s", out_path)
 
         # ── Write round markdown ──
         _write_round_doc(round_num, commit, n_s, n_r, targets,
@@ -800,13 +782,12 @@ def main():
             ),
         }))
     else:
-        # Save instances for debugging
         out_path = f'/tmp/synth-eval-results-r{round_num}-quick.json'
         with open(out_path, 'w') as f:
             json.dump({'synthetic_instances': all_synth_instances}, f, indent=2)
-        err(f'  Instance data saved: {out_path}')
+        log.info("quick mode — instances saved to %s", out_path)
 
-        err('\n── Judge (SKIPPED in quick mode) ──')
+        log.info("phase=judge status=skipped reason=quick_mode")
         factory_score = 0.3 * diversity['overall']
         print(json.dumps({
             'score': round(factory_score, 3),
@@ -932,7 +913,7 @@ def _write_round_doc(round_num, commit, n_s, n_r, targets, *,
         f.write(f"| Diversity score | {diversity.get('overall', 0):.2f} |\n")
         f.write(f"| **Factory score** | **{factory_score:.2f}** |\n")
 
-    err(f"  Round doc: {md_path}")
+    log.info("round doc saved to %s", md_path)
 
 
 if __name__ == "__main__":
