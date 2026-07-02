@@ -300,7 +300,7 @@ def validate_instance(instance: dict, repo_path: str) -> tuple[bool, str]:
 def compute_diversity(instances: list[dict]) -> dict:
     """Score 0.0-1.0 measuring how diverse the generated instances are.
     Returns dict with subscores and overall."""
-    if len(instances) < 2:
+    if not instances:
         return {"file_diversity": 0.0, "complexity": 0.0,
                 "length_diversity": 0.0, "overall": 0.0,
                 "unique_files": 0, "avg_changed_lines": 0.0,
@@ -321,12 +321,14 @@ def compute_diversity(instances: list[dict]) -> dict:
     avg_lines = sum(line_counts) / len(line_counts) if line_counts else 0
     complexity = min(1.0, avg_lines / 8)
 
-    # C. Issue length variance — penalize uniform lengths
-    lengths = [len(i.get("problem_statement", "") or "") for i in instances]
-    mean_len = sum(lengths) / len(lengths) if lengths else 0
-    if mean_len > 0:
-        variance = sum((ln - mean_len) ** 2 for ln in lengths) / len(lengths)
-        cv = variance ** 0.5 / mean_len
+    # C. Issue length variance — penalize uniform lengths (needs 2+ instances)
+    cv = 0.0
+    if len(instances) >= 2:
+        lengths = [len(i.get("problem_statement", "") or "") for i in instances]
+        mean_len = sum(lengths) / len(lengths) if lengths else 0
+        if mean_len > 0:
+            variance = sum((ln - mean_len) ** 2 for ln in lengths) / len(lengths)
+            cv = variance ** 0.5 / mean_len
         length_diversity = min(1.0, cv / 0.3)
     else:
         length_diversity = 0.0
@@ -339,7 +341,7 @@ def compute_diversity(instances: list[dict]) -> dict:
         "avg_changed_lines": round(avg_lines, 1),
         "unique_files": len(files),
         "length_diversity": round(length_diversity, 3),
-        "issue_length_cv": round(cv if mean_len > 0 else 0, 3),
+        "issue_length_cv": round(cv, 3),
         "overall": round(overall, 3),
     }
 
@@ -480,13 +482,14 @@ def main():
             cwd=repo_path, check=True,
         )
 
-        log.info("synthesizing n=%d instances", target['n_synthetic'])
+        n_target = target['n_synthetic']
+        log.info("synthesizing n=%d instances", n_target)
         candidates = asyncio.run(synth_mod.synthesize_repo(
             repo_path=repo_path,
             repo_slug=repo_slug,
             base_commit=base_commit,
             language=target["language"],
-            max_mutations=target["n_synthetic"],
+            max_mutations=n_target,
             model="sonnet",
         ))
         synth_instances = [asdict(c) for c in candidates]

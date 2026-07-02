@@ -3153,7 +3153,7 @@ def _run_tests_on_buggy_code(
         if test_file:
             test_class_stem = Path(test_file).stem
             test_cmd = ["mvn", "test", "-q", "-pl", ".",
-                        f"-Dtest={test_class_stem}", "-DfailIfNoTests=false"]
+                        f"-Dtest={test_class_stem}"]
             logger.debug("  Running targeted Java tests: %s", test_class_stem)
     elif target_file and language == "rust":
         cargo = str(Path.home() / ".cargo" / "bin" / "cargo")
