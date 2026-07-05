@@ -3145,13 +3145,24 @@ def _extract_failed_test_names(test_output: str) -> set[str]:
     return set(_FAILED_TEST_PATTERN.findall(test_output))
 
 
+def _resolve_cargo() -> str:
+    """Find the cargo binary, checking PATH and common install locations."""
+    found = shutil.which("cargo")
+    if found:
+        return found
+    fallback = Path.home() / ".cargo" / "bin" / "cargo"
+    if fallback.is_file():
+        return str(fallback)
+    return "cargo"
+
+
 _TEST_COMMANDS: dict[str, list[list[str]]] = {
     "python": [
         ["python", "-m", "pytest", "--tb=long", "-q"],
         ["python", "-m", "unittest", "discover", "-s", "tests"],
     ],
     "go": [["go", "test", "-short", "-count=1", "-timeout", "90s", "./..."]],
-    "rust": [["cargo", "test", "--", "--test-threads=1"]],
+    "rust": [[_resolve_cargo(), "test", "--", "--test-threads=1"]],
     "java": [["mvn", "test", "-q", "-pl", "."]],
 }
 
@@ -3232,10 +3243,10 @@ def _run_tests_on_buggy_code(
                 break
             search = search.parent
         if package_name:
-            test_cmd = ["cargo", "test", "-p", package_name, "--", "--test-threads=1"]
+            test_cmd = [_resolve_cargo(), "test", "-p", package_name, "--", "--test-threads=1"]
             logger.debug("  Running targeted Rust tests: -p %s", package_name)
         else:
-            test_cmd = ["cargo", "test", "--lib", "--", "--test-threads=1"]
+            test_cmd = [_resolve_cargo(), "test", "--lib", "--", "--test-threads=1"]
             logger.debug("  Running Rust lib tests (no package name found)")
     elif target_file and language == "java":
         test_file = _find_existing_test_file(repo_path, target_file, language)
@@ -3315,6 +3326,8 @@ def _run_tests_on_buggy_code(
                     timeout=timeout, env=test_env,
                 )
                 combined = (result.stdout + "\n" + result.stderr).strip()
+                if language == "java":
+                    logger.info("  Java test rc=%d, output[:200]: %s", result.returncode, combined[:200])
                 if result.returncode != 0 and combined:
                     test_output = combined[:2000]
                     break
@@ -3339,14 +3352,20 @@ def _ensure_java_build(repo_path: str) -> Path | None:
     if not (root / "pom.xml").is_file():
         return None
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["mvn", "compile", "-DskipTests", "-q", "-B"],
             cwd=repo_path, capture_output=True, text=True, timeout=300,
         )
-        subprocess.run(
+        if result.returncode != 0:
+            logger.warning("  mvn compile failed (rc=%d): %s", result.returncode, result.stderr[:200])
+            return None
+        result = subprocess.run(
             ["mvn", "test-compile", "-q", "-B"],
             cwd=repo_path, capture_output=True, text=True, timeout=300,
         )
+        if result.returncode != 0:
+            logger.warning("  mvn test-compile failed (rc=%d): %s", result.returncode, result.stderr[:200])
+            return None
         marker.write_text("compiled\n")
         logger.info("  Java build completed")
         return root
@@ -3362,7 +3381,9 @@ def _ensure_venv(repo_path: str, language: str) -> Path | None:
     Returns the venv directory if created/exists, None otherwise.
     """
     if language == "java":
-        return _ensure_java_build(repo_path)
+        result = _ensure_java_build(repo_path)
+        logger.info("  _ensure_java_build result: %s", "success" if result else "failed")
+        return result
     if language != "python":
         return None
 
