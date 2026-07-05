@@ -405,7 +405,7 @@ def find_mutation_targets(
             functions = extractor(lines)
 
             for func in functions[:max_functions]:
-                source_lines = func["source"].strip().splitlines()
+                source_lines = str(func["source"]).strip().splitlines()
                 if len(source_lines) < 8:
                     continue
                 targets.append({
@@ -569,10 +569,52 @@ def _find_related_files(
     return related
 
 
+def _extract_test_context(
+    repo_path: str, target_file: str, function_name: str, language: str,
+) -> str:
+    """Extract relevant test snippets that exercise a given function.
+
+    Finds the existing test file, greps for the function name, and returns
+    surrounding context (~20 lines around each match) as a string.
+    Returns empty string if no test file or no matches found.
+    """
+    test_file = _find_existing_test_file(repo_path, target_file, language)
+    if not test_file:
+        return ""
+
+    test_path = Path(repo_path) / test_file
+    try:
+        test_content = test_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+    lines = test_content.splitlines()
+    match_indices: set[int] = set()
+    for idx, line in enumerate(lines):
+        if function_name in line:
+            match_indices.add(idx)
+
+    if not match_indices:
+        return ""
+
+    included: set[int] = set()
+    for idx in match_indices:
+        for offset in range(-10, 11):
+            line_idx = idx + offset
+            if 0 <= line_idx < len(lines):
+                included.add(line_idx)
+
+    snippet_lines = [lines[i] for i in sorted(included)]
+    # Cap at ~150 lines to avoid bloating the prompt
+    snippet = "\n".join(snippet_lines[:150])
+    return f"\n\nEXISTING TESTS (from `{test_file}`) that exercise `{function_name}`:\n```{language}\n{snippet}\n```\n"
+
+
 async def _plan_multi_file_mutation(
     target_func_code: str,
     related_files: list[dict[str, str]],
     model: str = "sonnet",
+    test_context: str = "",
 ) -> BugPlan | None:
     """Plan a coordinated bug that spans multiple files.
 
@@ -598,8 +640,8 @@ Target function:
 
 Related files:
 {related_context}
-
-Plan a coordinated bug. Return your plan in this format:
+{test_context}
+Plan a coordinated bug. Target code paths that existing tests exercise — the bug should cause test failures so it would be noticed. Return your plan in this format:
 
 <primary>
 One sentence describing the primary bug to introduce in the target function.
@@ -965,6 +1007,7 @@ async def introduce_bug(
     model: str = "sonnet",
     related_files: list[dict[str, str]] | None = None,
     bug_plan: BugPlan | None = None,
+    test_context: str = "",
 ) -> BugSpec | None:
     """Use Claude to introduce a realistic bug into a function.
 
@@ -1015,18 +1058,17 @@ AVOID these (too easy to detect as artificial):
 
 The bug must look like something that would happen during a real refactoring or API migration, not a deliberate sabotage.
 
-CRITICAL CONSTRAINTS on bug subtlety:
-- The bug MUST NOT break the function's basic contract. If the function adds two numbers, don't make it subtract — that would be caught immediately by any test.
-- The bug should only manifest with specific inputs, edge cases, or unusual conditions. Think: boundary values, empty collections, negative numbers, Unicode strings, concurrent access, large inputs.
-- The bug must be plausible as something that would survive a typical CI suite. If the existing test suite would trivially catch it, the bug is too obvious.
-- Prefer bugs in error handling paths, edge case branches, or rarely-exercised code paths over bugs in the main happy path.
+CRITICAL CONSTRAINTS on bug placement:
+- The bug should cause subtle but detectable failures. Real bugs in open-source projects ARE caught by tests — that is how they become issues. A realistic bug should cause some existing tests to fail, producing error messages or wrong outputs that a developer would investigate.
+- Target the function's main behavior — the code paths that existing tests actually exercise. Bugs in untested edge cases would never become real issues because no one would notice them.
+- The bug should still look like a natural developer mistake (type confusion, wrong method call, incomplete refactoring), not deliberate sabotage.
 
 Here is the function:
 
 ```{language}
 {source}
 ```
-{related_context}
+{test_context}{related_context}
 {bug_plan_context}
 
 Return your response in EXACTLY this format:
@@ -2469,7 +2511,7 @@ Requirements:
 
         modified_func = _strip_strategy_labels(modified_func)
         if language == "go":
-            go_func_match = re.search(rf'^func\s+(?:\([^)]*\)\s+)?{re.escape(target["name"])}\s*\(', modified_func, re.MULTILINE)
+            go_func_match = re.search(rf'^func\s+(?:\([^)]*\)\s+)?{re.escape(str(target["name"]))}\s*\(', modified_func, re.MULTILINE)
             idx = go_func_match.start() if go_func_match else -1
         else:
             func_prefix = f"def {target['name']}"
@@ -3298,8 +3340,13 @@ async def synthesize_repo(
         if related_files:
             logger.info("  Found %d related files", len(related_files))
 
+        test_context = _extract_test_context(
+            repo_path, target["file"], target["function_name"], language,
+        )
+
         bug_plan = await _plan_multi_file_mutation(
             target["source"], related_files, model=model,
+            test_context=test_context,
         )
         if bug_plan:
             logger.info("  Multi-file plan: %s", bug_plan.primary_description[:80])
@@ -3312,7 +3359,7 @@ async def synthesize_repo(
         for attempt in range(3):
             bug_spec = await introduce_bug(
                 target, model=model, related_files=related_files,
-                bug_plan=bug_plan,
+                bug_plan=bug_plan, test_context=test_context,
             )
             if bug_spec is None:
                 logger.warning("  Skipped — LLM did not produce a valid mutation")
@@ -3529,6 +3576,15 @@ async def synthesize_repo(
         )
 
         test_patch = ''.join(test_patch_parts)
+
+        try:
+            generated_tp = await generate_test_patch(
+                bug_spec, repo_path, language, model=model, test_output=test_output,
+            )
+            if generated_tp:
+                test_patch = generated_tp
+        except Exception:
+            logger.warning('  test_patch generation failed — using fallback', exc_info=True)
 
         synthesis_result = SynthesisResult(
             bug_spec=bug_spec,

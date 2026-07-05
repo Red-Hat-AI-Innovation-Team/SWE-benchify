@@ -2277,7 +2277,7 @@ def test_humanize_traceback_strips_headers(tmp_path: Path) -> None:
 
 def test_humanize_traceback_empty_input(tmp_path: Path) -> None:
     assert _humanize_traceback("", str(tmp_path)) == ""
-    assert _humanize_traceback(None, str(tmp_path)) == ""
+    assert _humanize_traceback(None, str(tmp_path)) == ""  # type: ignore[arg-type]
 
 
 def test_humanize_traceback_preserves_error_data(tmp_path: Path) -> None:
