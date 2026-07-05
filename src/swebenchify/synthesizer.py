@@ -1973,6 +1973,12 @@ def _find_existing_test_file(
         for c in rust_candidates:
             if (root / c).is_file():
                 return c
+        try:
+            content = (root / source_file).read_text(encoding="utf-8", errors="replace")
+            if "#[cfg(test)]" in content:
+                return source_file
+        except OSError:
+            pass
     elif language == "java":
         java_path = str(source_path)
         # Direct test file: FooTest.java in src/test/java/...
@@ -2087,6 +2093,10 @@ def _count_test_functions(code: str, language: str = "python") -> int:
     """Count the number of test function definitions."""
     if language == "go":
         return len(re.findall(r'^func\s+Test\w+', code, re.MULTILINE))
+    if language == "rust":
+        return len(re.findall(r'#\[test\]', code))
+    if language == "java":
+        return len(re.findall(r'@Test\b', code))
     return len(re.findall(r'^\s*def\s+test_\w+', code, re.MULTILINE))
 
 
@@ -2099,6 +2109,10 @@ def _extract_test_functions(source: str, language: str = "python") -> list[dict[
         return _extract_test_functions_python(source)
     if language == "go":
         return _extract_test_functions_go(source)
+    if language == "rust":
+        return _extract_test_functions_rust(source)
+    if language == "java":
+        return _extract_test_functions_java(source)
     return []
 
 
@@ -2149,6 +2163,104 @@ def _extract_test_functions_go(source: str) -> list[dict[str, str | int]]:
             brace_depth += lines[j].count('{') - lines[j].count('}')
             if brace_depth <= 0 and '{' in ''.join(lines[i:j+1]):
                 end = j + 1
+                break
+        else:
+            end = len(lines)
+        func_source = "".join(lines[start:end])
+        results.append({
+            "name": name,
+            "source": func_source,
+            "start_line": start,
+            "end_line": end,
+        })
+        i = end
+
+    return results
+
+
+def _extract_test_functions_rust(source: str) -> list[dict[str, str | int]]:
+    """Extract test functions from Rust source by finding #[test] annotations."""
+    lines = source.splitlines(keepends=True)
+    results: list[dict[str, str | int]] = []
+    fn_re = re.compile(r'^\s*(?:pub\s+)?(?:async\s+)?fn\s+(\w+)')
+
+    i = 0
+    while i < len(lines):
+        if '#[test]' not in lines[i]:
+            i += 1
+            continue
+        annotation_line = i
+        j = i + 1
+        while j < len(lines) and not fn_re.match(lines[j]):
+            j += 1
+            if j - annotation_line > 3:
+                break
+        if j >= len(lines):
+            i += 1
+            continue
+        m = fn_re.match(lines[j])
+        if not m:
+            i = j + 1
+            continue
+        name = m.group(1)
+        start = annotation_line
+        brace_depth = 0
+        found_open = False
+        for k in range(j, len(lines)):
+            brace_depth += lines[k].count('{') - lines[k].count('}')
+            if '{' in lines[k]:
+                found_open = True
+            if found_open and brace_depth <= 0:
+                end = k + 1
+                break
+        else:
+            end = len(lines)
+        func_source = "".join(lines[start:end])
+        results.append({
+            "name": name,
+            "source": func_source,
+            "start_line": start,
+            "end_line": end,
+        })
+        i = end
+
+    return results
+
+
+def _extract_test_functions_java(source: str) -> list[dict[str, str | int]]:
+    """Extract test methods from Java source by finding @Test annotations."""
+    lines = source.splitlines(keepends=True)
+    results: list[dict[str, str | int]] = []
+    method_re = re.compile(r'^\s+(?:public|private|protected|static|\s)*\s+(?:void|[\w<>\[\]]+)\s+(\w+)\s*\(')
+
+    i = 0
+    while i < len(lines):
+        if '@Test' not in lines[i]:
+            i += 1
+            continue
+        annotation_line = i
+        j = i + 1
+        while j < len(lines) and not method_re.match(lines[j]):
+            j += 1
+            if j - annotation_line > 3:
+                break
+        if j >= len(lines):
+            i += 1
+            continue
+        m = method_re.match(lines[j])
+        if not m:
+            i = j + 1
+            continue
+        name = m.group(1)
+        start = annotation_line
+        brace_depth = 0
+        found_open = False
+        for k in range(j, len(lines)):
+            brace_depth += lines[k].count('{') - lines[k].count('}')
+            if '{' in lines[k]:
+                found_open = True
+            if found_open and brace_depth <= 0:
+                end = k + 1
                 break
         else:
             end = len(lines)
@@ -2268,6 +2380,12 @@ async def _generate_new_test_in_existing_file(
         if go_name and go_name[0].islower():
             go_name = go_name[0].upper() + go_name[1:]
         test_prefix = f"func Test{go_name}"
+    elif language == "rust":
+        func_keyword = "fn"
+        test_prefix = f"fn test_{bug_spec.function_name}"
+    elif language == "java":
+        func_keyword = "void"
+        test_prefix = f"public void test{bug_spec.function_name.capitalize()}"
     else:
         return None
 
@@ -2416,7 +2534,7 @@ async def _generate_test_patch_existing(
         logger.warning("Could not read existing test file %s", test_file)
         return None
 
-    if language not in ("python", "go"):
+    if language not in ("python", "go", "rust", "java"):
         return None
 
     test_functions = _extract_test_functions(original_test_content, language)
@@ -3033,7 +3151,7 @@ _TEST_COMMANDS: dict[str, list[list[str]]] = {
         ["python", "-m", "unittest", "discover", "-s", "tests"],
     ],
     "go": [["go", "test", "-short", "-count=1", "-timeout", "90s", "./..."]],
-    "rust": [[str(Path.home() / ".cargo" / "bin" / "cargo"), "test"]],
+    "rust": [["cargo", "test", "--", "--test-threads=1"]],
     "java": [["mvn", "test", "-q", "-pl", "."]],
 }
 
@@ -3093,13 +3211,38 @@ def _run_tests_on_buggy_code(
         pkg_dir = os.path.dirname(target_file) or "."
         test_cmd = ["go", "test", "-short", "-count=1", "-timeout", "90s", f"./{pkg_dir}"]
         logger.debug("  Running targeted Go tests: ./%s", pkg_dir)
+    elif target_file and language == "rust":
+        rust_root = Path(repo_path)
+        target_dir = (rust_root / target_file).parent
+        package_name = None
+        search = target_dir
+        while search >= rust_root:
+            cargo_path = search / "Cargo.toml"
+            if cargo_path.is_file():
+                try:
+                    cargo_text = cargo_path.read_text(encoding="utf-8", errors="replace")
+                    pkg_m = re.search(r'^\[package\]\s*\n(?:.*\n)*?name\s*=\s*"([^"]+)"',
+                                      cargo_text, re.MULTILINE)
+                    if pkg_m:
+                        package_name = pkg_m.group(1)
+                except OSError:
+                    pass
+                break
+            if search == rust_root:
+                break
+            search = search.parent
+        if package_name:
+            test_cmd = ["cargo", "test", "-p", package_name, "--", "--test-threads=1"]
+            logger.debug("  Running targeted Rust tests: -p %s", package_name)
+        else:
+            test_cmd = ["cargo", "test", "--lib", "--", "--test-threads=1"]
+            logger.debug("  Running Rust lib tests (no package name found)")
     elif target_file and language == "java":
-        # Run only test class for target, or fall back to package-level
         test_file = _find_existing_test_file(repo_path, target_file, language)
         if test_file:
             test_class_stem = Path(test_file).stem
-            test_cmd = ["mvn", "test", "-q", "-pl", ".",
-                        f"-Dtest={test_class_stem}", "-DfailIfNoTests=false"]
+            test_cmd = ["mvn", "test", "-B", "-q", "-pl", ".",
+                        f"-Dtest={test_class_stem}"]
             logger.debug("  Running targeted Java tests: %s", test_class_stem)
 
     # Run baseline on clean code to identify pre-existing failures
@@ -3186,11 +3329,40 @@ def _run_tests_on_buggy_code(
     return test_output
 
 
+def _ensure_java_build(repo_path: str) -> Path | None:
+    """Compile Java main and test sources via Maven, skipping if already done."""
+    root = Path(repo_path)
+    marker = root / ".synth-java-compiled"
+    if marker.is_file():
+        logger.debug("  Java build already compiled (marker exists)")
+        return root
+    if not (root / "pom.xml").is_file():
+        return None
+    try:
+        subprocess.run(
+            ["mvn", "compile", "-DskipTests", "-q", "-B"],
+            cwd=repo_path, capture_output=True, text=True, timeout=300,
+        )
+        subprocess.run(
+            ["mvn", "test-compile", "-q", "-B"],
+            cwd=repo_path, capture_output=True, text=True, timeout=300,
+        )
+        marker.write_text("compiled\n")
+        logger.info("  Java build completed")
+        return root
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+            FileNotFoundError, OSError):
+        logger.debug("  Java build failed")
+        return None
+
+
 def _ensure_venv(repo_path: str, language: str) -> Path | None:
     """Create a reusable venv for Python repos. No-op for other languages.
 
     Returns the venv directory if created/exists, None otherwise.
     """
+    if language == "java":
+        return _ensure_java_build(repo_path)
     if language != "python":
         return None
 

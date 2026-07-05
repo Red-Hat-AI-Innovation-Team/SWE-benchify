@@ -46,11 +46,11 @@ DATASET_PATHS = [
 
 EVAL_TARGETS = [
     {
-        "repo_slug": "containers/podman-compose",
-        "repo_url": "https://github.com/containers/podman-compose.git",
-        "repo_path": "/tmp/podman-compose-synth-test",
+        "repo_slug": "pallets/click",
+        "repo_url": "https://github.com/pallets/click.git",
+        "repo_path": "/tmp/click-synth-test",
         "language": "python",
-        "base_commit": "121b5f6ea1b6bc1f8ea4ddf4ebc7ff809d5b876e",
+        "base_commit": "16fc00e2f4a2717a521084f193709a6058afc693",
         "n_synthetic": 3,
         "n_real": 3,
     },
