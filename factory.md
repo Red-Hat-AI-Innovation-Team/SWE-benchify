@@ -50,6 +50,22 @@ python -m mypy ./
 - growth: 0.20
 - project: 0.50
 
+## adversarial
+
+- generator.eval_command: python3 scripts/eval_synthesizer.py --role generator
+- generator.metric_name: judge_evasion_score
+- generator.threshold: 0.4
+- generator.scope: src/swebenchify/, tests/
+- generator.timeout: 3600
+- discriminator.eval_command: python3 scripts/eval_synthesizer.py --role discriminator
+- discriminator.metric_name: detection_recall
+- discriminator.threshold: 0.8
+- discriminator.scope: scripts/eval_synthesizer.py
+- discriminator.timeout: 3600
+- hysteresis: 2
+- max_rounds: 30
+- convergence_window: 3
+
 ## Target Branch
 
 main

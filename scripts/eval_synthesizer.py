@@ -435,7 +435,13 @@ def main():
                         help='Fast mode: 1 repo, 1 instance, skip Docker F2P and judge')
     parser.add_argument('--seed', type=int, default=None,
                         help='Random seed (default: 42 + round_num)')
+    parser.add_argument('--role', choices=['generator', 'discriminator'], default=None,
+                        help='Adversarial role: generator outputs evasion score, '
+                             'discriminator outputs detection recall')
     args = parser.parse_args()
+
+    if args.role == 'discriminator':
+        args.quick = False
 
     round_num = detect_round()
     commit = detect_commit()
@@ -766,7 +772,7 @@ def main():
         # ── Factory-compatible JSON output (stdout) ──
         judge_evasion = 1.0 - recall
         f2p_rate = len(judged_synth) / n_s if n_s > 0 else 0
-        factory_score = 0.7 * judge_evasion * f2p_rate + 0.3 * diversity["overall"]
+        generator_score = 0.7 * judge_evasion * f2p_rate + 0.3 * diversity["overall"]
 
         conf_counts = {}
         for r in results:
@@ -775,10 +781,17 @@ def main():
                 conf_counts[c] = conf_counts.get(c, 0) + 1
         conf_summary = ", ".join(f"{v} {k}" for k, v in sorted(conf_counts.items()))
 
+        if args.role == 'discriminator':
+            factory_score = round(recall, 3)
+            detail_prefix = f"R{round_num} ({commit}): DISCRIMINATOR. "
+        else:
+            factory_score = round(generator_score, 3)
+            detail_prefix = f"R{round_num} ({commit}): "
+
         print(json.dumps({
-            "score": round(factory_score, 3),
+            "score": factory_score,
             "details": (
-                f"R{round_num} ({commit}): "
+                f"{detail_prefix}"
                 f"{m['fn']}/{m['tp']+m['fn']} synthetic fooled judge. "
                 f"Detection: {recall:.0%}. "
                 f"FP: {m['fp']}/{m['fp']+m['tn']}. "
