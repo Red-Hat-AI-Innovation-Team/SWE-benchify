@@ -14,7 +14,7 @@ def _make_instance(**overrides: Any) -> TaskInstance:
     defaults: dict[str, Any] = {
         "repo": "owner/repo",
         "instance_id": "owner__repo-1",
-        "base_commit": "abc123",
+        "base_commit": "abc1234",
         "patch": "diff --git a/foo.go b/foo.go\n--- a/foo.go\n+++ b/foo.go\n@@ -1 +1 @@\n-old\n+new",
         "test_patch": "diff --git a/foo_test.go b/foo_test.go",
         "problem_statement": "Fix the bug in foo",
@@ -89,13 +89,15 @@ class TestHarborTaskGenerator:
         assert (tmp_path / "owner__repo-1").is_dir()
         assert (tmp_path / "owner__repo-2").is_dir()
 
-    def test_solve_sh_contains_patch(self, tmp_path: Path) -> None:
+    def test_solve_sh_references_patch_file(self, tmp_path: Path) -> None:
         patch = "diff --git a/x.go b/x.go\n+fixed"
         inst = _make_instance(repo_language="go", patch=patch)
         gen = HarborTaskGenerator(instances=[inst])
         gen.generate_all(tmp_path)
         solve = (tmp_path / "owner__repo-1" / "solution" / "solve.sh").read_text()
-        assert patch in solve
+        assert "patch.diff" in solve
+        patch_file = (tmp_path / "owner__repo-1" / "solution" / "patch.diff").read_text()
+        assert patch_file == patch
 
     def test_dockerfile_contains_repo(self, tmp_path: Path) -> None:
         inst = _make_instance(repo_language="go")
@@ -103,7 +105,7 @@ class TestHarborTaskGenerator:
         gen.generate_all(tmp_path)
         dockerfile = (tmp_path / "owner__repo-1" / "environment" / "Dockerfile").read_text()
         assert "owner/repo" in dockerfile
-        assert "abc123" in dockerfile
+        assert "abc1234" in dockerfile
 
     def test_python_dockerfile_has_default_pip_install_without_env_spec(self, tmp_path: Path) -> None:
         inst = _make_instance(repo_language="python")

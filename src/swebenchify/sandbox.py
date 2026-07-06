@@ -340,7 +340,7 @@ class GoImageCache:
                 raise RuntimeError(f"docker push failed: {push.stderr}")
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"docker push timed out: {exc}") from exc
-        logger.info("Pushed Go image: %s", target)
+        logger.info("Pushed image: %s", target)
         return target
 
 

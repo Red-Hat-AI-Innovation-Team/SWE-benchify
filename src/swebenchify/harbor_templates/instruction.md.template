@@ -1,11 +1,11 @@
-# {title}
+# $title
 
-**Repository:** {repo}
-**Base Commit:** {base_commit}
+**Repository:** $repo
+**Base Commit:** $base_commit
 
 ## Problem Statement
 
-{problem_statement}
+$problem_statement
 
 ## Task
 

@@ -337,15 +337,20 @@ def _cmd_harbor(args: argparse.Namespace) -> None:
     """Convert existing JSONL to Harbor task format."""
     import json
 
+    import dataclasses
+
     from swebenchify.harbor_emitter import emit_harbor_dataset
     from swebenchify.models import AnyEnvironmentSpec, EnvironmentSpec, GoEnvironmentSpec, RustEnvironmentSpec, TaskInstance
 
     instances: list[TaskInstance] = []
+    valid_fields = {f.name for f in dataclasses.fields(TaskInstance)}
     with open(args.input) as f:
         for line in f:
             line = line.strip()
             if line:
-                instances.append(TaskInstance(**json.loads(line)))
+                data = json.loads(line)
+                filtered = {k: v for k, v in data.items() if k in valid_fields}
+                instances.append(TaskInstance(**filtered))
 
     if not instances:
         print("No instances found in input file")

@@ -9,7 +9,9 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import asdict
+import re
+import shlex
+import string
 from pathlib import Path
 
 from swebenchify.backends import get_backend
@@ -61,7 +63,9 @@ def _format_allowed_hosts(key: str, hosts: list[str]) -> str:
 def _detect_language(instance: TaskInstance) -> str:
     if instance.repo_language:
         return instance.repo_language
-    return "go"
+    raise ValueError(
+        f"repo_language is required but not set for instance {instance.instance_id}"
+    )
 
 
 def _get_difficulty(instance: TaskInstance) -> str:
@@ -115,7 +119,7 @@ def _build_go_test_command(test_patch: str) -> str:
         if root == ".":
             cmds.append(f"go test -v -count=1 {pkg_str}")
         else:
-            cmds.append(f"(cd {root} && go test -v -count=1 {pkg_str})")
+            cmds.append(f"(cd {shlex.quote(root)} && go test -v -count=1 {pkg_str})")
 
     return " ; ".join(cmds)
 
@@ -144,6 +148,11 @@ class HarborTaskGenerator:
         return generated
 
     def _generate_task(self, instance: TaskInstance, output_dir: Path) -> None:
+        if not re.match(r'^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$', instance.repo):
+            raise ValueError(f"Invalid repo format: {instance.repo}")
+        if not re.match(r'^[0-9a-f]{7,40}$', instance.base_commit):
+            raise ValueError(f"Invalid base_commit format: {instance.base_commit}")
+
         task_dir = output_dir / instance.instance_id
         task_dir.mkdir(parents=True, exist_ok=True)
         (task_dir / "environment").mkdir(exist_ok=True)
@@ -164,7 +173,7 @@ class HarborTaskGenerator:
     def _write_instruction(self, instance: TaskInstance, task_dir: Path) -> None:
         title = _first_line(instance.problem_statement)
         template = _load_template("instruction.md.template")
-        content = template.format(
+        content = string.Template(template).safe_substitute(
             title=title,
             repo=instance.repo,
             base_commit=instance.base_commit,
@@ -199,7 +208,7 @@ class HarborTaskGenerator:
         description = description.replace('"', '\\"')
 
         template = _load_template("task.toml.template")
-        content = template.format(
+        content = string.Template(template).safe_substitute(
             language=language,
             instance_id=instance.instance_id,
             description=description,
@@ -228,7 +237,7 @@ class HarborTaskGenerator:
         extra_setup = self._get_extra_setup(language, env_spec)
 
         template = _load_template("dockerfile.template")
-        content = template.format(
+        content = string.Template(template).safe_substitute(
             base_image_line=base_image_line,
             repo=instance.repo,
             base_commit=instance.base_commit,
@@ -315,10 +324,10 @@ class HarborTaskGenerator:
         return "\n".join(lines) if lines else "# No extra setup required"
 
     def _write_solve_sh(self, instance: TaskInstance, task_dir: Path) -> None:
+        (task_dir / "solution" / "patch.diff").write_text(instance.patch)
         template = _load_template("solve.sh.template")
-        content = template.format(gold_patch=instance.patch)
         path = task_dir / "solution" / "solve.sh"
-        path.write_text(content)
+        path.write_text(template)
         os.chmod(path, 0o755)
 
     def _write_test_sh(
@@ -339,10 +348,10 @@ class HarborTaskGenerator:
         elif language == "rust":
             template_name = "test_rust.sh.template"
         else:
-            template_name = "test_go.sh.template"
+            raise ValueError(f"Unsupported language: {language}")
 
         template = _load_template(template_name)
-        content = template.format(test_command=test_command)
+        content = string.Template(template).safe_substitute(test_command=test_command)
         path = task_dir / "tests" / "test.sh"
         path.write_text(content)
         os.chmod(path, 0o755)
@@ -392,7 +401,13 @@ class HarborTaskGenerator:
         return "echo 'Unsupported language'"
 
     def _write_config_json(self, instance: TaskInstance, task_dir: Path) -> None:
-        config = asdict(instance)
+        config = {
+            'instance_id': instance.instance_id,
+            'repo': instance.repo,
+            'FAIL_TO_PASS': instance.FAIL_TO_PASS,
+            'PASS_TO_PASS': instance.PASS_TO_PASS,
+            'repo_language': instance.repo_language,
+        }
         (task_dir / "tests" / "config.json").write_text(
             json.dumps(config, indent=2) + "\n"
         )

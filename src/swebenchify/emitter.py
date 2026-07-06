@@ -11,7 +11,6 @@ import logging
 from dataclasses import asdict
 from pathlib import Path
 
-from swebenchify.harbor_emitter import emit_harbor_dataset as emit_harbor_dataset
 from swebenchify.models import TaskInstance
 
 logger = logging.getLogger(__name__)

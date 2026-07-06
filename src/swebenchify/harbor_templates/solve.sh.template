@@ -7,11 +7,7 @@ cd /testbed
 git config --global --add safe.directory /testbed
 
 # Apply the gold patch (the actual fix)
-cat > /tmp/solution_patch.diff << '__SOLUTION__'
-{gold_patch}
-__SOLUTION__
-
-git apply --3way /tmp/solution_patch.diff || git apply /tmp/solution_patch.diff
+git apply --3way /solution/patch.diff || git apply /solution/patch.diff
 
 # Some tests depend on git status
 git add -A
