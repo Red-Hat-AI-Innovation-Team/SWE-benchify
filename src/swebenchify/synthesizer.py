@@ -50,6 +50,8 @@ _EXCLUDE_DIRS: set[str] = {
     "site-packages",
 }
 
+_EXCLUDE_SUBSTR: set[str] = {"demo", "example", "benchmark", "vendor"}
+
 _LANGUAGE_EXCLUDE_PATTERNS: dict[str, list[re.Pattern[str]]] = {
     "python": [
         re.compile(r"(^|/)tests?/"),
@@ -381,7 +383,11 @@ def find_mutation_targets(
     files_seen = 0
 
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in _EXCLUDE_DIRS]
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in _EXCLUDE_DIRS
+            and not any(excl in d for excl in _EXCLUDE_SUBSTR)
+        ]
         for fname in sorted(filenames):
             if not any(fname.endswith(ext) for ext in extensions):
                 continue
@@ -944,7 +950,11 @@ def _discover_repo_modules(repo_path: str) -> set[str]:
         if not search_root.is_dir():
             continue
         for dirpath, dirnames, filenames in os.walk(search_root):
-            dirnames[:] = [d for d in dirnames if d not in _EXCLUDE_DIRS]
+            dirnames[:] = [
+                d for d in dirnames
+                if d not in _EXCLUDE_DIRS
+                and not any(excl in d for excl in _EXCLUDE_SUBSTR)
+            ]
             dp = Path(dirpath)
             for fname in filenames:
                 if not fname.endswith(".py"):
@@ -3163,7 +3173,7 @@ _TEST_COMMANDS: dict[str, list[list[str]]] = {
     ],
     "go": [["go", "test", "-short", "-count=1", "-timeout", "90s", "./..."]],
     "rust": [[_resolve_cargo(), "test", "--", "--test-threads=1"]],
-    "java": [["mvn", "test", "-q", "-pl", "."]],
+    "java": [["mvn", "test", "-B", "-pl", "."]],
 }
 
 
@@ -3252,7 +3262,7 @@ def _run_tests_on_buggy_code(
         test_file = _find_existing_test_file(repo_path, target_file, language)
         if test_file:
             test_class_stem = Path(test_file).stem
-            test_cmd = ["mvn", "test", "-B", "-q", "-pl", ".",
+            test_cmd = ["mvn", "test", "-B", "-pl", ".",
                         f"-Dtest={test_class_stem}"]
             logger.debug("  Running targeted Java tests: %s", test_class_stem)
 
@@ -3315,6 +3325,8 @@ def _run_tests_on_buggy_code(
             [py_exe if c == "python" else c for c in t]
             for t in _TEST_COMMANDS.get(language, [])
         ]
+        if test_cmd and language == "java":
+            cmds_to_try.extend(_TEST_COMMANDS.get("java", []))
         for cmd in cmds_to_try:
             if cmd is None:
                 continue
