@@ -14,6 +14,7 @@ Given a list of GitHub repos, SWE-benchify:
 4. Dispatches a Claude Code agent to validate each instance (run tests before and after the fix)
 5. Applies quality filters
 6. Emits a SWE-bench-compatible JSONL dataset
+7. Optionally emits [Harbor](https://github.com/harbor-framework/harbor)-format task directories for standardized agent evaluation
 
 ## Quickstart
 
@@ -107,6 +108,9 @@ export GITHUB_TOKEN=ghp_...
 export ANTHROPIC_API_KEY=sk-ant-...
 
 swebenchify run -c configs/swebenchify.yaml
+
+# With Harbor output (emits task directories alongside JSONL)
+swebenchify run -c configs/swebenchify.yaml --harbor-output
 ```
 
 ### Run individual stages
@@ -120,6 +124,12 @@ swebenchify validate -c configs/swebenchify.yaml --input output/pallets__flask-c
 
 # Apply filters and emit dataset
 swebenchify emit -c configs/swebenchify.yaml --input output/validated.jsonl
+
+# Emit with Harbor output
+swebenchify emit -c configs/swebenchify.yaml --input output/validated.jsonl --harbor-output
+
+# Convert existing JSONL to Harbor format (standalone)
+swebenchify harbor -i output/all-task-instances.jsonl -o ./my-benchmark
 ```
 
 ## Examples
@@ -357,6 +367,11 @@ output:
 docker:
   registry: ghcr.io/red-hat-ai-innovation-team  # GHCR org prefix
   push_images: true                              # push after build
+
+harbor:
+  emit: false                                    # emit Harbor task dirs alongside JSONL
+  registry_url: ""                               # container registry URL for task TOML
+  org_name: swebenchify                          # organization name in task naming
 ```
 
 ## Standalone Pipeline
@@ -497,6 +512,91 @@ GHCR — you need a classic PAT with `write:packages` scope:
 ```bash
 echo "$PAT" | docker login ghcr.io -u USERNAME --password-stdin
 ```
+
+## Harbor Integration
+
+SWE-benchify can emit benchmarks in [Harbor](https://github.com/harbor-framework/harbor) task format, enabling evaluation with any Harbor-compatible agent (Claude Code, Codex CLI, OpenHands, Aider, and others). Harbor provides containerized isolation, parallel execution at scale, and a standardized reward interface.
+
+### Usage
+
+There are three ways to produce Harbor output:
+
+```bash
+# 1. Standalone — convert existing JSONL to Harbor format
+swebenchify harbor -i output/go-v1/all-task-instances.jsonl -o ./my-benchmark
+
+# 2. Pipeline flag — emit Harbor alongside JSONL
+swebenchify run -c configs/swebenchify-go-v1.yaml --harbor-output
+
+# 3. Config-driven — set harbor.emit: true in YAML (see Configuration Reference)
+swebenchify emit -c configs/swebenchify.yaml --input output/validated.jsonl
+```
+
+### CLI reference
+
+```
+swebenchify harbor -i <INPUT> -o <OUTPUT> [OPTIONS]
+```
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--input, -i` | yes | | Path to TaskInstance JSONL file |
+| `--output, -o` | yes | | Output directory for Harbor task directories |
+| `--registry-url` | no | `None` | Container registry URL for `docker_image` references in task TOML |
+| `--env-specs` | no | `None` | Path to env specs JSON file (maps instance IDs to environment specs) |
+
+The `--harbor-output` flag is also available on `swebenchify run` and `swebenchify emit`.
+
+### Task directory structure
+
+Each instance produces a self-contained task directory:
+
+```
+harbor-tasks/
+├── registry.json                          # Index of all tasks
+├── dataset.toml                           # Dataset metadata (name, languages, repos)
+└── go__etcd-io__etcd-19086/
+    ├── instruction.md                     # Problem statement for the agent
+    ├── task.toml                          # Harbor config (timeouts, network, docker image)
+    ├── environment/Dockerfile             # Language-specific build environment
+    ├── solution/
+    │   ├── solve.sh                       # Oracle solution (applies gold patch)
+    │   └── patch.diff                     # Gold patch
+    └── tests/
+        ├── test.sh                        # Test runner + grading script
+        ├── test.patch                     # Canonical test patch
+        └── config.json                    # FAIL_TO_PASS / PASS_TO_PASS lists
+```
+
+Harbor isolates the `tests/` and `solution/` directories from the agent during the solve phase — they are uploaded only after the agent finishes.
+
+### Anti-reward-hacking
+
+The generated `test.sh` scripts include anti-reward-hacking logic that prevents agents from gaming benchmarks by modifying test files:
+
+1. **Detect** — after the agent finishes, scan `git diff` and `git ls-files --others` for test file modifications using language-specific patterns (`*_test.go`, `test_*.py`, `*Test.java`, `*_test.rs`, `conftest.py`, files under `tests/`, `e2e/`, `testing/`)
+2. **Revert** — surgically revert only test file changes (`git checkout` for modified files, `os.remove` for new files), preserving the agent's source code fixes
+3. **Overlay** — apply the canonical `test.patch` on top of the agent's source changes
+4. **Grade** — run tests and compare against the expected FAIL_TO_PASS / PASS_TO_PASS lists
+
+Templates are provided for all four supported languages: Go, Python, Java (Maven Surefire), and Rust (cargo test).
+
+### Running evaluations
+
+Once you have Harbor task directories, run evaluations with the `harbor` CLI:
+
+```bash
+# Install Harbor
+uv tool install harbor
+
+# Run an agent against your benchmark
+harbor run --dataset ./my-benchmark \
+  --agent claude-code \
+  --model anthropic/claude-sonnet-4 \
+  --n-concurrent 4
+```
+
+See the [Harbor documentation](https://www.harborframework.com/) for agent configuration, remote execution (Daytona, Modal), and result analysis.
 
 ## Output Format
 
