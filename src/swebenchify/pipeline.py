@@ -445,3 +445,27 @@ async def run_repo_pipeline(
     logger.info("Stage 6: Emitting dataset")
     emit_dataset(filtered, config.output.dir, repo_slug=repo.slug)
     logger.info("  %d instances emitted for %s", len(filtered), repo.full_name)
+
+    # Stage 6b: Harbor emission (if configured)
+    if config.harbor.emit and filtered:
+        from swebenchify.harbor_emitter import emit_harbor_dataset
+
+        logger.info("Stage 6b: Emitting Harbor tasks")
+        harbor_env_specs: dict[str, AnyEnvironmentSpec] = {}
+        for inst in filtered:
+            cand_version = instance_versions.get(inst.instance_id, "unknown")
+            if is_go_repo:
+                spec = env_specs.get("go")
+            elif is_rust_repo:
+                spec = env_specs.get("rust")
+            else:
+                spec = env_specs.get(cand_version)
+            if spec:
+                harbor_env_specs[inst.instance_id] = spec
+
+        emit_harbor_dataset(
+            filtered,
+            config.output.dir,
+            registry_url=config.harbor.registry_url or None,
+            env_specs=harbor_env_specs,
+        )

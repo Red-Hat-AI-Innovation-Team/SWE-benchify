@@ -287,16 +287,43 @@ class GoImageCache:
             return name
         return None
 
-    def push_to_registry(self, local_name: str, registry: str) -> str:
+    @staticmethod
+    def harbor_image_name(
+        registry_url: str,
+        language: str,
+        repo: str,
+        env_spec_hash: str,
+    ) -> str:
+        """Return a Harbor-compatible registry image name.
+
+        Follows the convention:
+        ``{registry_url}/swebenchify-{lang}-{repo_slug}-{hash[:12]}``
+        """
+        slug = repo.replace("/", "__").lower()
+        return f"{registry_url}/swebenchify-{language}-{slug}-{env_spec_hash[:12]}"
+
+    def push_to_registry(
+        self,
+        local_name: str,
+        registry: str,
+        remote_name: str | None = None,
+    ) -> str:
         """Tag and push a local image to a remote registry.
+
+        Args:
+            local_name: The local Docker image tag.
+            registry: The registry URL (used when ``remote_name`` is not
+                provided).
+            remote_name: Explicit remote tag. When supplied, ``registry``
+                is ignored and ``remote_name`` is used directly.
 
         Returns the registry-qualified image name on success.
         Raises ``RuntimeError`` on failure.
         """
-        remote_name = f"{registry}/{local_name}"
+        target = remote_name or f"{registry}/{local_name}"
         try:
             tag = subprocess.run(
-                ["docker", "tag", local_name, remote_name],
+                ["docker", "tag", local_name, target],
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -304,7 +331,7 @@ class GoImageCache:
             if tag.returncode != 0:
                 raise RuntimeError(f"docker tag failed: {tag.stderr}")
             push = subprocess.run(
-                ["docker", "push", remote_name],
+                ["docker", "push", target],
                 capture_output=True,
                 text=True,
                 timeout=600,
@@ -313,8 +340,8 @@ class GoImageCache:
                 raise RuntimeError(f"docker push failed: {push.stderr}")
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"docker push timed out: {exc}") from exc
-        logger.info("Pushed Go image: %s", remote_name)
-        return remote_name
+        logger.info("Pushed image: %s", target)
+        return target
 
 
 class RustImageCache:

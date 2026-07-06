@@ -1,0 +1,35 @@
+schema_version = "1.3"
+
+[task]
+name = "swebenchify/${language}__${instance_id}"
+description = "$description"
+keywords = ["$language", "swe-bench", "bug-fix"]
+
+[metadata]
+repo = "$repo"
+instance_id = "$instance_id"
+base_commit = "$base_commit"
+difficulty = "$difficulty"
+language = "$language"
+source = "swebenchify"
+version = "$version"
+
+[verifier]
+timeout_sec = $verifier_timeout
+network_mode = "$verifier_network_mode"
+$verifier_allowed_hosts
+
+[agent]
+timeout_sec = $agent_timeout
+user = "root"
+network_mode = "$agent_network_mode"
+$agent_allowed_hosts
+
+artifacts = ["/logs/artifacts/candidate_patch.diff", "/logs/artifacts/patch_stat.txt", "/logs/verifier/report.json"]
+
+[environment]
+$environment_block
+build_timeout_sec = 1200.0
+cpus = 2
+memory_mb = 4096
+storage_mb = 10240
