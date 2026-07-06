@@ -1102,7 +1102,7 @@ async def introduce_bug(
     avoid_override = ""
     if test_context:
         avoid_override = """
-Note: When EXISTING TESTS are shown below, the AVOID list is relaxed. Simple mutations like condition inversions and off-by-one errors ARE acceptable if they directly break the specific tests shown. The goal is to produce a mutation that the existing tests will CATCH."""
+Note: When EXISTING TESTS are shown below, the goal is to produce a mutation that the existing tests will CATCH. Prefer mutations that directly break the specific tests shown."""
 
     language_guidance = ""
     if language == "rust":
@@ -1110,72 +1110,47 @@ Note: When EXISTING TESTS are shown below, the AVOID list is relaxed. Simple mut
 RUST-SPECIFIC MUTATION GUIDANCE:
 Rust's strict type system makes "type confusion" bugs nearly impossible. Focus on LOGIC bugs that compile correctly but produce wrong results. The mutation MUST compile.
 
-PREFERRED for Rust (hardest for a judge to detect):
+PREFERRED for Rust:
 - Remove a side-effect call (delete a .flush(), drop(), or cleanup call)
 - Use the wrong method with compatible signature (wrapping_add vs saturating_add, checked_mul vs wrapping_mul)
 - Remove a guard clause (delete an early-return check for an edge case)
 - Remove or change an unsafe block's pointer arithmetic
 - Change a boundary condition in a recursive function
-
-AVOID for Rust (judge catches these as 'classic synthetic patterns'):
-- Comparison operator changes (>= to >, == to !=) — too obvious
-- Off-by-one integer literal changes — 'single-character change' signal
-- Swapping comparison order in sort functions — 'mechanical swap' signal
-- Type confusion (Rust won't compile it)"""
+- Type confusion won't compile in Rust — avoid it"""
     elif language == "go":
         language_guidance = """
 GO-SPECIFIC MUTATION GUIDANCE:
 For Go code, ONLY generate logic errors that compile successfully.
 
-PREFERRED for Go (hardest for a judge to detect):
+PREFERRED for Go:
 - Remove a side-effect call (delete a defer Close(), Flush(), or cleanup call — diff shows one deleted line)
 - Use the wrong method with compatible signature (io.Copy vs io.CopyN, Flush() vs Close())
 - Use the wrong constant/field of the same type (codes.NotFound vs codes.Unavailable, both are uint32)
 - Remove a guard clause (delete 'if len(x) == 0 { return nil }' — edge case not handled)
 - Return wrong error variable (return nil instead of err, or vice versa)
 - Wrong field assignment (same type, different semantics, e.g. res.Name = in.ID instead of in.Name)
-
-AVOID for Go (judge catches these as 'classic synthetic patterns'):
-- Comparison operator changes (== vs !=, < vs <=) — too obvious
-- Off-by-one integer changes (i vs i+1, 0 vs 1) — 'single-character change' signal
-- Swapping two arguments or field assignments — 'mechanical swap' signal
-- Swap types or use type confusion (Go is statically typed — won't compile)
-- Change function signatures, return types, or add/remove parameters
-- Reorder struct fields or change field types
-- Rename exported symbols (breaks callers at compile time)"""
+- Do NOT change function signatures, return types, or rename exported symbols (won't compile)"""
     elif language == "java":
         language_guidance = """
 JAVA-SPECIFIC MUTATION GUIDANCE:
 Java's type system prevents some mutations but logic bugs are very possible. Focus on bugs that compile but produce wrong output.
 
-PREFERRED for Java (hardest for a judge to detect):
+PREFERRED for Java:
 - Remove a side-effect call (delete a .close(), .flush(), or cleanup call)
 - Use the wrong method on a compatible interface (.add() vs .addAll(), .get() vs .peek())
 - Use the wrong constant/field of the same type (HttpStatus.NOT_FOUND vs HttpStatus.BAD_REQUEST)
 - Remove a guard clause (delete a null check or bounds check)
-- Swap .equals() with == for object comparison
-
-AVOID for Java (judge catches these as 'classic synthetic patterns'):
-- Comparison operator changes (>= to >, == to !=) — too obvious
-- Off-by-one integer literal changes — 'single-character change' signal
-- Swapping two arguments — 'mechanical swap' signal
-- Swap null checks (!=null to ==null) — too common in mutation testing"""
+- Swap .equals() with == for object comparison"""
 
     prompt = f"""You are a code mutation expert. Given the following {language} function, introduce a subtle, realistic bug — the kind a developer might actually make during a refactoring or late-night coding session.
 
-PREFERRED mutation types (hardest for a judge to detect):
+PREFERRED mutation types:
 - Remove a side-effect call (delete a cleanup/reset/flush call — diff shows one deleted line)
 - Use the wrong method on a compatible interface (e.g., .read() vs .readline(), .items() vs .values() — same signature, wrong semantics)
 - Use the wrong constant/field of the same type (e.g., os.O_RDONLY vs os.O_WRONLY, both are int)
 - Remove a guard clause (delete 'if len(x) == 0: return None' — edge case not handled)
 - Return wrong error variable (return None instead of raising, or vice versa)
-
-AVOID (judge catches these as 'classic synthetic patterns'):
-- Comparison operator changes (>= to >, == to !=) — too obvious
-- Integer literal changes (1 to 2, 0 to -1) — 'single-character change' signal
-- Swapping two arguments or field assignments — 'mechanical swap' signal
-- Reordering lines — 'adjacent line swap' signal
-- Changing a single character in a string literal
+- Comparison operator changes, integer literal changes, argument swaps, and line reorderings are also acceptable
 {avoid_override}
 
 The bug must look like something that would happen during a real refactoring or API migration, not a deliberate sabotage.
@@ -1938,7 +1913,7 @@ Build/compile output:
 ```
 {social_note}
 
-Write the issue in the style of the examples above. Include the build output in a code block. Do NOT start with "I" or "We". Keep it under 100 words — real issues are terse. Do NOT include a title — just the body."""
+Write the issue in the style of the examples above. Include the build output in a code block. Do NOT start with "I" or "We". Keep it under 200 words — real issues are terse. Do NOT include a title — just the body."""
 
     resolved_model = MODEL_MAP.get(model, model)
     options = ClaudeCodeOptions(max_turns=1, model=resolved_model)
@@ -1970,7 +1945,7 @@ Draft for reference (rewrite, don't copy verbatim):
 {draft}
 
 Rules:
-- 50-100 words MAXIMUM (hard limit — real issues average 112 words)
+- 80-200 words MAXIMUM (hard limit — real issues average 112 words)
 - NO markdown headers (no ##, no **bold sections**)
 - NO 'What did you do / What did you expect / What did you see' format
 - NO checklist items (no '- [x]')
@@ -2432,9 +2407,8 @@ async def generate_test_patch(
 ) -> str | None:
     """Generate a test patch that exposes a synthetic bug.
 
-    Only modifies existing test files. If no existing test file can be
-    found, returns None — creating new test files produces detectable
-    synthetic patterns (fabricated imports, brand-new functions).
+    Modifies existing test files. Falls back to adding a new test function
+    in the existing file when no relevant functions are found.
     """
     existing_test = _find_existing_test_file(repo_path, bug_spec.file, language)
 
@@ -2443,12 +2417,12 @@ async def generate_test_patch(
             bug_spec, repo_path, existing_test, language, model,
             test_output=test_output,
         )
-        return result if result is not None else ""
+        return result
     logger.warning(
-        "  No existing test file found for %s — empty test patch",
+        "  No existing test file found for %s",
         bug_spec.file,
     )
-    return ""
+    return None
 
 
 def _count_test_functions(code: str, language: str = "python") -> int:
@@ -2764,11 +2738,16 @@ Here is the function under test:
 {bug_spec.original_code}
 ```
 
+Here is the buggy version of the function:
+```{language}
+{bug_spec.buggy_code}
+```
+
 The bug: {bug_spec.bug_description}
 {_test_output_section(test_output)}
 Write a SINGLE new test function that:
 - Calls {bug_spec.function_name}() with specific inputs
-- Asserts the correct return value based on the function's documented behavior
+- Asserts the correct return value that will PASS with the original code and FAIL with the buggy code
 - Uses the existing imports and test style from the file
 - Has a descriptive name starting with `{test_prefix}`
 
@@ -2903,16 +2882,24 @@ async def _generate_test_patch_existing(
 
     test_functions = _extract_test_functions(original_test_content, language)
     if not test_functions:
-        logger.warning("  No test functions found in %s — empty test patch (existing suite catches regression)", test_file)
-        return ""
+        logger.warning("  No test functions found in %s — falling back to new test function", test_file)
+        file_imports = _extract_file_imports(original_test_content, language)
+        return await _generate_new_test_in_existing_file(
+            bug_spec, repo_path, test_file, original_test_content,
+            language, model, file_imports, test_output,
+        )
 
     ranked = _rank_test_functions(test_functions, bug_spec)
     if not ranked:
         logger.warning(
-            "  No relevant test functions found for %s — empty test patch (new functions are a synthetic signal)",
+            "  No relevant test functions found for %s — falling back to new test function",
             bug_spec.function_name,
         )
-        return ""
+        file_imports = _extract_file_imports(original_test_content, language)
+        return await _generate_new_test_in_existing_file(
+            bug_spec, repo_path, test_file, original_test_content,
+            language, model, file_imports, test_output,
+        )
 
     if test_output:
         ranked = _boost_failing_tests(ranked, test_output, test_functions, bug_spec)
@@ -2924,10 +2911,13 @@ async def _generate_test_patch_existing(
     best_score = _rank_test_functions_score(ranked[0], bug_spec) if ranked else 0
     if best_score == 0:
         logger.warning(
-            "  Best test score is 0 for %s — empty test patch (existing suite catches regression)",
+            "  Best test score is 0 for %s — falling back to new test function",
             bug_spec.function_name,
         )
-        return ""
+        return await _generate_new_test_in_existing_file(
+            bug_spec, repo_path, test_file, original_test_content,
+            language, model, file_imports, test_output,
+        )
 
     for attempt, target in enumerate(ranked):
         target_source = str(target["source"])
@@ -2953,11 +2943,16 @@ Here is the function under test:
 {bug_spec.original_code}
 ```
 
+Here is the buggy version of the function:
+```{language}
+{bug_spec.buggy_code}
+```
+
 The bug: {bug_spec.bug_description}
 {_test_output_section(test_output)}
 HARD CONSTRAINT: Return ONLY the modified test function. Do NOT return the complete file.
 
-Add 1-3 NEW assertion statements at the END of the function body that exercise the described bug. At least one assertion must verify the function's correct documented behavior.
+Add 1-3 NEW assertion statements at the END of the function body that exercise the described bug. At least one assertion must verify a value that will PASS with the original code and FAIL with the buggy code.
 
 FORBIDDEN — these produce synthetic detection signals:
 - Do NOT access unexported/private fields (Go: lowercase-named struct fields, Python: _underscored attributes). Assert only on public return values and observable API effects.
