@@ -3270,7 +3270,7 @@ def test_data_first_uses_narrative_rewrite_with_fallback() -> None:
         ))
 
     assert len(captured_prompts) == 1
-    assert "Rewrite" in captured_prompts[0]
+    assert "terse GitHub issue" in captured_prompts[0]
     assert "AssertionError" in result
     assert "```" in result
     assert "##" not in result

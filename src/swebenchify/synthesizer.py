@@ -1108,63 +1108,74 @@ Note: When EXISTING TESTS are shown below, the AVOID list is relaxed. Simple mut
     if language == "rust":
         language_guidance = """
 RUST-SPECIFIC MUTATION GUIDANCE:
-For Rust code, the following mutations ARE appropriate (override the AVOID list above):
-- Change comparison operators: >= to >, < to <=, == to !=
-- Off-by-one in slice indexing: v[1..] to v[2..], v[..n] to v[..n-1]
-- Swap similar operations: wrapping_add vs saturating_add, checked_mul vs wrapping_mul
-- Change iterator methods: .skip(1) to .skip(0), .take(n) to .take(n-1)
-- Swap comparison order in sort/partition functions: is_less(&a, &b) to is_less(&b, &a)
+Rust's strict type system makes "type confusion" bugs nearly impossible. Focus on LOGIC bugs that compile correctly but produce wrong results. The mutation MUST compile.
+
+PREFERRED for Rust (hardest for a judge to detect):
+- Remove a side-effect call (delete a .flush(), drop(), or cleanup call)
+- Use the wrong method with compatible signature (wrapping_add vs saturating_add, checked_mul vs wrapping_mul)
+- Remove a guard clause (delete an early-return check for an edge case)
 - Remove or change an unsafe block's pointer arithmetic
 - Change a boundary condition in a recursive function
-Rust's strict type system makes "type confusion" bugs nearly impossible. Focus on LOGIC bugs that compile correctly but produce wrong results. The mutation MUST compile — Rust won't silently accept type errors."""
+
+AVOID for Rust (judge catches these as 'classic synthetic patterns'):
+- Comparison operator changes (>= to >, == to !=) — too obvious
+- Off-by-one integer literal changes — 'single-character change' signal
+- Swapping comparison order in sort functions — 'mechanical swap' signal
+- Type confusion (Rust won't compile it)"""
     elif language == "go":
         language_guidance = """
 GO-SPECIFIC MUTATION GUIDANCE:
-For Go code, ONLY generate logic errors that compile successfully:
-- Wrong field assignment (same type, different semantics, e.g. res.Name = in.ID instead of in.Name)
-- Inverted/wrong condition (== vs !=, < vs <=, len(x) == 0 vs len(x) > 0)
-- Missing nil check or wrong nil check (`if err != nil` → `if err == nil`)
-- Off-by-one (i vs i+1, start vs start+1, v[1:] to v[2:], i < len to i <= len)
-- Missing state reset or wrong default value (remove a field assignment, use 0 where 1 is correct)
-- Wrong return value (return nil instead of return err, or vice versa)
-- Wrong method with compatible signature (io.Copy vs io.CopyN, Flush() vs Close())
-- Use the wrong field of a struct when both fields have the same type
+For Go code, ONLY generate logic errors that compile successfully.
 
-DO NOT (these fail Go compilation and judges catch them as 'couldn't have existed in any real committed code'):
-- Swap types or use type confusion (Go is statically typed — this won't compile)
+PREFERRED for Go (hardest for a judge to detect):
+- Remove a side-effect call (delete a defer Close(), Flush(), or cleanup call — diff shows one deleted line)
+- Use the wrong method with compatible signature (io.Copy vs io.CopyN, Flush() vs Close())
+- Use the wrong constant/field of the same type (codes.NotFound vs codes.Unavailable, both are uint32)
+- Remove a guard clause (delete 'if len(x) == 0 { return nil }' — edge case not handled)
+- Return wrong error variable (return nil instead of err, or vice versa)
+- Wrong field assignment (same type, different semantics, e.g. res.Name = in.ID instead of in.Name)
+
+AVOID for Go (judge catches these as 'classic synthetic patterns'):
+- Comparison operator changes (== vs !=, < vs <=) — too obvious
+- Off-by-one integer changes (i vs i+1, 0 vs 1) — 'single-character change' signal
+- Swapping two arguments or field assignments — 'mechanical swap' signal
+- Swap types or use type confusion (Go is statically typed — won't compile)
 - Change function signatures, return types, or add/remove parameters
 - Reorder struct fields or change field types
-- Swap arguments of different types
-- Rename exported symbols (breaks callers at compile time)
-
-Ignore the PREFERRED list above for Go — those patterns (type confusion, argument order swap, function signature changes) cause COMPILER ERRORS in Go. Use ONLY the logic errors listed here."""
+- Rename exported symbols (breaks callers at compile time)"""
     elif language == "java":
         language_guidance = """
 JAVA-SPECIFIC MUTATION GUIDANCE:
-For Java code, the following mutations ARE appropriate (override the AVOID list above):
-- Change comparison operators: >= to >, < to <=, == to != (especially in conditionals)
-- Off-by-one in array/collection indexing
+Java's type system prevents some mutations but logic bugs are very possible. Focus on bugs that compile but produce wrong output.
+
+PREFERRED for Java (hardest for a judge to detect):
+- Remove a side-effect call (delete a .close(), .flush(), or cleanup call)
+- Use the wrong method on a compatible interface (.add() vs .addAll(), .get() vs .peek())
+- Use the wrong constant/field of the same type (HttpStatus.NOT_FOUND vs HttpStatus.BAD_REQUEST)
+- Remove a guard clause (delete a null check or bounds check)
 - Swap .equals() with == for object comparison
-- Change Collection method: .add() to .addAll(), .size() to .length, .get(i) to .get(i+1)
-- Swap null checks: != null to == null
-- Change exception handling: catch broader/narrower exception type
-- Remove or change a type cast
-Java's type system prevents some mutations but logic bugs are very possible. Focus on bugs that compile but produce wrong output for the test cases shown above."""
+
+AVOID for Java (judge catches these as 'classic synthetic patterns'):
+- Comparison operator changes (>= to >, == to !=) — too obvious
+- Off-by-one integer literal changes — 'single-character change' signal
+- Swapping two arguments — 'mechanical swap' signal
+- Swap null checks (!=null to ==null) — too common in mutation testing"""
 
     prompt = f"""You are a code mutation expert. Given the following {language} function, introduce a subtle, realistic bug — the kind a developer might actually make during a refactoring or late-night coding session.
 
-PREFERRED bug types (choose one):
-- Type confusion: use a similar but wrong type (str where bytes expected, list where tuple needed, int where float, TextIO where BinaryIO)
-- Wrong method: call a similar method on the same object (.items() vs .values(), .append() vs .extend(), .read() vs .readline())
-- Incomplete refactoring: rename a variable in some places but not all, or update a function signature without updating all callers
-- Wrong argument order: swap two arguments of the same type in a function call
-- Stale reference: use an old variable name that was valid before a rename
+PREFERRED mutation types (hardest for a judge to detect):
+- Remove a side-effect call (delete a cleanup/reset/flush call — diff shows one deleted line)
+- Use the wrong method on a compatible interface (e.g., .read() vs .readline(), .items() vs .values() — same signature, wrong semantics)
+- Use the wrong constant/field of the same type (e.g., os.O_RDONLY vs os.O_WRONLY, both are int)
+- Remove a guard clause (delete 'if len(x) == 0: return None' — edge case not handled)
+- Return wrong error variable (return None instead of raising, or vice versa)
 
-AVOID these (too easy to detect as artificial):
-- Simple condition inversions (> to <, True to False)
-- Removing or commenting out a single line
+AVOID (judge catches these as 'classic synthetic patterns'):
+- Comparison operator changes (>= to >, == to !=) — too obvious
+- Integer literal changes (1 to 2, 0 to -1) — 'single-character change' signal
+- Swapping two arguments or field assignments — 'mechanical swap' signal
+- Reordering lines — 'adjacent line swap' signal
 - Changing a single character in a string literal
-- Off-by-one errors in simple ranges
 {avoid_override}
 
 The bug must look like something that would happen during a real refactoring or API migration, not a deliberate sabotage.
@@ -1927,7 +1938,7 @@ Build/compile output:
 ```
 {social_note}
 
-Write the issue in the style of the examples above. Include the build output in a code block. Do NOT start with "I" or "We". Keep it under 400 words. Do NOT include a title — just the body."""
+Write the issue in the style of the examples above. Include the build output in a code block. Do NOT start with "I" or "We". Keep it under 100 words — real issues are terse. Do NOT include a title — just the body."""
 
     resolved_model = MODEL_MAP.get(model, model)
     options = ClaudeCodeOptions(max_turns=1, model=resolved_model)
@@ -1952,31 +1963,24 @@ async def _rewrite_issue_narrative(
     model: str,
 ) -> str | None:
     """Ask the LLM to rewrite a programmatically assembled draft into a natural issue."""
-    lang_hints = {
-        "python": "Python 3.x",
-        "go": "Go 1.x",
-        "rust": "Rust (stable)",
-        "java": "Java 11+/17+",
-    }
-    env_hint = lang_hints.get(language, language)
-
-    prompt = f"""Rewrite this draft GitHub issue to sound like a real developer report.
-The project is {repo_name} ({env_hint}).
-
-Draft:
-{draft}
-
+    prompt = f"""Write a terse GitHub issue as a busy developer who just hit a bug.
 Symptom: {symptom}
 
-Instructions:
-- Include context about what triggered the discovery of this bug (e.g. running tests, CI, code review, upgrading a dependency)
-- Vary the structure — don't always start with the error output. Some issues lead with context, some lead with the error, some lead with what the reporter expected
-- NEVER diagnose the root cause or mention which function is broken. Describe SYMPTOMS only — what failed, what output was wrong, what behavior is unexpected. Real reporters describe what they observe, not what they think is wrong in the code
-- Do NOT reference specific functions, methods, or variables by name as the likely cause — the reporter doesn't know the internals
-- Keep the code block / error output but integrate it naturally
-- Do NOT start with "I" or "We" — vary the opening
-- Do NOT include a title — just the body
-- Keep it under 400 words
+Draft for reference (rewrite, don't copy verbatim):
+{draft}
+
+Rules:
+- 50-100 words MAXIMUM (hard limit — real issues average 112 words)
+- NO markdown headers (no ##, no **bold sections**)
+- NO 'What did you do / What did you expect / What did you see' format
+- NO checklist items (no '- [x]')
+- NO 'Expected behavior' / 'Actual behavior' sections
+- Just 2-4 sentences describing what broke
+- You can include one short error snippet if relevant
+- Terse and direct — like a Slack message escalated to an issue
+- Do NOT include a title
+- Do NOT start with "I" or "We"
+- NEVER diagnose the root cause or mention which function is broken — describe SYMPTOMS only
 - Do NOT mention that this is a rewrite or that you are an AI
 {('- ' + social_context.strip()) if social_context else ''}"""
 
