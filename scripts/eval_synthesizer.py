@@ -51,7 +51,7 @@ EVAL_TARGETS = [
         "repo_path": "/tmp/click-synth-test",
         "language": "python",
         "base_commit": "16fc00e2f4a2717a521084f193709a6058afc693",
-        "n_synthetic": 3,
+        "n_synthetic": 5,
         "n_real": 3,
     },
     {
@@ -60,7 +60,7 @@ EVAL_TARGETS = [
         "repo_path": "/tmp/grpc-go-synth-test",
         "language": "go",
         "base_commit": "a481b8f755bccf5c0308f1530e785bb58a770150",
-        "n_synthetic": 3,
+        "n_synthetic": 5,
         "n_real": 3,
     },
     {
@@ -69,7 +69,7 @@ EVAL_TARGETS = [
         "repo_path": "/tmp/commons-lang-synth-test",
         "language": "java",
         "base_commit": "a77a32c0b7195fc7e8bece37275acd271de8d7fc",
-        "n_synthetic": 3,
+        "n_synthetic": 5,
         "n_real": 3,
     },
     {
@@ -78,7 +78,7 @@ EVAL_TARGETS = [
         "repo_path": "/tmp/rayon-synth-test",
         "language": "rust",
         "base_commit": "2de810e97d5ce832ff98023a4a9cf215a86244ea",
-        "n_synthetic": 3,
+        "n_synthetic": 5,
         "n_real": 3,
     },
 ]
@@ -435,7 +435,13 @@ def main():
                         help='Fast mode: 1 repo, 1 instance, skip Docker F2P and judge')
     parser.add_argument('--seed', type=int, default=None,
                         help='Random seed (default: 42 + round_num)')
+    parser.add_argument('--role', choices=['generator', 'discriminator'], default=None,
+                        help='Adversarial role: generator outputs evasion score, '
+                             'discriminator outputs detection recall')
     args = parser.parse_args()
+
+    if args.role == 'discriminator':
+        args.quick = False
 
     round_num = detect_round()
     commit = detect_commit()
@@ -443,7 +449,7 @@ def main():
     if args.quick:
         targets = [t.copy() for t in EVAL_TARGETS]
         for t in targets:
-            t['n_synthetic'] = 2
+            t['n_synthetic'] = 3
             t['n_real'] = 1
     else:
         targets = EVAL_TARGETS
@@ -486,7 +492,7 @@ def main():
             repo_slug=repo_slug,
             base_commit=base_commit,
             language=target["language"],
-            max_mutations=target["n_synthetic"],
+            max_mutations=target["n_synthetic"] * 5,
             model="sonnet",
         ))
         synth_instances = [asdict(c) for c in candidates]
@@ -766,7 +772,7 @@ def main():
         # ── Factory-compatible JSON output (stdout) ──
         judge_evasion = 1.0 - recall
         f2p_rate = len(judged_synth) / n_s if n_s > 0 else 0
-        factory_score = 0.7 * judge_evasion * f2p_rate + 0.3 * diversity["overall"]
+        generator_score = 0.7 * judge_evasion * f2p_rate + 0.3 * diversity["overall"]
 
         conf_counts = {}
         for r in results:
@@ -775,10 +781,17 @@ def main():
                 conf_counts[c] = conf_counts.get(c, 0) + 1
         conf_summary = ", ".join(f"{v} {k}" for k, v in sorted(conf_counts.items()))
 
+        if args.role == 'discriminator':
+            factory_score = round(recall, 3)
+            detail_prefix = f"R{round_num} ({commit}): DISCRIMINATOR. "
+        else:
+            factory_score = round(generator_score, 3)
+            detail_prefix = f"R{round_num} ({commit}): "
+
         print(json.dumps({
-            "score": round(factory_score, 3),
+            "score": factory_score,
             "details": (
-                f"R{round_num} ({commit}): "
+                f"{detail_prefix}"
                 f"{m['fn']}/{m['tp']+m['fn']} synthetic fooled judge. "
                 f"Detection: {recall:.0%}. "
                 f"FP: {m['fp']}/{m['fp']+m['tn']}. "
