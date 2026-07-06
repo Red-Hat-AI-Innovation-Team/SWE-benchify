@@ -816,6 +816,9 @@ def _sanitize_test_output(test_output: str, repo_path: str) -> str:
     result = re.sub(r"[^\s]*remote-factory[^\s]*/", "/home/user/project/", result)
     result = re.sub(r"[^\s]*\.factory-worktrees/[^\s/]+/", "/home/user/project/", result)
 
+    # Strip .synth-venv paths
+    result = re.sub(r'\.synth-venv/[^\s]+', '.venv/lib/python3.x/site-packages/', result)
+
     # Strip cachedir lines with synth/factory paths
     result = re.sub(r"cachedir:.*(?:synth|factory).*\n?", "", result)
 
@@ -827,7 +830,9 @@ def _humanize_traceback(test_output: str, repo_path: str) -> str:
     if not test_output:
         return ""
 
-    repo_name = Path(repo_path).name
+    repo_name = re.sub(r'[-_]?synth[-_]?(test|temp)[-_]?', '', Path(repo_path).name).strip('-_')
+    if not repo_name:
+        repo_name = Path(repo_path).name.split('-synth')[0] or 'project'
     username = random.choice(_FAKE_USERNAMES)
     home_path = f"/home/{username}/projects/{repo_name}/"
 
@@ -2358,7 +2363,8 @@ def _rank_test_functions(
     for idx, tf in enumerate(test_functions):
         body = str(tf["source"]).lower()
         score = sum(1 for t in targets if t.lower() in body)
-        scored.append((score, -idx, tf))
+        if score > 0:
+            scored.append((score, -idx, tf))
 
     scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
     return [tf for _, _, tf in scored[:limit]]
@@ -2599,7 +2605,11 @@ async def _generate_test_patch_existing(
 
     ranked = _rank_test_functions(test_functions, bug_spec)
     if not ranked:
-        return None
+        logger.warning("  No relevant test functions found for %s — falling back to LLM generation", bug_spec.function_name)
+        return await _generate_new_test_in_existing_file(
+            bug_spec, repo_path, test_file, original_test_content,
+            language, model, _extract_file_imports(original_test_content, language), test_output,
+        )
 
     if test_output:
         ranked = _boost_failing_tests(ranked, test_output, test_functions, bug_spec)
@@ -3075,7 +3085,7 @@ def _create_buggy_commit(
     branch_hash = hashlib.sha256(
         (file_rel + description).encode()
     ).hexdigest()[:12]
-    temp_branch = f"synth-temp-{branch_hash}"
+    temp_branch = f"fix-{branch_hash}"
 
     try:
         orig = run(["git", "rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
@@ -3088,7 +3098,7 @@ def _create_buggy_commit(
         file_path.write_text(mutated_content, encoding="utf-8")
 
         run(["git", "add", file_rel])
-        run(["git", "commit", "-m", f"synth: {description}"])
+        run(["git", "commit", "-m", f"fix: {description}"])
 
         buggy_sha = run(["git", "rev-parse", "HEAD"]).stdout.strip()
 
@@ -3123,7 +3133,7 @@ def _create_buggy_commit_multi(
 
     hash_input = "".join(sorted(buggy_files.keys())) + description
     branch_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:12]
-    temp_branch = f"synth-temp-{branch_hash}"
+    temp_branch = f"fix-{branch_hash}"
 
     try:
         orig = run(["git", "rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
@@ -3137,7 +3147,7 @@ def _create_buggy_commit_multi(
             file_path.write_text(content, encoding="utf-8")
             run(["git", "add", file_rel])
 
-        run(["git", "commit", "-m", f"synth: {description}"])
+        run(["git", "commit", "-m", f"fix: {description}"])
 
         buggy_sha = run(["git", "rev-parse", "HEAD"]).stdout.strip()
 
