@@ -1364,6 +1364,26 @@ def _parse_secondary_changes(text: str) -> list[SecondaryChange]:
     return changes
 
 
+def _summarize_patch(patch: str) -> str:
+    """Extract a one-line summary from a unified diff: files changed + line count."""
+    files: list[str] = []
+    added = 0
+    removed = 0
+    for line in patch.splitlines():
+        if line.startswith('+++ b/'):
+            files.append(line[6:])
+        elif line.startswith('+') and not line.startswith('+++'):
+            added += 1
+        elif line.startswith('-') and not line.startswith('---'):
+            removed += 1
+    if not files:
+        return ''
+    names = ', '.join(Path(f).name for f in files[:3])
+    if len(files) > 3:
+        names += f' (+{len(files) - 3} more)'
+    return f'{names} ({added}+ {removed}-)'
+
+
 def generate_patch(
     original_source: str,
     mutated_source: str,
@@ -1646,23 +1666,44 @@ def _mine_social_artifacts(repo_path: str) -> dict[str, list[str]]:
 
 def _build_social_context(artifacts: dict[str, list[str]]) -> str:
     """Build social context string from mined artifacts."""
-    if not artifacts.get('issues'):
+    if artifacts.get('issues'):
+        issue_num = random.choice(artifacts['issues'])
+        all_nums = artifacts['issues']
+        pr_ref = random.choice(all_nums) if len(all_nums) > 1 else issue_num
+
+        ref_styles = [
+            f'Might be related to #{issue_num}',
+            f'Possibly a regression from #{issue_num}',
+            f'cf. #{issue_num}',
+            f'This started happening after #{pr_ref} was merged.',
+            f'I think #{pr_ref} may have introduced this.',
+            f'Looks like a regression from #{pr_ref}',
+            f'Not sure if this is related to #{issue_num} but the symptoms are similar.',
+        ]
+        return "\n\n" + random.choice(ref_styles)
+
+    contributors = artifacts.get('contributors', [])
+    branches = artifacts.get('branches', [])
+
+    fallback_styles: list[str] = []
+    if contributors:
+        contributor = random.choice(contributors)
+        fallback_styles.extend([
+            f'@{contributor.replace(" ", "")} might have context here.',
+            f'cc @{contributor.replace(" ", "")} — have you seen this before?',
+            f'@{contributor.replace(" ", "")} this looks like it could be in your area.',
+        ])
+    if branches:
+        branch = random.choice(branches)
+        fallback_styles.extend([
+            f'I noticed this on the {branch} branch.',
+            f'Reproduces on {branch}.',
+            f'Seeing this on {branch}, not sure about main.',
+        ])
+
+    if not fallback_styles:
         return ""
-
-    issue_num = random.choice(artifacts['issues'])
-    all_nums = artifacts['issues']
-    pr_ref = random.choice(all_nums) if len(all_nums) > 1 else issue_num
-
-    ref_styles = [
-        f'Might be related to #{issue_num}',
-        f'Possibly a regression from #{issue_num}',
-        f'cf. #{issue_num}',
-        f'This started happening after #{pr_ref} was merged.',
-        f'I think #{pr_ref} may have introduced this.',
-        f'Looks like a regression from #{pr_ref}',
-        f'Not sure if this is related to #{issue_num} but the symptoms are similar.',
-    ]
-    return "\n\n" + random.choice(ref_styles)
+    return "\n\n" + random.choice(fallback_styles)
 
 
 def _find_file_commits(
@@ -1696,7 +1737,12 @@ def _find_file_commits(
     return commits
 
 
-async def _bug_to_symptom(bug_description: str, file_path: str = '', model: str = "sonnet") -> str:
+async def _bug_to_symptom(
+    bug_description: str,
+    file_path: str = '',
+    model: str = "sonnet",
+    patch_summary: str = '',
+) -> str:
     """Convert a code-level bug description to a user-facing symptom.
 
     Strips technical details (operator names, variable names, condition
@@ -1707,10 +1753,14 @@ async def _bug_to_symptom(bug_description: str, file_path: str = '', model: str 
         module = Path(file_path).stem
         file_context = f'\nThe bug is in the {module} module ({file_path}). The symptom MUST be about {module} functionality specifically.'
 
+    patch_context = ''
+    if patch_summary:
+        patch_context = f'\nThe fix touches: {patch_summary}. The symptom should align with what these changes address.'
+
     prompt = f"""Convert this developer-level bug description into a user-facing symptom. Keep the FUNCTIONAL AREA (what part of the system is affected — e.g., "time duration handling", "CLI startup", "RST link parsing") but remove the specific code-level fix details (no operator names like `>=`, no variable names, no exact condition logic).
 
 Bug description: {bug_description}
-{file_context}
+{file_context}{patch_context}
 
 Return ONLY the symptom in one sentence. Examples:
 - "split() instead of rsplit() in custom Sphinx role parser" → "RST documentation rendering breaks certain link syntax"
@@ -1805,12 +1855,38 @@ async def generate_issue_from_symptom(
         return f'{general_area}\n\n```\n{symptom}\n```'
 
     _ISSUE_OPENERS = [
+        # Original
         'This test started failing after a recent update.',
         'Getting unexpected test failures.',
         'Noticed this is broken while working on something else.',
         'Tests are failing on this branch.',
         'Ran into this failure, not sure what changed.',
         '',
+        # Frustrated
+        'This has been blocking my PR for hours.',
+        'Anyone else seeing this?',
+        'I keep hitting this and it\'s driving me nuts.',
+        "Can't get past this failure.",
+        # Casual
+        'Not sure if this is expected but...',
+        'Stumbled on this while reviewing some changes.',
+        'Might be a flaky test, but I can reproduce it consistently.',
+        'Just noticed this, not sure how long it\'s been broken.',
+        'Was looking into something else and found this.',
+        # Terse
+        '',
+        '',
+        # CI-related
+        'CI started failing after the last merge.',
+        'Build is red on main.',
+        'This showed up in CI overnight.',
+        'Our nightly build caught this.',
+        'CI is broken, looks like a recent change.',
+        # Version/regression
+        'Pretty sure this is a regression.',
+        'This was working last week.',
+        'Bisected to a recent commit.',
+        'Looks like something broke in the latest changes.',
     ]
 
     test_id = _extract_first_failure_id(test_output)
@@ -3823,7 +3899,10 @@ async def synthesize_repo(
         social_context = _build_social_context(social_artifacts)
 
         # H1: Information firewall — generate issue from symptom only
-        symptom = await _bug_to_symptom(bug_spec.bug_description, file_path=bug_spec.file, model=model)
+        symptom = await _bug_to_symptom(
+            bug_spec.bug_description, file_path=bug_spec.file, model=model,
+            patch_summary=_summarize_patch(patch),
+        )
         style_examples = _mine_issue_style_examples(repo_path)
         problem_statement = await generate_issue_from_symptom(
             symptom=symptom,
