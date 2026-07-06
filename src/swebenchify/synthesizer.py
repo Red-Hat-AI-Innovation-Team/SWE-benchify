@@ -817,7 +817,7 @@ def _sanitize_test_output(test_output: str, repo_path: str) -> str:
     result = re.sub(r"[^\s]*\.factory-worktrees/[^\s/]+/", "/home/user/project/", result)
 
     # Strip .synth-venv paths
-    result = re.sub(r'\.synth-venv/[^\s]+', '.venv/lib/python3.x/site-packages/', result)
+    result = re.sub(r'\.synth-venv/[^\s"]+', '.venv/lib/python3.x/site-packages/', result)
 
     # Strip cachedir lines with synth/factory paths
     result = re.sub(r"cachedir:.*(?:synth|factory).*\n?", "", result)
