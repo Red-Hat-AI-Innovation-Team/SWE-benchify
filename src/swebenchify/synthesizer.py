@@ -382,6 +382,9 @@ def find_mutation_targets(
     targets: list[dict] = []
     files_seen = 0
 
+    if language == "rust":
+        max_files = max(max_files, 100)
+
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [
             d for d in dirnames
@@ -410,10 +413,20 @@ def find_mutation_targets(
             lines = content.splitlines()
             functions = extractor(lines)
 
+            cfg_test_line = None
+            if language == "rust":
+                for line_idx, line in enumerate(lines):
+                    if "#[cfg(test)]" in line:
+                        cfg_test_line = line_idx + 1
+                        break
+
             for func in functions[:max_functions]:
                 source_lines = str(func["source"]).strip().splitlines()
                 if len(source_lines) < 8:
                     continue
+                if language == "rust" and cfg_test_line is not None:
+                    if func["start_line"] + 1 >= cfg_test_line:
+                        continue
                 targets.append({
                     "file": rel_path,
                     "function_name": func["function_name"],
