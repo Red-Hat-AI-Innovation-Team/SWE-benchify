@@ -819,6 +819,9 @@ def _sanitize_test_output(test_output: str, repo_path: str) -> str:
     # Strip .synth-venv paths
     result = re.sub(r'\.synth-venv/[^\s"]+', '.venv/lib/python3.x/site-packages/', result)
 
+    # Strip .synth-java-compiled marker references (RAT license checker artifact)
+    result = re.sub(r'[^\n]*\.synth-java-compiled[^\n]*\n?', '', result)
+
     # Strip cachedir lines with synth/factory paths
     result = re.sub(r"cachedir:.*(?:synth|factory).*\n?", "", result)
 
@@ -3488,7 +3491,8 @@ def _run_tests_on_buggy_code(
 def _ensure_java_build(repo_path: str) -> Path | None:
     """Compile Java main and test sources via Maven, skipping if already done."""
     root = Path(repo_path)
-    marker = root / ".synth-java-compiled"
+    mvn_dir = root / ".mvn"
+    marker = mvn_dir / "maven.compiled"
     if marker.is_file():
         logger.debug("  Java build already compiled (marker exists)")
         return root
@@ -3509,6 +3513,7 @@ def _ensure_java_build(repo_path: str) -> Path | None:
         if result.returncode != 0:
             logger.warning("  mvn test-compile failed (rc=%d): %s", result.returncode, result.stderr[:200])
             return None
+        mvn_dir.mkdir(exist_ok=True)
         marker.write_text("compiled\n")
         logger.info("  Java build completed")
         return root
