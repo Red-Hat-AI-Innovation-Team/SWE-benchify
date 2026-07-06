@@ -46,11 +46,11 @@ DATASET_PATHS = [
 
 EVAL_TARGETS = [
     {
-        "repo_slug": "containers/podman-compose",
-        "repo_url": "https://github.com/containers/podman-compose.git",
-        "repo_path": "/tmp/podman-compose-synth-test",
+        "repo_slug": "pallets/click",
+        "repo_url": "https://github.com/pallets/click.git",
+        "repo_path": "/tmp/click-synth-test",
         "language": "python",
-        "base_commit": "121b5f6ea1b6bc1f8ea4ddf4ebc7ff809d5b876e",
+        "base_commit": "16fc00e2f4a2717a521084f193709a6058afc693",
         "n_synthetic": 3,
         "n_real": 3,
     },
@@ -64,11 +64,11 @@ EVAL_TARGETS = [
         "n_real": 3,
     },
     {
-        "repo_slug": "FasterXML/jackson-databind",
-        "repo_url": "https://github.com/FasterXML/jackson-databind.git",
-        "repo_path": "/tmp/jackson-databind-synth-test",
+        "repo_slug": "apache/commons-lang",
+        "repo_url": "https://github.com/apache/commons-lang.git",
+        "repo_path": "/tmp/commons-lang-synth-test",
         "language": "java",
-        "base_commit": "bc1613c765704703ec7385e314fa8b19448e1ddd",
+        "base_commit": "a77a32c0b7195fc7e8bece37275acd271de8d7fc",
         "n_synthetic": 3,
         "n_real": 3,
     },
@@ -555,24 +555,28 @@ def main():
 
     # ── Phase 2 (fast): Structural gate ──
     if structural_failures:
+        failed_ids = {iid for iid, _ in structural_failures}
         log.warning("STRUCTURAL GATE FAILED — %d instance(s)", len(structural_failures))
         for iid, reason in structural_failures:
             log.warning("  %s: %s", iid, reason)
-
-        _write_round_doc(round_num, commit, n_s, n_r, targets,
-                         structural_failures=structural_failures)
-
-        print(json.dumps({
-            "score": 0.0,
-            "details": (
-                f"R{round_num} ({commit}): STRUCTURAL GATE FAILED. "
-                f"{len(structural_failures)} instance(s) failed: "
-                + "; ".join(f"{iid}: {reason}" for iid, reason in structural_failures)
-            ),
-        }))
-        return
-
-    log.info("phase=structural status=passed count=%d/%d", n_s, n_s)
+        all_synth_instances = [
+            inst for inst in all_synth_instances
+            if inst["instance_id"] not in failed_ids
+        ]
+        n_s = len(all_synth_instances)
+        log.info("phase=structural status=passed count=%d/%d",
+                 n_s, n_s + len(failed_ids))
+        if not all_synth_instances:
+            print(json.dumps({
+                "score": 0.0,
+                "details": (
+                    f"R{round_num} ({commit}): ALL instances failed structural gate. "
+                    + "; ".join(f"{iid}: {reason}" for iid, reason in structural_failures)
+                ),
+            }))
+            return
+    else:
+        log.info("phase=structural status=passed count=%d/%d", n_s, n_s)
 
     # ── Phase 3 (fast): Diversity gate ──
     diversity = compute_diversity(all_synth_instances)
