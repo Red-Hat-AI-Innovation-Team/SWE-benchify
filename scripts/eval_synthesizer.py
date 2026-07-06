@@ -51,7 +51,7 @@ EVAL_TARGETS = [
         "repo_path": "/tmp/click-synth-test",
         "language": "python",
         "base_commit": "16fc00e2f4a2717a521084f193709a6058afc693",
-        "n_synthetic": 3,
+        "n_synthetic": 5,
         "n_real": 3,
     },
     {
@@ -60,7 +60,7 @@ EVAL_TARGETS = [
         "repo_path": "/tmp/grpc-go-synth-test",
         "language": "go",
         "base_commit": "a481b8f755bccf5c0308f1530e785bb58a770150",
-        "n_synthetic": 3,
+        "n_synthetic": 5,
         "n_real": 3,
     },
     {
@@ -69,7 +69,7 @@ EVAL_TARGETS = [
         "repo_path": "/tmp/commons-lang-synth-test",
         "language": "java",
         "base_commit": "a77a32c0b7195fc7e8bece37275acd271de8d7fc",
-        "n_synthetic": 3,
+        "n_synthetic": 5,
         "n_real": 3,
     },
     {
@@ -78,7 +78,7 @@ EVAL_TARGETS = [
         "repo_path": "/tmp/rayon-synth-test",
         "language": "rust",
         "base_commit": "2de810e97d5ce832ff98023a4a9cf215a86244ea",
-        "n_synthetic": 3,
+        "n_synthetic": 5,
         "n_real": 3,
     },
 ]
@@ -449,7 +449,7 @@ def main():
     if args.quick:
         targets = [t.copy() for t in EVAL_TARGETS]
         for t in targets:
-            t['n_synthetic'] = 2
+            t['n_synthetic'] = 3
             t['n_real'] = 1
     else:
         targets = EVAL_TARGETS
@@ -492,7 +492,7 @@ def main():
             repo_slug=repo_slug,
             base_commit=base_commit,
             language=target["language"],
-            max_mutations=target["n_synthetic"],
+            max_mutations=target["n_synthetic"] * 5,
             model="sonnet",
         ))
         synth_instances = [asdict(c) for c in candidates]
