@@ -4265,12 +4265,6 @@ async def synthesize_repo(
             language=language,
         )
 
-        if not _issue_patch_aligned(problem_statement, patch):
-            logger.warning(
-                "  Skipped — issue text not semantically aligned with patch content",
-            )
-            continue
-
         test_patch = ''.join(test_patch_parts)
 
         try:
