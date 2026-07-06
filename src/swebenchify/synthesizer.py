@@ -1064,6 +1064,37 @@ async def introduce_bug(
         plan_parts.append("Your bug MUST include the secondary changes described above. Show ALL modified files in your response.")
         bug_plan_context = "\n".join(plan_parts)
 
+    avoid_override = ""
+    if test_context:
+        avoid_override = """
+Note: When EXISTING TESTS are shown below, the AVOID list is relaxed. Simple mutations like condition inversions and off-by-one errors ARE acceptable if they directly break the specific tests shown. The goal is to produce a mutation that the existing tests will CATCH."""
+
+    language_guidance = ""
+    if language == "rust":
+        language_guidance = """
+RUST-SPECIFIC MUTATION GUIDANCE:
+For Rust code, the following mutations ARE appropriate (override the AVOID list above):
+- Change comparison operators: >= to >, < to <=, == to !=
+- Off-by-one in slice indexing: v[1..] to v[2..], v[..n] to v[..n-1]
+- Swap similar operations: wrapping_add vs saturating_add, checked_mul vs wrapping_mul
+- Change iterator methods: .skip(1) to .skip(0), .take(n) to .take(n-1)
+- Swap comparison order in sort/partition functions: is_less(&a, &b) to is_less(&b, &a)
+- Remove or change an unsafe block's pointer arithmetic
+- Change a boundary condition in a recursive function
+Rust's strict type system makes "type confusion" bugs nearly impossible. Focus on LOGIC bugs that compile correctly but produce wrong results. The mutation MUST compile — Rust won't silently accept type errors."""
+    elif language == "java":
+        language_guidance = """
+JAVA-SPECIFIC MUTATION GUIDANCE:
+For Java code, the following mutations ARE appropriate (override the AVOID list above):
+- Change comparison operators: >= to >, < to <=, == to != (especially in conditionals)
+- Off-by-one in array/collection indexing
+- Swap .equals() with == for object comparison
+- Change Collection method: .add() to .addAll(), .size() to .length, .get(i) to .get(i+1)
+- Swap null checks: != null to == null
+- Change exception handling: catch broader/narrower exception type
+- Remove or change a type cast
+Java's type system prevents some mutations but logic bugs are very possible. Focus on bugs that compile but produce wrong output for the test cases shown above."""
+
     prompt = f"""You are a code mutation expert. Given the following {language} function, introduce a subtle, realistic bug — the kind a developer might actually make during a refactoring or late-night coding session.
 
 PREFERRED bug types (choose one):
@@ -1078,6 +1109,7 @@ AVOID these (too easy to detect as artificial):
 - Removing or commenting out a single line
 - Changing a single character in a string literal
 - Off-by-one errors in simple ranges
+{avoid_override}
 
 The bug must look like something that would happen during a real refactoring or API migration, not a deliberate sabotage.
 
@@ -1091,7 +1123,7 @@ Here is the function:
 ```{language}
 {source}
 ```
-{test_context}{related_context}
+{test_context}{language_guidance}{related_context}
 {bug_plan_context}
 
 Return your response in EXACTLY this format:
