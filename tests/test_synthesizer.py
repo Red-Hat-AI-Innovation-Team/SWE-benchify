@@ -3241,8 +3241,8 @@ def test_run_tests_no_deselect_when_baseline_clean(tmp_path: Path) -> None:
     assert "FAILED" in output or "assert" in output.lower()
 
 
-def test_data_first_no_llm_call() -> None:
-    """Data-first path makes NO LLM call — issue is purely programmatic."""
+def test_data_first_uses_narrative_rewrite_with_fallback() -> None:
+    """Data-first path calls LLM for narrative rewrite, falls back to programmatic draft."""
     from unittest.mock import MagicMock, patch as mock_patch
 
     captured_prompts: list[str] = []
@@ -3269,7 +3269,8 @@ def test_data_first_no_llm_call() -> None:
             test_output=real_test_output,
         ))
 
-    assert len(captured_prompts) == 0
+    assert len(captured_prompts) == 1
+    assert "Rewrite" in captured_prompts[0]
     assert "AssertionError" in result
     assert "```" in result
     assert "##" not in result
