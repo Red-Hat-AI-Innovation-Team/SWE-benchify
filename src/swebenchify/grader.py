@@ -439,7 +439,7 @@ def _make_run_script(pkg_scope: str) -> str:
     return (
         "set -e\n"
         "cd /repo\n"
-        "git apply /patches/test.patch /patches/candidate.patch "
+        "git apply --allow-empty /patches/test.patch /patches/candidate.patch "
         "2>&1 || { echo PATCH_APPLY_FAILED; exit 0; }\n"
         f"go test -json -count=1 {pkg_scope} 2>&1 || true\n"
     )
@@ -450,7 +450,7 @@ def _make_grade_run_script(test_cmd: str, test_scope: str) -> str:
     return (
         "set -e\n"
         "cd /repo\n"
-        "git apply /patches/test.patch /patches/candidate.patch "
+        "git apply --allow-empty /patches/test.patch /patches/candidate.patch "
         "2>&1 || { echo PATCH_APPLY_FAILED; exit 0; }\n"
         f"{test_cmd} {test_scope} 2>&1 || true\n"
     )
@@ -497,7 +497,7 @@ def _make_f2p_run_script_generic(
         if reinstall_cmd:
             parts.append(f"{reinstall_cmd} 2>&1 || true")
         parts.append(
-            "git apply /patches/test.patch "
+            "git apply --allow-empty /patches/test.patch "
             "2>&1 || { echo PATCH_APPLY_FAILED; exit 0; }"
         )
         parts.append(f"echo '{_F2P_PHASE_SEPARATOR}_RUN_{i}_PRE'")
@@ -507,7 +507,7 @@ def _make_f2p_run_script_generic(
             "{ echo NO_FAILING_TESTS; exit 0; }"
         )
         parts.append(
-            "git apply /patches/gold.patch "
+            "git apply --allow-empty /patches/gold.patch "
             "2>&1 || { echo PATCH_APPLY_FAILED; exit 0; }"
         )
         parts.append(f"echo '{_F2P_PHASE_SEPARATOR}_RUN_{i}_POST'")
@@ -553,9 +553,16 @@ def _parse_f2p_output_generic(
         if not pre_result["compiled"]:
             first_compiled = False
 
-        f2p_raw, p2p_raw = _compute_f2p_p2p(
-            pre_result["tests"], post_result["tests"]
-        )
+        # When pre-fix doesn't compile but post-fix does, all post-fix
+        # passing tests are FAIL_TO_PASS (they couldn't run pre-fix).
+        if not pre_result["compiled"] and post_result["compiled"]:
+            post_passed = [t for t, s in post_result["tests"].items() if s == "passed"]
+            f2p_raw = sorted(post_passed)
+            p2p_raw: list[str] = []
+        else:
+            f2p_raw, p2p_raw = _compute_f2p_p2p(
+                pre_result["tests"], post_result["tests"]
+            )
 
         per_run_f2p.append(set(normalize(f2p_raw)))
         per_run_p2p.append(set(normalize(p2p_raw)))
@@ -664,6 +671,7 @@ def compute_f2p(
     docker_image: str = _DEFAULT_IMAGE,
     timeout: int | None = None,
     n_runs: int = 1,
+    repo_path: str | None = None,
 ) -> ValidationResult:
     """Compute FAIL_TO_PASS and PASS_TO_PASS via Docker-based validation.
 
@@ -692,7 +700,7 @@ def compute_f2p(
         for line in test_patch.splitlines()
         if line.startswith("diff --git")
     )
-    if not has_test_file:
+    if not has_test_file and test_patch.strip():
         logger.info(
             "compute_f2p finished: repo=%s status=invalid f2p=0 p2p=0 elapsed=0.0s",
             repo,
@@ -710,14 +718,34 @@ def compute_f2p(
         (tmp / "test.patch").write_text(test_patch)
         (tmp / "gold.patch").write_text(gold_patch)
 
-        test_scope = backend.test_scope(test_patch)
+        use_tarball = False
+        if repo_path:
+            try:
+                subprocess.run(
+                    ["git", "-C", repo_path, "cat-file", "-e", base_commit],
+                    check=True, capture_output=True,
+                )
+                tarball = tmp / "repo.tar.gz"
+                subprocess.run(
+                    ["git", "-C", repo_path, "archive", "--format=tar.gz",
+                     "-o", str(tarball), base_commit],
+                    check=True, capture_output=True,
+                )
+                use_tarball = True
+            except subprocess.CalledProcessError:
+                logger.warning("repo_path=%s does not contain %s, falling back to clone",
+                               repo_path, base_commit)
+
+        scope_patch = test_patch if test_patch.strip() else gold_patch
+        test_scope = backend.test_scope(scope_patch)
         test_cmd = backend.make_test_cmd(fallback_spec)
         build_tag = f"swebenchify-f2p-{_short_hash(repo + base_commit)}"
 
         build_rc, build_log = _docker_build(
             tag=build_tag,
             context_dir=str(tmp),
-            dockerfile=backend.make_dockerfile(repo, base_commit, fallback_spec),
+            dockerfile=backend.make_dockerfile(repo, base_commit, fallback_spec,
+                                               repo_tarball=use_tarball),
         )
 
         if build_rc != 0:

@@ -7,6 +7,7 @@ pipeline or individual stages.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from swebenchify.config import load_config
@@ -380,6 +381,71 @@ def _cmd_harbor(args: argparse.Namespace) -> None:
     print(f"{len(instances)} instances -> {args.output}/harbor-tasks/")
 
 
+def _cmd_synthesize(args: argparse.Namespace) -> None:
+    """Generate synthetic bug instances for a repository."""
+    import asyncio
+    import json
+    import subprocess
+    from dataclasses import asdict
+    from pathlib import Path
+
+    from swebenchify.synthesizer import synthesize_repo
+
+    _setup_logging()
+
+    repo_path = args.repo
+    repo_slug = args.repo
+
+    if os.path.isdir(repo_path):
+        abs_path = os.path.abspath(repo_path)
+        if not args.base_commit:
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=abs_path,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            base_commit = result.stdout.strip()
+        else:
+            base_commit = args.base_commit
+        dirname = os.path.basename(abs_path)
+        if not repo_slug or repo_slug == abs_path:
+            repo_slug = f"local/{dirname}"
+    else:
+        abs_path = repo_path
+        base_commit = args.base_commit or "HEAD"
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    async def run() -> None:
+        candidates = await synthesize_repo(
+            repo_path=abs_path,
+            repo_slug=repo_slug,
+            base_commit=base_commit,
+            language=args.language,
+            max_mutations=args.max_mutations,
+            model=args.model,
+        )
+
+        if not candidates:
+            print("No synthetic instances generated")
+            return
+
+        slug = repo_slug.replace("/", "__")
+        out_file = output_dir / f"{slug}-synthetic-candidates.jsonl"
+        with open(out_file, "w") as f:
+            for c in candidates:
+                f.write(json.dumps(asdict(c)) + "\n")
+
+        print(f"\nGenerated {len(candidates)} synthetic instances -> {out_file}")
+        for c in candidates:
+            print(f"  {c.instance_id}: {(c.problem_statement or '')[:80]}...")
+
+    asyncio.run(run())
+
+
 def _cmd_eval(args: argparse.Namespace) -> None:
     """Run evaluation: dispatch a coding agent to solve instances."""
     import asyncio
@@ -551,6 +617,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--env-specs", default=None, help="Path to env_specs JSON file (instance_id -> spec)"
     )
 
+    # synthesize
+    synth_parser = subparsers.add_parser(
+        "synthesize",
+        help="Generate synthetic bug instances using LLM-based mutation",
+    )
+    synth_parser.add_argument(
+        "--repo", required=True,
+        help="Repository slug (owner/repo) or local path",
+    )
+    synth_parser.add_argument(
+        "--language", required=True,
+        choices=["python", "go", "rust", "java"],
+        help="Programming language of the repository",
+    )
+    synth_parser.add_argument(
+        "--max-mutations", type=int, default=10,
+        help="Maximum number of bugs to generate (default: 10)",
+    )
+    synth_parser.add_argument(
+        "--output-dir", default="output",
+        help="Output directory (default: output)",
+    )
+    synth_parser.add_argument(
+        "--base-commit", default=None,
+        help="Commit SHA to target (default: HEAD for local repos)",
+    )
+    synth_parser.add_argument(
+        "--model", default="sonnet",
+        help="Claude model to use for bug generation (default: sonnet)",
+    )
+
     # eval
     eval_parser = subparsers.add_parser(
         "eval", help="Evaluate: run a coding agent on benchmark instances"
@@ -590,6 +687,7 @@ def main(argv: list[str] | None = None) -> int:
         "extract": _cmd_extract,
         "validate": _cmd_validate,
         "remote-validate": _cmd_remote_validate,
+        "synthesize": _cmd_synthesize,
         "emit": _cmd_emit,
         "harbor": _cmd_harbor,
         "eval": _cmd_eval,
