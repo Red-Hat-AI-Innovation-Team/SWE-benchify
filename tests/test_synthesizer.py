@@ -1847,8 +1847,8 @@ def test_validate_test_imports_rejects_completely_fake(tmp_path: Path) -> None:
 # generate_test_patch — returns None without existing test file
 # ---------------------------------------------------------------------------
 
-def test_generate_test_patch_returns_none_without_existing_test(tmp_path: Path) -> None:
-    """When no existing test file exists, generate_test_patch returns None."""
+def test_generate_test_patch_returns_empty_without_existing_test(tmp_path: Path) -> None:
+    """When no existing test file exists, generate_test_patch returns empty string."""
     from unittest.mock import MagicMock, patch as mock_patch
 
     (tmp_path / "src").mkdir()
@@ -1868,7 +1868,7 @@ def test_generate_test_patch_returns_none_without_existing_test(tmp_path: Path) 
         from swebenchify.synthesizer import generate_test_patch
         result = asyncio.run(generate_test_patch(bug_spec, str(tmp_path), "python"))
 
-    assert result is None
+    assert result == ""
 
 
 # ---------------------------------------------------------------------------

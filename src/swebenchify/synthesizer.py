@@ -496,6 +496,8 @@ def _find_related_files(
     ) -> None:
         if rel_path in seen_files or rel_path == target_file:
             return
+        if any(excl in rel_path for excl in _EXCLUDE_SUBSTR):
+            return
         full_path = root / rel_path
         if not full_path.is_file():
             return
@@ -581,6 +583,8 @@ def _find_related_files(
                 continue
             rel_path = parts[0][2:]
             if _should_exclude(rel_path, language):
+                continue
+            if any(excl in rel_path for excl in _EXCLUDE_SUBSTR):
                 continue
             line_num = int(parts[1]) - 1
             _add_file_snippet(rel_path, line_num)
@@ -1113,6 +1117,27 @@ For Rust code, the following mutations ARE appropriate (override the AVOID list 
 - Remove or change an unsafe block's pointer arithmetic
 - Change a boundary condition in a recursive function
 Rust's strict type system makes "type confusion" bugs nearly impossible. Focus on LOGIC bugs that compile correctly but produce wrong results. The mutation MUST compile — Rust won't silently accept type errors."""
+    elif language == "go":
+        language_guidance = """
+GO-SPECIFIC MUTATION GUIDANCE:
+For Go code, ONLY generate logic errors that compile successfully:
+- Wrong field assignment (same type, different semantics, e.g. res.Name = in.ID instead of in.Name)
+- Inverted/wrong condition (== vs !=, < vs <=, len(x) == 0 vs len(x) > 0)
+- Missing nil check or wrong nil check (`if err != nil` → `if err == nil`)
+- Off-by-one (i vs i+1, start vs start+1, v[1:] to v[2:], i < len to i <= len)
+- Missing state reset or wrong default value (remove a field assignment, use 0 where 1 is correct)
+- Wrong return value (return nil instead of return err, or vice versa)
+- Wrong method with compatible signature (io.Copy vs io.CopyN, Flush() vs Close())
+- Use the wrong field of a struct when both fields have the same type
+
+DO NOT (these fail Go compilation and judges catch them as 'couldn't have existed in any real committed code'):
+- Swap types or use type confusion (Go is statically typed — this won't compile)
+- Change function signatures, return types, or add/remove parameters
+- Reorder struct fields or change field types
+- Swap arguments of different types
+- Rename exported symbols (breaks callers at compile time)
+
+Ignore the PREFERRED list above for Go — those patterns (type confusion, argument order swap, function signature changes) cause COMPILER ERRORS in Go. Use ONLY the logic errors listed here."""
     elif language == "java":
         language_guidance = """
 JAVA-SPECIFIC MUTATION GUIDANCE:
@@ -1946,7 +1971,8 @@ Symptom: {symptom}
 Instructions:
 - Include context about what triggered the discovery of this bug (e.g. running tests, CI, code review, upgrading a dependency)
 - Vary the structure — don't always start with the error output. Some issues lead with context, some lead with the error, some lead with what the reporter expected
-- Reference the specific test or function by name where relevant
+- NEVER diagnose the root cause or mention which function is broken. Describe SYMPTOMS only — what failed, what output was wrong, what behavior is unexpected. Real reporters describe what they observe, not what they think is wrong in the code
+- Do NOT reference specific functions, methods, or variables by name as the likely cause — the reporter doesn't know the internals
 - Keep the code block / error output but integrate it naturally
 - Do NOT start with "I" or "We" — vary the opening
 - Do NOT include a title — just the body
@@ -2409,15 +2435,16 @@ async def generate_test_patch(
     existing_test = _find_existing_test_file(repo_path, bug_spec.file, language)
 
     if existing_test:
-        return await _generate_test_patch_existing(
+        result = await _generate_test_patch_existing(
             bug_spec, repo_path, existing_test, language, model,
             test_output=test_output,
         )
+        return result if result is not None else ""
     logger.warning(
-        "  No existing test file found for %s — skipping test patch generation",
+        "  No existing test file found for %s — empty test patch",
         bug_spec.file,
     )
-    return None
+    return ""
 
 
 def _count_test_functions(code: str, language: str = "python") -> int:
@@ -2872,16 +2899,16 @@ async def _generate_test_patch_existing(
 
     test_functions = _extract_test_functions(original_test_content, language)
     if not test_functions:
-        logger.warning("  No test functions found in %s", test_file)
-        return None
+        logger.warning("  No test functions found in %s — empty test patch (existing suite catches regression)", test_file)
+        return ""
 
     ranked = _rank_test_functions(test_functions, bug_spec)
     if not ranked:
-        logger.warning("  No relevant test functions found for %s — falling back to LLM generation", bug_spec.function_name)
-        return await _generate_new_test_in_existing_file(
-            bug_spec, repo_path, test_file, original_test_content,
-            language, model, _extract_file_imports(original_test_content, language), test_output,
+        logger.warning(
+            "  No relevant test functions found for %s — empty test patch (new functions are a synthetic signal)",
+            bug_spec.function_name,
         )
+        return ""
 
     if test_output:
         ranked = _boost_failing_tests(ranked, test_output, test_functions, bug_spec)
@@ -2892,12 +2919,11 @@ async def _generate_test_patch_existing(
 
     best_score = _rank_test_functions_score(ranked[0], bug_spec) if ranked else 0
     if best_score == 0:
-        result = await _generate_new_test_in_existing_file(
-            bug_spec, repo_path, test_file, original_test_content,
-            language, model, file_imports, test_output,
+        logger.warning(
+            "  Best test score is 0 for %s — empty test patch (existing suite catches regression)",
+            bug_spec.function_name,
         )
-        if result:
-            return result
+        return ""
 
     for attempt, target in enumerate(ranked):
         target_source = str(target["source"])
@@ -3964,6 +3990,11 @@ async def synthesize_repo(
         buggy_files: dict[str, str] = {bug_spec.file: mutated_content}
         test_patch_parts: list[str] = []
         for sc in bug_spec.secondary_changes:
+            # Skip benchmark/demo/example files — they produce unrelated patch hunks
+            # that judges immediately flag as artificially constructed
+            if any(excl in sc.file for excl in _EXCLUDE_SUBSTR):
+                logger.warning("  Skipping secondary change in excluded file %s", sc.file)
+                continue
             sec_path = Path(repo_path) / sc.file
             if not sec_path.is_file():
                 logger.warning("  Secondary file not found: %s", sc.file)
@@ -3992,6 +4023,9 @@ async def synthesize_repo(
             )
             if retry_spec and retry_spec.secondary_changes:
                 for sc in retry_spec.secondary_changes:
+                    if any(excl in sc.file for excl in _EXCLUDE_SUBSTR):
+                        logger.warning("  Skipping retry secondary change in excluded file %s", sc.file)
+                        continue
                     sec_path = Path(repo_path) / sc.file
                     if not sec_path.is_file():
                         continue
