@@ -63,24 +63,6 @@ EVAL_TARGETS = [
         "n_synthetic": 5,
         "n_real": 3,
     },
-    {
-        "repo_slug": "apache/commons-lang",
-        "repo_url": "https://github.com/apache/commons-lang.git",
-        "repo_path": "/tmp/commons-lang-synth-test",
-        "language": "java",
-        "base_commit": "a77a32c0b7195fc7e8bece37275acd271de8d7fc",
-        "n_synthetic": 5,
-        "n_real": 3,
-    },
-    {
-        "repo_slug": "rayon-rs/rayon",
-        "repo_url": "https://github.com/rayon-rs/rayon.git",
-        "repo_path": "/tmp/rayon-synth-test",
-        "language": "rust",
-        "base_commit": "2de810e97d5ce832ff98023a4a9cf215a86244ea",
-        "n_synthetic": 5,
-        "n_real": 3,
-    },
 ]
 
 # ── Setup path and imports ───────────────────────────────────────────────
@@ -487,7 +469,7 @@ def main():
         )
 
         log.info("synthesizing n=%d instances", target['n_synthetic'])
-        candidates = asyncio.run(synth_mod.synthesize_repo(
+        result = asyncio.run(synth_mod.synthesize_repo(
             repo_path=repo_path,
             repo_slug=repo_slug,
             base_commit=base_commit,
@@ -495,8 +477,9 @@ def main():
             max_mutations=target["n_synthetic"] * 5,
             model="sonnet",
         ))
-        synth_instances = [asdict(c) for c in candidates]
-        log.info("synthesized %d instances", len(synth_instances))
+        synth_instances = [asdict(c) for c in result.candidates]
+        mutations_attempted = result.mutations_attempted
+        log.info("synthesized %d instances (%d mutations attempted)", len(synth_instances), mutations_attempted)
 
         # Eagerly create tarballs for each synthetic instance's buggy commit.
         # The buggy commit is a dangling object that could be garbage-collected;
@@ -533,6 +516,7 @@ def main():
             "real_samples": real_samples,
             "failures": failures,
             "repo_slug": repo_slug,
+            "mutations_attempted": mutations_attempted,
         }
 
     # ── Phase 1: Synthesize all repos in parallel ──
@@ -560,6 +544,7 @@ def main():
                         "real_samples": [],
                         "failures": [(t["repo_slug"], str(exc))],
                         "repo_slug": t["repo_slug"],
+                        "mutations_attempted": 0,
                     })
 
     for r in results:
@@ -567,7 +552,9 @@ def main():
         all_real_samples.extend(r["real_samples"])
         structural_failures.extend(r["failures"])
 
+    total_mutations_attempted = sum(r["mutations_attempted"] for r in results)
     n_s = len(all_synth_instances)
+    yield_rate = n_s / total_mutations_attempted if total_mutations_attempted > 0 else 0
     n_r = len(all_real_samples)
     log.info("totals: synthetic=%d real=%d", n_s, n_r)
 
@@ -796,7 +783,7 @@ def main():
         # ── Factory-compatible JSON output (stdout) ──
         judge_evasion = 1.0 - recall
         f2p_rate = len(judged_synth) / n_s if n_s > 0 else 0
-        generator_score = 0.7 * judge_evasion * f2p_rate + 0.3 * diversity["overall"]
+        generator_score = yield_rate * f2p_rate * judge_evasion * diversity["overall"]
 
         conf_counts = {}
         for r in results:
@@ -816,9 +803,11 @@ def main():
             "score": factory_score,
             "details": (
                 f"{detail_prefix}"
+                f"Yield: {yield_rate:.2f} ({n_s}/{total_mutations_attempted}). "
                 f"{m['fn']}/{m['tp']+m['fn']} synthetic fooled judge. "
                 f"Detection: {recall:.0%}. "
                 f"FP: {m['fp']}/{m['fp']+m['tn']}. "
+                f"F2P: {f2p_rate:.2f}. "
                 f"Diversity: {diversity['overall']:.2f}. "
                 f"Repos: {', '.join(t['repo_slug'] for t in targets)}. "
                 f"Confidence: {conf_summary or 'n/a'}"
@@ -831,12 +820,13 @@ def main():
         log.info("quick mode — instances saved to %s", out_path)
 
         log.info("phase=judge status=skipped reason=quick_mode")
-        factory_score = 0.3 * diversity['overall']
+        factory_score = yield_rate * diversity['overall']
         print(json.dumps({
             'score': round(factory_score, 3),
             'details': (
                 f'R{round_num} ({commit}): QUICK MODE. '
                 f'{n_s} synthetic generated. '
+                f'Yield: {yield_rate:.2f} ({n_s}/{total_mutations_attempted}). '
                 f'Diversity: {diversity["overall"]:.2f}. '
                 f'Docker F2P and judge skipped.'
             ),
@@ -951,10 +941,8 @@ def _write_round_doc(round_num, commit, n_s, n_r, targets, *,
         f.write(f"| F1 | {m['f1']:.0%} |\n")
 
         judge_evasion = 1.0 - recall
-        factory_score = 0.7 * judge_evasion + 0.3 * diversity.get("overall", 0)
         f.write(f"| Judge evasion | {judge_evasion:.2f} |\n")
         f.write(f"| Diversity score | {diversity.get('overall', 0):.2f} |\n")
-        f.write(f"| **Factory score** | **{factory_score:.2f}** |\n")
 
     log.info("round doc saved to %s", md_path)
 

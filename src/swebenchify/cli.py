@@ -420,7 +420,7 @@ def _cmd_synthesize(args: argparse.Namespace) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     async def run() -> None:
-        candidates = await synthesize_repo(
+        result = await synthesize_repo(
             repo_path=abs_path,
             repo_slug=repo_slug,
             base_commit=base_commit,
@@ -428,6 +428,9 @@ def _cmd_synthesize(args: argparse.Namespace) -> None:
             max_mutations=args.max_mutations,
             model=args.model,
         )
+
+        candidates = result.candidates
+        print(f"Yield: {len(candidates)}/{result.mutations_attempted}")
 
         if not candidates:
             print("No synthetic instances generated")
