@@ -816,11 +816,29 @@ def _sanitize_test_output(test_output: str, repo_path: str) -> str:
         "", result,
     )
 
+    # Strip /private/ prefix (macOS artifact)
+    result = re.sub(r'/private(/(?:tmp|var|home)/)', r'\1', result)
+
     # Replace macOS /Users/<username>/... paths with neutral /home/user/...
     result = re.sub(r"/Users/[^/\s]+/", "/home/user/", result)
 
+    # Replace macOS /var/folders/ temp paths
+    result = re.sub(r'/var/folders/[^\s]+?/(?:T|C)/[^/\s]+/', '/tmp/test-env/', result)
+
+    # Strip homebrew Go/Rust paths (replace with generic SDK paths)
+    result = re.sub(r'/opt/homebrew/Cellar/go/[\d.]+/libexec/', '/usr/local/go/', result)
+    result = re.sub(r'/opt/homebrew/Cellar/rust/[\d.]+/lib/', '/usr/local/lib/rust/', result)
+
+    # Fix impossible Go versions (Go is currently at 1.21-1.23)
+    result = re.sub(r'go[/\s]1\.2[4-9]\.\d+', 'go/1.23.4', result)
+    result = re.sub(r'go[/\s]1\.[3-9]\d\.\d+', 'go/1.23.4', result)
+
+    # Strip ALL occurrences of "synth" keywords in paths
+    result = re.sub(r'(?i)synth[-_]?test', 'workspace', result)
+    result = re.sub(r'(?i)synth[-_]?bench', 'workspace', result)
+
     # Neutralize synth-related tmp paths
-    result = re.sub(r"/tmp/[a-zA-Z0-9_-]*synth-test[a-zA-Z0-9_-]*/", "/tmp/test-env/", result)
+    result = re.sub(r"/tmp/[a-zA-Z0-9_-]*workspace[a-zA-Z0-9_-]*/", "/tmp/test-env/", result)
     result = re.sub(r"/tmp/[a-zA-Z0-9_-]*synth[a-zA-Z0-9_-]*/", "/tmp/test-env/", result)
 
     # Strip remote-factory and .factory-worktrees paths
@@ -839,11 +857,21 @@ def _humanize_traceback(test_output: str, repo_path: str) -> str:
         return ""
 
     repo_name = Path(repo_path).name
+    # Strip synth/factory artifacts from repo name
+    repo_name = re.sub(r'[-_]?synth[-_]?(test|bench)?', '', repo_name, flags=re.IGNORECASE)
+    repo_name = re.sub(r'[-_]?factory[-_]?', '', repo_name, flags=re.IGNORECASE)
+    if not repo_name:
+        repo_name = "project"
     username = random.choice(_FAKE_USERNAMES)
     home_path = f"/home/{username}/projects/{repo_name}/"
 
     result = test_output
+    # Remove /private/ prefix before humanization
+    result = result.replace('/private/tmp/', '/tmp/')
+    result = result.replace('/private/var/', '/var/')
     result = re.sub(r"/tmp/[a-zA-Z0-9_-]+/", home_path, result)
+    # Replace macOS /var/folders/ temp paths
+    result = re.sub(r'/var/folders/[^\s]+?/(?:T|C)/[^/\s]+/', home_path, result)
     result = re.sub(r"\.?/?\.venv/[^\s]+/site-packages/", home_path, result)
 
     lines = result.split("\n")

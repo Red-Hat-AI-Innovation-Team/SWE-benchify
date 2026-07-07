@@ -3791,3 +3791,118 @@ def test_preserve_unchanged_lines_identical() -> None:
 def test_preserve_unchanged_lines_empty() -> None:
     """Empty inputs are handled gracefully."""
     assert _preserve_unchanged_lines("", "") == ""
+
+
+# ---------------------------------------------------------------------------
+# Info-leak sanitization — judge evasion
+# ---------------------------------------------------------------------------
+
+def test__sanitize_test_output_strips_homebrew_go_paths() -> None:
+    output = '  File "/opt/homebrew/Cellar/go/1.26.4/libexec/src/testing/testing.go", line 42'
+    result = _sanitize_test_output(output, "/tmp/repo")
+    assert "/opt/homebrew/Cellar/go/" not in result
+    assert "/usr/local/go/" in result
+
+
+def test__sanitize_test_output_strips_homebrew_rust_paths() -> None:
+    output = '  File "/opt/homebrew/Cellar/rust/1.75.0/lib/rustlib/src/rust/library/core/src/result.rs"'
+    result = _sanitize_test_output(output, "/tmp/repo")
+    assert "/opt/homebrew/Cellar/rust/" not in result
+    assert "/usr/local/lib/rust/" in result
+
+
+def test__sanitize_test_output_strips_var_folders_paths() -> None:
+    output = '  File "/var/folders/xh/abc123def/T/go-build456/test_main.go", line 10'
+    result = _sanitize_test_output(output, "/tmp/repo")
+    assert "/var/folders/" not in result
+    assert "/tmp/test-env/" in result
+
+
+def test__sanitize_test_output_replaces_impossible_go_versions() -> None:
+    output = 'go/1.26.4/libexec/src/testing/testing.go:1234'
+    result = _sanitize_test_output(output, "/tmp/repo")
+    assert "1.26.4" not in result
+    assert "go/1.23.4" in result
+
+
+def test__sanitize_test_output_replaces_future_go_versions() -> None:
+    output = 'go/1.35.1/libexec/src/runtime/panic.go:100'
+    result = _sanitize_test_output(output, "/tmp/repo")
+    assert "1.35.1" not in result
+    assert "go/1.23.4" in result
+
+
+def test__sanitize_test_output_keeps_valid_go_versions() -> None:
+    output = 'go/1.22.5/libexec/src/testing/testing.go:1234'
+    result = _sanitize_test_output(output, "/tmp/repo")
+    assert "go/1.22.5" in result
+
+
+def test__sanitize_test_output_strips_private_prefix() -> None:
+    output = '  File "/private/home/mike/projects/grpc-go/rpc_util_test.go", line 5'
+    result = _sanitize_test_output(output, "/tmp/repo")
+    assert "/private/" not in result
+
+
+def test__sanitize_test_output_strips_synth_keywords_in_paths() -> None:
+    output = '  File "/home/mike/projects/grpc-go-synth-test/rpc_util_test.go", line 5'
+    result = _sanitize_test_output(output, "/tmp/repo")
+    assert "synth-test" not in result
+    assert "synth_test" not in result
+
+
+def test__sanitize_test_output_strips_synth_bench_in_paths() -> None:
+    output = '  File "/home/user/synth_bench/main.go", line 1'
+    result = _sanitize_test_output(output, "/tmp/repo")
+    assert "synth_bench" not in result
+    assert "synth-bench" not in result
+
+
+def test_humanize_traceback_handles_private_tmp(tmp_path: Path) -> None:
+    test_output = (
+        '  File "/private/tmp/pytest-abc123/test_core.py", line 5\n'
+        "    assert add(1, 2) == 3\n"
+        "AssertionError: -1 != 3"
+    )
+    result = _humanize_traceback(test_output, str(tmp_path))
+    assert "/private/tmp/" not in result
+    assert "/home/" in result
+    assert "AssertionError" in result
+
+
+def test_humanize_traceback_strips_synth_from_repo_name() -> None:
+    test_output = '  File "/tmp/pytest-abc/test_core.py", line 5\n    assert add(1, 2) == 3'
+    result = _humanize_traceback(
+        test_output,
+        "/home/user/grpc-go-synth-test",
+    )
+    assert "synth" not in result.lower()
+    assert "grpc-go" in result
+
+
+def test_humanize_traceback_strips_factory_from_repo_name() -> None:
+    test_output = '  File "/tmp/pytest-abc/test_core.py", line 5\n    assert add(1, 2) == 3'
+    result = _humanize_traceback(
+        test_output,
+        "/home/user/grpc-go-factory-run",
+    )
+    assert "factory" not in result.lower()
+
+
+def test_humanize_traceback_empty_repo_name_after_strip() -> None:
+    test_output = '  File "/tmp/pytest-abc/test_core.py", line 5\n    assert add(1, 2) == 3'
+    result = _humanize_traceback(
+        test_output,
+        "/home/user/synth-test",
+    )
+    assert "project" in result
+
+
+def test_humanize_traceback_handles_var_folders(tmp_path: Path) -> None:
+    test_output = (
+        '  File "/var/folders/xh/abc123/T/go-build456/test_main.go", line 10\n'
+        "    assert result == expected"
+    )
+    result = _humanize_traceback(test_output, str(tmp_path))
+    assert "/var/folders/" not in result
+    assert "/home/" in result
