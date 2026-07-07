@@ -563,7 +563,7 @@ def _parse_f2p_output_generic(
         if not pre_result["compiled"] and post_result["compiled"]:
             post_passed = [t for t, s in post_result["tests"].items() if s == "passed"]
             f2p_raw = sorted(post_passed)
-            p2p_raw = []
+            p2p_raw: list[str] = []
         else:
             f2p_raw, p2p_raw = _compute_f2p_p2p(
                 pre_result["tests"], post_result["tests"]

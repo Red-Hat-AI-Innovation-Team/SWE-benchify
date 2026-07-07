@@ -31,6 +31,8 @@ def _cmd_run(args: argparse.Namespace) -> None:
 
     _setup_logging()
     config = load_config(args.config)
+    if args.harbor_output:
+        config.harbor.emit = True
     asyncio.run(run_pipeline(config, resume=args.resume))
 
 
@@ -269,6 +271,12 @@ def _cmd_emit(args: argparse.Namespace) -> None:
     emit_dataset(filtered, config.output.dir, repo_slug=repo_slug)
     print(f"{len(filtered)}/{len(instances)} instances emitted to {config.output.dir}")
 
+    if args.harbor_output:
+        from swebenchify.harbor_emitter import emit_harbor_dataset
+
+        emit_harbor_dataset(filtered, config.output.dir)
+        print(f"Harbor tasks emitted to {config.output.dir}/harbor-tasks/")
+
 
 def _cmd_remote_validate(args: argparse.Namespace) -> None:
     """Dispatch validation to GitHub Actions runners."""
@@ -324,6 +332,53 @@ def _cmd_remote_validate(args: argparse.Namespace) -> None:
     repo_slug = viable[0].repo.replace("/", "__")
     emit_dataset(filtered, config.output.dir, repo_slug=repo_slug)
     print(f"{len(filtered)} instances emitted to {config.output.dir}")
+
+
+def _cmd_harbor(args: argparse.Namespace) -> None:
+    """Convert existing JSONL to Harbor task format."""
+    import json
+
+    import dataclasses
+
+    from swebenchify.harbor_emitter import emit_harbor_dataset
+    from swebenchify.models import AnyEnvironmentSpec, EnvironmentSpec, GoEnvironmentSpec, RustEnvironmentSpec, TaskInstance
+
+    instances: list[TaskInstance] = []
+    valid_fields = {f.name for f in dataclasses.fields(TaskInstance)}
+    with open(args.input) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                data = json.loads(line)
+                filtered = {k: v for k, v in data.items() if k in valid_fields}
+                instances.append(TaskInstance(**filtered))
+
+    if not instances:
+        print("No instances found in input file")
+        return
+
+    env_specs: dict[str, AnyEnvironmentSpec] | None = None
+    if args.env_specs:
+        with open(args.env_specs) as f:
+            raw = json.load(f)
+        parsed: dict[str, AnyEnvironmentSpec] = {}
+        for iid, spec_data in raw.items():
+            lang = spec_data.get("language", "python")
+            if lang == "go":
+                parsed[iid] = GoEnvironmentSpec(**spec_data)
+            elif lang == "rust":
+                parsed[iid] = RustEnvironmentSpec(**spec_data)
+            else:
+                parsed[iid] = EnvironmentSpec(**spec_data)
+        env_specs = parsed
+
+    emit_harbor_dataset(
+        instances,
+        args.output,
+        registry_url=args.registry_url,
+        env_specs=env_specs,
+    )
+    print(f"{len(instances)} instances -> {args.output}/harbor-tasks/")
 
 
 def _cmd_synthesize(args: argparse.Namespace) -> None:
@@ -386,7 +441,7 @@ def _cmd_synthesize(args: argparse.Namespace) -> None:
 
         print(f"\nGenerated {len(candidates)} synthetic instances -> {out_file}")
         for c in candidates:
-            print(f"  {c.instance_id}: {c.problem_statement[:80]}...")
+            print(f"  {c.instance_id}: {(c.problem_statement or '')[:80]}...")
 
     asyncio.run(run())
 
@@ -488,6 +543,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Resume from existing stage outputs instead of re-running",
     )
+    run_parser.add_argument(
+        "--harbor-output",
+        action="store_true",
+        default=False,
+        help="Emit Harbor task format alongside JSONL output",
+    )
 
     # collect
     collect_parser = subparsers.add_parser(
@@ -521,6 +582,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common_args(emit_parser)
     emit_parser.add_argument("--input", "-i", help="Input validated instances JSONL file")
+    emit_parser.add_argument(
+        "--harbor-output",
+        action="store_true",
+        default=False,
+        help="Emit Harbor task format to {output_dir}/harbor-tasks/",
+    )
 
     # remote-validate
     rv_parser = subparsers.add_parser(
@@ -532,6 +599,23 @@ def build_parser() -> argparse.ArgumentParser:
     rv_parser.add_argument("--env-spec", help="Path to GoEnvironmentSpec JSON file")
     rv_parser.add_argument("--n-runs", type=int, default=1, help="Flake quarantine runs")
     rv_parser.add_argument("--timeout", type=int, default=300, help="Per-validation timeout (seconds)")
+
+    # harbor
+    harbor_parser = subparsers.add_parser(
+        "harbor", help="Convert JSONL instances to Harbor task format"
+    )
+    harbor_parser.add_argument(
+        "--input", "-i", required=True, help="Path to TaskInstance JSONL file"
+    )
+    harbor_parser.add_argument(
+        "--output", "-o", required=True, help="Output directory for Harbor tasks"
+    )
+    harbor_parser.add_argument(
+        "--registry-url", default=None, help="Container registry URL for docker_image references"
+    )
+    harbor_parser.add_argument(
+        "--env-specs", default=None, help="Path to env_specs JSON file (instance_id -> spec)"
+    )
 
     # synthesize
     synth_parser = subparsers.add_parser(
@@ -605,6 +689,7 @@ def main(argv: list[str] | None = None) -> int:
         "remote-validate": _cmd_remote_validate,
         "synthesize": _cmd_synthesize,
         "emit": _cmd_emit,
+        "harbor": _cmd_harbor,
         "eval": _cmd_eval,
     }
 

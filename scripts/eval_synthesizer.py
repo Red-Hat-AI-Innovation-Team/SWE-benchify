@@ -46,12 +46,12 @@ DATASET_PATHS = [
 
 EVAL_TARGETS = [
     {
-        "repo_slug": "containers/podman-compose",
-        "repo_url": "https://github.com/containers/podman-compose.git",
-        "repo_path": "/tmp/podman-compose-synth-test",
+        "repo_slug": "pallets/click",
+        "repo_url": "https://github.com/pallets/click.git",
+        "repo_path": "/tmp/click-synth-test",
         "language": "python",
-        "base_commit": "121b5f6ea1b6bc1f8ea4ddf4ebc7ff809d5b876e",
-        "n_synthetic": 3,
+        "base_commit": "16fc00e2f4a2717a521084f193709a6058afc693",
+        "n_synthetic": 5,
         "n_real": 3,
     },
     {
@@ -60,16 +60,16 @@ EVAL_TARGETS = [
         "repo_path": "/tmp/grpc-go-synth-test",
         "language": "go",
         "base_commit": "a481b8f755bccf5c0308f1530e785bb58a770150",
-        "n_synthetic": 3,
+        "n_synthetic": 5,
         "n_real": 3,
     },
     {
-        "repo_slug": "FasterXML/jackson-databind",
-        "repo_url": "https://github.com/FasterXML/jackson-databind.git",
-        "repo_path": "/tmp/jackson-databind-synth-test",
+        "repo_slug": "apache/commons-lang",
+        "repo_url": "https://github.com/apache/commons-lang.git",
+        "repo_path": "/tmp/commons-lang-synth-test",
         "language": "java",
-        "base_commit": "bc1613c765704703ec7385e314fa8b19448e1ddd",
-        "n_synthetic": 3,
+        "base_commit": "a77a32c0b7195fc7e8bece37275acd271de8d7fc",
+        "n_synthetic": 5,
         "n_real": 3,
     },
     {
@@ -78,7 +78,7 @@ EVAL_TARGETS = [
         "repo_path": "/tmp/rayon-synth-test",
         "language": "rust",
         "base_commit": "2de810e97d5ce832ff98023a4a9cf215a86244ea",
-        "n_synthetic": 3,
+        "n_synthetic": 5,
         "n_real": 3,
     },
 ]
@@ -108,7 +108,7 @@ async def _vertex_query(prompt, options=None):
         max_tokens=4096,
         messages=[{"role": "user", "content": prompt}],
     )
-    text = resp.content[0].text if resp.content else ""
+    text = resp.content[0].text if resp.content else ""  # type: ignore[union-attr]
     yield _FakeResultMessage(text)
 
 class _FakeOptions:
@@ -120,9 +120,9 @@ import swebenchify.synthesizer as synth_mod  # noqa: E402
 from swebenchify.grader import compute_f2p, create_repo_tarball  # noqa: E402
 from swebenchify.models import EnvironmentSpec, GoEnvironmentSpec, RustEnvironmentSpec  # noqa: E402
 
-synth_mod.query = _vertex_query
-synth_mod.ResultMessage = _FakeResultMessage
-synth_mod.ClaudeCodeOptions = _FakeOptions
+synth_mod.query = _vertex_query  # type: ignore[assignment]
+synth_mod.ResultMessage = _FakeResultMessage  # type: ignore[assignment,misc]
+synth_mod.ClaudeCodeOptions = _FakeOptions  # type: ignore[assignment,misc]
 
 log = logging.getLogger("eval_synthesizer")
 log.setLevel(logging.DEBUG)
@@ -287,9 +287,9 @@ def validate_instance(instance: dict, repo_path: str) -> tuple[bool, str]:
     """Run all validation tiers in order, short-circuiting on first failure."""
     for tier_name, check_fn, needs_repo in VALIDATION_TIERS:
         if needs_repo:
-            passed, reason = check_fn(instance, repo_path)
+            passed, reason = check_fn(instance, repo_path)  # type: ignore[operator]
         else:
-            passed, reason = check_fn(instance)
+            passed, reason = check_fn(instance)  # type: ignore[operator]
         if not passed:
             return False, f"[{tier_name}] {reason}"
     return True, "ok"
@@ -395,7 +395,7 @@ def judge_instance(instance: dict) -> dict:
         system=JUDGE_SYSTEM,
         messages=[{"role": "user", "content": prompt}],
     )
-    text = resp.content[0].text
+    text = resp.content[0].text  # type: ignore[union-attr]
 
     cls_match = re.search(r"<classification>\s*(REAL|SYNTHETIC)\s*</classification>", text)
     conf_match = re.search(r"<confidence>\s*(HIGH|MEDIUM|LOW)\s*</confidence>", text)
@@ -435,7 +435,13 @@ def main():
                         help='Fast mode: 1 repo, 1 instance, skip Docker F2P and judge')
     parser.add_argument('--seed', type=int, default=None,
                         help='Random seed (default: 42 + round_num)')
+    parser.add_argument('--role', choices=['generator', 'discriminator'], default=None,
+                        help='Adversarial role: generator outputs evasion score, '
+                             'discriminator outputs detection recall')
     args = parser.parse_args()
+
+    if args.role == 'discriminator':
+        args.quick = False
 
     round_num = detect_round()
     commit = detect_commit()
@@ -443,7 +449,7 @@ def main():
     if args.quick:
         targets = [t.copy() for t in EVAL_TARGETS]
         for t in targets:
-            t['n_synthetic'] = 2
+            t['n_synthetic'] = 3
             t['n_real'] = 1
     else:
         targets = EVAL_TARGETS
@@ -486,7 +492,7 @@ def main():
             repo_slug=repo_slug,
             base_commit=base_commit,
             language=target["language"],
-            max_mutations=target["n_synthetic"],
+            max_mutations=target["n_synthetic"] * 5,
             model="sonnet",
         ))
         synth_instances = [asdict(c) for c in candidates]
@@ -572,24 +578,28 @@ def main():
 
     # ── Phase 2 (fast): Structural gate ──
     if structural_failures:
+        failed_ids = {iid for iid, _ in structural_failures}
         log.warning("STRUCTURAL GATE FAILED — %d instance(s)", len(structural_failures))
         for iid, reason in structural_failures:
             log.warning("  %s: %s", iid, reason)
-
-        _write_round_doc(round_num, commit, n_s, n_r, targets,
-                         structural_failures=structural_failures)
-
-        print(json.dumps({
-            "score": 0.0,
-            "details": (
-                f"R{round_num} ({commit}): STRUCTURAL GATE FAILED. "
-                f"{len(structural_failures)} instance(s) failed: "
-                + "; ".join(f"{iid}: {reason}" for iid, reason in structural_failures)
-            ),
-        }))
-        return
-
-    log.info("phase=structural status=passed count=%d/%d", n_s, n_s)
+        all_synth_instances = [
+            inst for inst in all_synth_instances
+            if inst["instance_id"] not in failed_ids
+        ]
+        n_s = len(all_synth_instances)
+        log.info("phase=structural status=passed count=%d/%d",
+                 n_s, n_s + len(failed_ids))
+        if not all_synth_instances:
+            print(json.dumps({
+                "score": 0.0,
+                "details": (
+                    f"R{round_num} ({commit}): ALL instances failed structural gate. "
+                    + "; ".join(f"{iid}: {reason}" for iid, reason in structural_failures)
+                ),
+            }))
+            return
+    else:
+        log.info("phase=structural status=passed count=%d/%d", n_s, n_s)
 
     # ── Phase 3 (fast): Diversity gate ──
     diversity = compute_diversity(all_synth_instances)
@@ -786,7 +796,7 @@ def main():
         # ── Factory-compatible JSON output (stdout) ──
         judge_evasion = 1.0 - recall
         f2p_rate = len(judged_synth) / n_s if n_s > 0 else 0
-        factory_score = 0.7 * judge_evasion * f2p_rate + 0.3 * diversity["overall"]
+        generator_score = 0.7 * judge_evasion * f2p_rate + 0.3 * diversity["overall"]
 
         conf_counts = {}
         for r in results:
@@ -795,10 +805,17 @@ def main():
                 conf_counts[c] = conf_counts.get(c, 0) + 1
         conf_summary = ", ".join(f"{v} {k}" for k, v in sorted(conf_counts.items()))
 
+        if args.role == 'discriminator':
+            factory_score = round(recall, 3)
+            detail_prefix = f"R{round_num} ({commit}): DISCRIMINATOR. "
+        else:
+            factory_score = round(generator_score, 3)
+            detail_prefix = f"R{round_num} ({commit}): "
+
         print(json.dumps({
-            "score": round(factory_score, 3),
+            "score": factory_score,
             "details": (
-                f"R{round_num} ({commit}): "
+                f"{detail_prefix}"
                 f"{m['fn']}/{m['tp']+m['fn']} synthetic fooled judge. "
                 f"Detection: {recall:.0%}. "
                 f"FP: {m['fp']}/{m['fp']+m['tn']}. "
