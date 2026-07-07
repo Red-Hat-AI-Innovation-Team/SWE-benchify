@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -672,12 +673,20 @@ def compute_f2p(
     timeout: int | None = None,
     n_runs: int = 1,
     repo_path: str | None = None,
+    repo_tarball_path: str | None = None,
 ) -> ValidationResult:
     """Compute FAIL_TO_PASS and PASS_TO_PASS via Docker-based validation.
 
     Builds a Docker container, runs tests twice (pre-fix and post-fix),
     and diffs the results. Language-specific behavior is dispatched
     through the backend registry.
+
+    When ``repo_tarball_path`` is provided, uses that pre-built tarball
+    directly instead of cloning from GitHub. This is the reliable path
+    for synthetic instances whose base_commit is a local-only SHA.
+
+    When ``repo_path`` is provided (without ``repo_tarball_path``), attempts
+    to create a tarball via ``git archive`` if the commit exists locally.
 
     When ``env_spec`` is ``None``, defaults to Go for backward compatibility.
     """
@@ -719,7 +728,12 @@ def compute_f2p(
         (tmp / "gold.patch").write_text(gold_patch)
 
         use_tarball = False
-        if repo_path:
+        if repo_tarball_path:
+            tarball = tmp / "repo.tar.gz"
+            shutil.copy2(repo_tarball_path, str(tarball))
+            use_tarball = True
+            logger.info("compute_f2p: using pre-built tarball for %s", base_commit[:12])
+        elif repo_path:
             try:
                 subprocess.run(
                     ["git", "-C", repo_path, "cat-file", "-e", base_commit],
@@ -732,6 +746,7 @@ def compute_f2p(
                     check=True, capture_output=True,
                 )
                 use_tarball = True
+                logger.info("compute_f2p: created tarball from local repo for %s", base_commit[:12])
             except subprocess.CalledProcessError:
                 logger.warning("repo_path=%s does not contain %s, falling back to clone",
                                repo_path, base_commit)
@@ -799,6 +814,31 @@ def compute_f2p(
         len(result.PASS_TO_PASS), elapsed,
     )
     return result
+
+
+def create_repo_tarball(repo_path: str, commit_sha: str, output_path: str) -> bool:
+    """Create a tarball of the repo at a specific commit.
+
+    Used to snapshot the repo at a synthetic buggy commit before the
+    dangling commit might be garbage-collected.
+
+    Returns True on success, False on failure.
+    """
+    try:
+        subprocess.run(
+            ["git", "-C", repo_path, "cat-file", "-e", commit_sha],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", repo_path, "archive", "--format=tar.gz",
+             "-o", output_path, commit_sha],
+            check=True, capture_output=True,
+        )
+        return True
+    except subprocess.CalledProcessError:
+        logger.warning("create_repo_tarball: commit %s not found in %s",
+                       commit_sha[:12], repo_path)
+        return False
 
 
 def _affected_packages(test_patch: str) -> list[str]:
