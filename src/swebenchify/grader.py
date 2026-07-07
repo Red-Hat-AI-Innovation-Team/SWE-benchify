@@ -823,28 +823,65 @@ def compute_f2p(
 
 
 def create_repo_tarball(repo_path: str, commit_sha: str, output_path: str) -> bool:
-    """Create a tarball of the repo at a specific commit.
+    """Create a git-ready tarball of the repo at a specific commit.
 
-    Used to snapshot the repo at a synthetic buggy commit before the
-    dangling commit might be garbage-collected.
+    The tarball includes a .git directory so Docker doesn't need to run
+    git init/add/commit (which is extremely slow for large repos).
 
     Returns True on success, False on failure.
     """
+    import shutil
+    import tempfile
+
     try:
         subprocess.run(
             ["git", "-C", repo_path, "cat-file", "-e", commit_sha],
             check=True, capture_output=True,
         )
-        subprocess.run(
-            ["git", "-C", repo_path, "archive", "--format=tar.gz",
-             "-o", output_path, commit_sha],
-            check=True, capture_output=True,
-        )
-        return True
     except subprocess.CalledProcessError:
         logger.warning("create_repo_tarball: commit %s not found in %s",
                        commit_sha[:12], repo_path)
         return False
+
+    tmp_dir = tempfile.mkdtemp(prefix="repo_tarball_")
+    try:
+        extract = subprocess.run(
+            ["git", "-C", repo_path, "archive", "--format=tar", commit_sha],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["tar", "xf", "-"],
+            input=extract.stdout, check=True, capture_output=True,
+            cwd=tmp_dir,
+        )
+        subprocess.run(
+            ["git", "init"], check=True, capture_output=True, cwd=tmp_dir,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "test@test.com"],
+            check=True, capture_output=True, cwd=tmp_dir,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            check=True, capture_output=True, cwd=tmp_dir,
+        )
+        subprocess.run(
+            ["git", "add", "-A"], check=True, capture_output=True, cwd=tmp_dir,
+        )
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "base"],
+            check=True, capture_output=True, cwd=tmp_dir,
+        )
+        subprocess.run(
+            ["tar", "czf", output_path, "-C", tmp_dir, "."],
+            check=True, capture_output=True,
+        )
+        return True
+    except subprocess.CalledProcessError as exc:
+        logger.warning("create_repo_tarball: failed to create git-ready tarball: %s", exc)
+        return False
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def _affected_packages(test_patch: str) -> list[str]:

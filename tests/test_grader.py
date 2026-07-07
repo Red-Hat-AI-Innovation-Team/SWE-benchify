@@ -726,18 +726,34 @@ class TestComputeF2PFunction:
 
 
 class TestCreateRepoTarball:
-    def test_success(self, tmp_path: Any) -> None:
+    def test_creates_git_ready_tarball(self, tmp_path: Any) -> None:
+        """create_repo_tarball produces a tarball with a .git directory."""
+        import os
+        import subprocess as sp
+
+        src = tmp_path / "src_repo"
+        src.mkdir()
+        sp.run(["git", "init", str(src)], check=True, capture_output=True)
+        sp.run(["git", "config", "user.email", "t@t.com"], cwd=str(src), check=True, capture_output=True)
+        sp.run(["git", "config", "user.name", "T"], cwd=str(src), check=True, capture_output=True)
+        (src / "hello.txt").write_text("hello")
+        sp.run(["git", "add", "-A"], cwd=str(src), check=True, capture_output=True)
+        sp.run(["git", "commit", "-m", "init"], cwd=str(src), check=True, capture_output=True)
+        sha = sp.run(["git", "rev-parse", "HEAD"], cwd=str(src), check=True, capture_output=True, text=True).stdout.strip()
+
         output = str(tmp_path / "repo.tar.gz")
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            result = create_repo_tarball("/tmp/repo", "abc123", output)
+        result = create_repo_tarball(str(src), sha, output)
         assert result is True
-        assert mock_run.call_count == 2
-        cat_file_call = mock_run.call_args_list[0]
-        assert "cat-file" in cat_file_call[0][0]
-        archive_call = mock_run.call_args_list[1]
-        assert "archive" in archive_call[0][0]
-        assert output in archive_call[0][0]
+        assert os.path.exists(output)
+
+        extract_dir = tmp_path / "extracted"
+        extract_dir.mkdir()
+        sp.run(["tar", "xzf", output, "-C", str(extract_dir)], check=True, capture_output=True)
+        assert (extract_dir / ".git").is_dir()
+        assert (extract_dir / "hello.txt").exists()
+
+        git_status = sp.run(["git", "status"], cwd=str(extract_dir), check=True, capture_output=True, text=True)
+        assert "nothing to commit" in git_status.stdout
 
     def test_missing_commit(self) -> None:
         import subprocess as sp
@@ -747,7 +763,10 @@ class TestCreateRepoTarball:
 
 
 class TestDockerfileTarballMode:
-    """Verify all 4 language backends generate correct Dockerfiles with repo_tarball=True."""
+    """Verify all 4 language backends generate correct Dockerfiles with repo_tarball=True.
+
+    Tarballs now include .git, so Dockerfiles should NOT contain git init/add/commit.
+    """
 
     def test_go_tarball_dockerfile(self) -> None:
         from swebenchify.backends import _go_make_dockerfile
@@ -755,7 +774,9 @@ class TestDockerfileTarballMode:
         df = _go_make_dockerfile("org/repo", "abc123", GoEnvironmentSpec(), repo_tarball=True)
         assert "COPY repo.tar.gz" in df
         assert "tar xzf" in df
-        assert "git init" in df
+        assert "git init" not in df
+        assert "git add" not in df
+        assert "git commit" not in df
         assert "git clone" not in df
 
     def test_python_tarball_dockerfile(self) -> None:
@@ -769,7 +790,9 @@ class TestDockerfileTarballMode:
         df = _python_make_dockerfile("org/repo", "abc123", spec, repo_tarball=True)
         assert "COPY repo.tar.gz" in df
         assert "tar xzf" in df
-        assert "git init" in df
+        assert "git init" not in df
+        assert "git add" not in df
+        assert "git commit" not in df
         assert "git clone" not in df
 
     def test_java_tarball_dockerfile(self) -> None:
@@ -783,7 +806,9 @@ class TestDockerfileTarballMode:
         df = _java_make_dockerfile("org/repo", "abc123", spec, repo_tarball=True)
         assert "COPY repo.tar.gz" in df
         assert "tar xzf" in df
-        assert "git init" in df
+        assert "git init" not in df
+        assert "git add" not in df
+        assert "git commit" not in df
         assert "git clone" not in df
 
     def test_rust_tarball_dockerfile(self) -> None:
@@ -792,7 +817,9 @@ class TestDockerfileTarballMode:
         df = _rust_make_dockerfile("org/repo", "abc123", RustEnvironmentSpec(), repo_tarball=True)
         assert "COPY repo.tar.gz" in df
         assert "tar xzf" in df
-        assert "git init" in df
+        assert "git init" not in df
+        assert "git add" not in df
+        assert "git commit" not in df
         assert "git clone" not in df
 
     def test_go_clone_dockerfile(self) -> None:
