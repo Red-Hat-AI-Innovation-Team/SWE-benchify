@@ -14,6 +14,7 @@ from swebenchify.synthesizer import (
     _BraceCounter,
     BugPlan,
     BugSpec,
+    RepoSynthesisResult,
     SynthesisResult,
     _build_social_context,
     _collect_repo_context,
@@ -3745,7 +3746,19 @@ def test_synthesize_repo_skips_candidate_without_test_failures() -> None:
             language="python",
             max_mutations=1,
         ))
-        assert len(result) == 0
+        assert isinstance(result, RepoSynthesisResult)
+        assert len(result.candidates) == 0
+        assert result.mutations_attempted >= 1
+
+
+def test_repo_synthesis_result_dataclass() -> None:
+    """RepoSynthesisResult stores candidates and mutation attempt count."""
+    r = RepoSynthesisResult(candidates=[], mutations_attempted=10)
+    assert r.candidates == []
+    assert r.mutations_attempted == 10
+
+    r2 = RepoSynthesisResult(candidates=[], mutations_attempted=0)
+    assert r2.mutations_attempted == 0
 
 
 # ---------------------------------------------------------------------------

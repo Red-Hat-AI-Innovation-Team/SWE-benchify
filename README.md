@@ -281,6 +281,27 @@ Synthetic candidates can be validated with the same Docker-based F2P/P2P pipelin
 swebenchify validate --input output/local__flask-synthetic-candidates.jsonl
 ```
 
+### Scoring
+
+Each generator configuration is scored by the probability that a single mutation attempt produces a usable instance:
+
+```
+P(usable) = yield × f2p_rate × evasion × diversity
+```
+
+| Factor | Range | Definition |
+|--------|-------|------------|
+| **yield** | 0–1 | Fraction of mutation attempts that produce a structurally valid triple (instance_id, patch, test_patch, problem_statement). Most mutations fail: the LLM output doesn't parse, the mutation doesn't cause test failures, etc. |
+| **f2p_rate** | 0–1 | Fraction of produced triples that pass Docker-based Fail-to-Pass validation: the test patch fails on the buggy commit and passes after applying the gold patch. |
+| **evasion** | 0–1 | Fraction of F2P-validated triples that an Opus judge classifies as REAL (1 − detection rate). |
+| **diversity** | 0–1 | Composite measuring how varied the generated instances are (file diversity, patch complexity, issue length variance). |
+
+The score is multiplicative because a triple must pass all gates to be usable. Any single zero factor (e.g., 0% evasion means every triple is detected as synthetic) correctly zeroes the entire score. A weighted sum would mask total failure in one dimension.
+
+Current eval targets: Python (`pallets/click`) and Go (`grpc/grpc-go`).
+
+**Note on gold patches:** The current gold patch is always the exact inverse of the introduced bug (reverting the mutation). This is a known limitation — real SWE-bench patches are forward fixes written by developers.
+
 ### Environment variables
 
 | Variable | Description |

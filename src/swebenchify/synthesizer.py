@@ -190,6 +190,14 @@ class SynthesisResult:
     test_output: str = ""
 
 
+@dataclasses.dataclass
+class RepoSynthesisResult:
+    """Result of synthesize_repo(): candidates plus attempt count."""
+
+    candidates: list[CandidateInstance]
+    mutations_attempted: int
+
+
 def _should_exclude(filepath: str, language: str) -> bool:
     patterns = _LANGUAGE_EXCLUDE_PATTERNS.get(language, [])
     for pat in patterns:
@@ -4052,7 +4060,7 @@ async def synthesize_repo(
     operators: list[str] | None = None,
     model: str = "sonnet",
     screen_instances: bool = True,
-) -> list[CandidateInstance]:
+) -> RepoSynthesisResult:
     """Synthesize bug instances for a repository.
 
     Orchestration function that finds mutation targets, introduces bugs,
@@ -4070,7 +4078,7 @@ async def synthesize_repo(
         model: Claude model shortname.
 
     Returns:
-        List of CandidateInstance objects.
+        RepoSynthesisResult with candidates and mutation attempt count.
     """
     dataset_examples = _load_dataset_examples(DATASET_PATH, repo_slug)
     if dataset_examples:
@@ -4097,10 +4105,13 @@ async def synthesize_repo(
     _ensure_venv(repo_path, language)
 
     candidates: list[CandidateInstance] = []
+    mutations_attempted = 0
 
     for i, target in enumerate(targets[:max_mutations * 8]):
         if len(candidates) >= max_mutations:
             break
+
+        mutations_attempted += 1
 
         logger.info(
             "[%d/%d] Mutating %s:%s",
@@ -4406,8 +4417,9 @@ async def synthesize_repo(
         shutil.rmtree(test_venv, ignore_errors=True)
 
     logger.info(
-        "Synthesis complete: %d/%d candidates generated",
+        "Synthesis complete: %d/%d candidates generated (%d mutations attempted)",
         len(candidates),
         max_mutations,
+        mutations_attempted,
     )
-    return candidates
+    return RepoSynthesisResult(candidates=candidates, mutations_attempted=mutations_attempted)
