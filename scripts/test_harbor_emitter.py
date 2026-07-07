@@ -11,7 +11,6 @@ import json
 import os
 import shutil
 import sys
-import tempfile
 
 # tomllib is stdlib in 3.11+; fall back to tomli
 try:

@@ -11,6 +11,7 @@ import pytest
 from swebenchify.synthesizer import (
     _align_indentation,
     _preserve_unchanged_lines,
+    _BraceCounter,
     BugPlan,
     BugSpec,
     SynthesisResult,
@@ -21,6 +22,7 @@ from swebenchify.synthesizer import (
     _discover_repo_modules,
     _edge_case_score,
     _enforce_banned_openers,
+    _extract_brace_language_functions,
     _extract_failed_test_names,
     _find_existing_test_file,
     _find_file_commits,
@@ -240,6 +242,245 @@ def test_find_mutation_targets_java(tmp_path: Path) -> None:
     assert len(targets) == 2
     assert targets[0]["function_name"] in ("add", "format")
     assert targets[0]["language"] == "java"
+
+
+# ---------------------------------------------------------------------------
+# _BraceCounter — unit tests for string/comment-aware brace counting
+# ---------------------------------------------------------------------------
+
+
+class TestBraceCounterBasic:
+    def test_plain_braces(self) -> None:
+        c = _BraceCounter("go")
+        assert c.count_braces("func main() {") == (1, 0)
+        assert c.count_braces("}") == (0, 1)
+
+    def test_braces_in_double_quoted_string(self) -> None:
+        c = _BraceCounter("go")
+        assert c.count_braces('x := "{ }"') == (0, 0)
+
+    def test_braces_in_line_comment(self) -> None:
+        c = _BraceCounter("go")
+        assert c.count_braces("x := 1 // { }") == (0, 0)
+
+    def test_braces_in_block_comment(self) -> None:
+        c = _BraceCounter("go")
+        assert c.count_braces("x := 1 /* { */") == (0, 0)
+        assert c.in_block_comment is False
+
+    def test_multiline_block_comment(self) -> None:
+        c = _BraceCounter("go")
+        assert c.count_braces("/* start { ") == (0, 0)
+        assert c.in_block_comment is True
+        assert c.count_braces(" } end */") == (0, 0)
+        assert c.in_block_comment is False
+        assert c.count_braces("{") == (1, 0)
+
+    def test_escaped_quote_in_string(self) -> None:
+        c = _BraceCounter("go")
+        assert c.count_braces(r'x := "hello \" { world"') == (0, 0)
+
+    def test_mixed_code_and_string_braces(self) -> None:
+        c = _BraceCounter("go")
+        opens, closes = c.count_braces('if x == "{" {')
+        assert opens == 1
+        assert closes == 0
+
+
+class TestBraceCounterGo:
+    def test_backtick_string(self) -> None:
+        c = _BraceCounter("go")
+        assert c.count_braces("x := `{ }`") == (0, 0)
+
+    def test_multiline_backtick_string(self) -> None:
+        c = _BraceCounter("go")
+        assert c.count_braces("x := `start {") == (0, 0)
+        assert c.in_backtick_string is True
+        assert c.count_braces("} end`") == (0, 0)
+        assert c.in_backtick_string is False
+
+    def test_single_char_literal(self) -> None:
+        c = _BraceCounter("go")
+        assert c.count_braces("x := '{'") == (0, 0)
+
+
+class TestBraceCounterRust:
+    def test_raw_string(self) -> None:
+        c = _BraceCounter("rust")
+        assert c.count_braces('let x = r#"{ }"#;') == (0, 0)
+
+    def test_raw_string_double_hash(self) -> None:
+        c = _BraceCounter("rust")
+        assert c.count_braces('let x = r##"{ }"##;') == (0, 0)
+
+    def test_multiline_raw_string(self) -> None:
+        c = _BraceCounter("rust")
+        assert c.count_braces('let x = r#"start {') == (0, 0)
+        assert c.in_rust_raw_string is True
+        assert c.count_braces('} end"#;') == (0, 0)
+        assert c.in_rust_raw_string is False
+
+    def test_char_literal(self) -> None:
+        c = _BraceCounter("rust")
+        assert c.count_braces("let c = '{';") == (0, 0)
+
+    def test_escaped_char_literal(self) -> None:
+        c = _BraceCounter("rust")
+        assert c.count_braces("let c = '\\n';") == (0, 0)
+
+    def test_lifetime_not_confused_as_char(self) -> None:
+        c = _BraceCounter("rust")
+        opens, closes = c.count_braces("fn foo<'a>(x: &'a str) -> &'a str {")
+        assert opens == 1
+        assert closes == 0
+
+
+class TestBraceCounterJava:
+    def test_char_literal(self) -> None:
+        c = _BraceCounter("java")
+        assert c.count_braces("char c = '{';") == (0, 0)
+
+    def test_string_with_braces(self) -> None:
+        c = _BraceCounter("java")
+        assert c.count_braces('String s = "{ }";') == (0, 0)
+
+    def test_escaped_quote(self) -> None:
+        c = _BraceCounter("java")
+        assert c.count_braces(r'String s = "hello \" { world";') == (0, 0)
+
+
+# ---------------------------------------------------------------------------
+# Brace-aware extraction — integration tests
+# ---------------------------------------------------------------------------
+
+def test_go_extractor_braces_in_strings(tmp_path: Path) -> None:
+    src = tmp_path / "main.go"
+    src.write_text(textwrap.dedent("""\
+        package main
+
+        func Format(x int) string {
+            if x < 0 {
+                return "{ negative }"
+            }
+            msg := fmt.Sprintf("value={%d}", x)
+            a := msg + " extra"
+            b := a + " more"
+            c := strings.TrimSpace(b)
+            return c
+        }
+    """))
+
+    targets = find_mutation_targets(str(tmp_path), "go")
+    names = [t["function_name"] for t in targets]
+    assert "Format" in names
+    fmt_target = next(t for t in targets if t["function_name"] == "Format")
+    assert 'return "{ negative }"' in fmt_target["source"]
+
+
+def test_go_extractor_braces_in_comments(tmp_path: Path) -> None:
+    src = tmp_path / "main.go"
+    src.write_text(textwrap.dedent("""\
+        package main
+
+        func Compute(x int) int {
+            // This does { complex stuff }
+            if x > 0 {
+                return x * 2
+            }
+            /* also handles {
+               edge } cases */
+            a := x + 1
+            b := a + 2
+            return b
+        }
+    """))
+
+    targets = find_mutation_targets(str(tmp_path), "go")
+    assert len(targets) == 1
+    assert targets[0]["function_name"] == "Compute"
+    assert "return b" in targets[0]["source"]
+
+
+def test_go_extractor_backtick_string(tmp_path: Path) -> None:
+    src = tmp_path / "main.go"
+    src.write_text(textwrap.dedent("""\
+        package main
+
+        func Template(name string) string {
+            tmpl := `Hello {
+                name }!`
+            if name == "" {
+                return "unknown"
+            }
+            cleaned := strings.TrimSpace(name)
+            formatted := fmt.Sprintf(tmpl, cleaned)
+            return formatted
+        }
+    """))
+
+    targets = find_mutation_targets(str(tmp_path), "go")
+    assert len(targets) == 1
+    assert targets[0]["function_name"] == "Template"
+    assert "return formatted" in targets[0]["source"]
+
+
+def test_rust_extractor_raw_string(tmp_path: Path) -> None:
+    src = tmp_path / "lib.rs"
+    src.write_text(textwrap.dedent("""\
+        pub fn pattern(x: i32) -> &'static str {
+            let re = r#"\\{[0-9]+\\}"#;
+            if x > 0 {
+                return re;
+            }
+            let a = x + 1;
+            let b = a + 2;
+            let c = b * 3;
+            "none"
+        }
+    """))
+
+    targets = find_mutation_targets(str(tmp_path), "rust")
+    assert len(targets) == 1
+    assert targets[0]["function_name"] == "pattern"
+    assert '"none"' in targets[0]["source"]
+
+
+def test_java_extractor_braces_in_strings(tmp_path: Path) -> None:
+    src = tmp_path / "Formatter.java"
+    src.write_text(textwrap.dedent("""\
+        public class Formatter {
+            public String format(int value) {
+                if (value < 0) {
+                    return "{ error }";
+                }
+                String template = "result={" + value + "}";
+                String wrapped = template.trim();
+                String padded = "  " + wrapped;
+                String result = padded.strip();
+                return result;
+            }
+        }
+    """))
+
+    targets = find_mutation_targets(str(tmp_path), "java")
+    assert len(targets) == 1
+    assert targets[0]["function_name"] == "format"
+    assert "return result" in targets[0]["source"]
+
+
+def test_brace_counter_preserves_state_between_functions() -> None:
+    """Block comment starting before a function should carry state correctly."""
+    lines = [
+        "/* start of comment",
+        " { } braces inside comment",
+        " end of comment */",
+        "func Foo() int {",
+        "    return 1",
+        "}",
+    ]
+    fns = _extract_brace_language_functions(lines, "go")
+    assert len(fns) == 1
+    assert fns[0]["function_name"] == "Foo"
 
 
 # ---------------------------------------------------------------------------
@@ -3551,3 +3792,118 @@ def test_preserve_unchanged_lines_identical() -> None:
 def test_preserve_unchanged_lines_empty() -> None:
     """Empty inputs are handled gracefully."""
     assert _preserve_unchanged_lines("", "") == ""
+
+
+# ---------------------------------------------------------------------------
+# Info-leak sanitization — judge evasion
+# ---------------------------------------------------------------------------
+
+def test__sanitize_test_output_strips_homebrew_go_paths() -> None:
+    output = '  File "/opt/homebrew/Cellar/go/1.26.4/libexec/src/testing/testing.go", line 42'
+    result = _sanitize_test_output(output, "/tmp/repo")
+    assert "/opt/homebrew/Cellar/go/" not in result
+    assert "/usr/local/go/" in result
+
+
+def test__sanitize_test_output_strips_homebrew_rust_paths() -> None:
+    output = '  File "/opt/homebrew/Cellar/rust/1.75.0/lib/rustlib/src/rust/library/core/src/result.rs"'
+    result = _sanitize_test_output(output, "/tmp/repo")
+    assert "/opt/homebrew/Cellar/rust/" not in result
+    assert "/usr/local/lib/rust/" in result
+
+
+def test__sanitize_test_output_strips_var_folders_paths() -> None:
+    output = '  File "/var/folders/xh/abc123def/T/go-build456/test_main.go", line 10'
+    result = _sanitize_test_output(output, "/tmp/repo")
+    assert "/var/folders/" not in result
+    assert "/tmp/test-env/" in result
+
+
+def test__sanitize_test_output_replaces_impossible_go_versions() -> None:
+    output = 'go/1.26.4/libexec/src/testing/testing.go:1234'
+    result = _sanitize_test_output(output, "/tmp/repo")
+    assert "1.26.4" not in result
+    assert "go/1.23.4" in result
+
+
+def test__sanitize_test_output_replaces_future_go_versions() -> None:
+    output = 'go/1.35.1/libexec/src/runtime/panic.go:100'
+    result = _sanitize_test_output(output, "/tmp/repo")
+    assert "1.35.1" not in result
+    assert "go/1.23.4" in result
+
+
+def test__sanitize_test_output_keeps_valid_go_versions() -> None:
+    output = 'go/1.22.5/libexec/src/testing/testing.go:1234'
+    result = _sanitize_test_output(output, "/tmp/repo")
+    assert "go/1.22.5" in result
+
+
+def test__sanitize_test_output_strips_private_prefix() -> None:
+    output = '  File "/private/home/mike/projects/grpc-go/rpc_util_test.go", line 5'
+    result = _sanitize_test_output(output, "/tmp/repo")
+    assert "/private/" not in result
+
+
+def test__sanitize_test_output_strips_synth_keywords_in_paths() -> None:
+    output = '  File "/home/mike/projects/grpc-go-synth-test/rpc_util_test.go", line 5'
+    result = _sanitize_test_output(output, "/tmp/repo")
+    assert "synth-test" not in result
+    assert "synth_test" not in result
+
+
+def test__sanitize_test_output_strips_synth_bench_in_paths() -> None:
+    output = '  File "/home/user/synth_bench/main.go", line 1'
+    result = _sanitize_test_output(output, "/tmp/repo")
+    assert "synth_bench" not in result
+    assert "synth-bench" not in result
+
+
+def test_humanize_traceback_handles_private_tmp(tmp_path: Path) -> None:
+    test_output = (
+        '  File "/private/tmp/pytest-abc123/test_core.py", line 5\n'
+        "    assert add(1, 2) == 3\n"
+        "AssertionError: -1 != 3"
+    )
+    result = _humanize_traceback(test_output, str(tmp_path))
+    assert "/private/tmp/" not in result
+    assert "/home/" in result
+    assert "AssertionError" in result
+
+
+def test_humanize_traceback_strips_synth_from_repo_name() -> None:
+    test_output = '  File "/tmp/pytest-abc/test_core.py", line 5\n    assert add(1, 2) == 3'
+    result = _humanize_traceback(
+        test_output,
+        "/home/user/grpc-go-synth-test",
+    )
+    assert "synth" not in result.lower()
+    assert "grpc-go" in result
+
+
+def test_humanize_traceback_strips_factory_from_repo_name() -> None:
+    test_output = '  File "/tmp/pytest-abc/test_core.py", line 5\n    assert add(1, 2) == 3'
+    result = _humanize_traceback(
+        test_output,
+        "/home/user/grpc-go-factory-run",
+    )
+    assert "factory" not in result.lower()
+
+
+def test_humanize_traceback_empty_repo_name_after_strip() -> None:
+    test_output = '  File "/tmp/pytest-abc/test_core.py", line 5\n    assert add(1, 2) == 3'
+    result = _humanize_traceback(
+        test_output,
+        "/home/user/synth-test",
+    )
+    assert "project" in result
+
+
+def test_humanize_traceback_handles_var_folders(tmp_path: Path) -> None:
+    test_output = (
+        '  File "/var/folders/xh/abc123/T/go-build456/test_main.go", line 10\n'
+        "    assert result == expected"
+    )
+    result = _humanize_traceback(test_output, str(tmp_path))
+    assert "/var/folders/" not in result
+    assert "/home/" in result

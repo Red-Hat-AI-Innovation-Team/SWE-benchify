@@ -117,7 +117,7 @@ class _FakeOptions:
             setattr(self, k, v)
 
 import swebenchify.synthesizer as synth_mod  # noqa: E402
-from swebenchify.grader import compute_f2p  # noqa: E402
+from swebenchify.grader import compute_f2p, create_repo_tarball  # noqa: E402
 from swebenchify.models import EnvironmentSpec, GoEnvironmentSpec, RustEnvironmentSpec  # noqa: E402
 
 synth_mod.query = _vertex_query  # type: ignore[assignment]
@@ -498,6 +498,23 @@ def main():
         synth_instances = [asdict(c) for c in candidates]
         log.info("synthesized %d instances", len(synth_instances))
 
+        # Eagerly create tarballs for each synthetic instance's buggy commit.
+        # The buggy commit is a dangling object that could be garbage-collected;
+        # snapshotting it now guarantees F2P can use it later.
+        tarball_dir = os.path.join(tempfile.gettempdir(), "swebenchify-tarballs")
+        os.makedirs(tarball_dir, exist_ok=True)
+        for inst in synth_instances:
+            buggy_sha = inst.get("base_commit", "")
+            if not buggy_sha:
+                continue
+            tarball_path = os.path.join(tarball_dir, f"{buggy_sha}.tar.gz")
+            if not os.path.exists(tarball_path):
+                ok = create_repo_tarball(repo_path, buggy_sha, tarball_path)
+                if ok:
+                    log.info("created tarball for %s → %s", buggy_sha[:12], tarball_path)
+                else:
+                    log.warning("failed to create tarball for %s", buggy_sha[:12])
+
         failures = []
         for inst in synth_instances:
             passed, reason = validate_instance(inst, repo_path)
@@ -612,6 +629,7 @@ def main():
         log.info("phase=f2p starting validation of %d instances", n_s)
         f2p_failures = []
         f2p_passed_instances = []
+        tarball_dir = os.path.join(tempfile.gettempdir(), "swebenchify-tarballs")
 
         for i, inst in enumerate(all_synth_instances):
             iid = inst.get("instance_id", "unknown")
@@ -621,19 +639,25 @@ def main():
             )
             if not target:
                 f2p_failures.append((iid, "no matching target config"))
-                break
+                continue
 
             log.info("f2p [%d/%d] instance=%s", i + 1, n_s, iid)
             env_spec = _make_env_spec(target)
 
+            # Use pre-created tarball for synthetic instances with local-only commits
+            buggy_sha = inst.get("base_commit", "")
+            tarball_path = os.path.join(tarball_dir, f"{buggy_sha}.tar.gz")
+            repo_tarball_path = tarball_path if os.path.isfile(tarball_path) else None
+
             result = compute_f2p(
                 repo=repo_slug,
-                base_commit=inst.get("base_commit", ""),
+                base_commit=buggy_sha,
                 test_patch=inst.get("test_patch", ""),
                 gold_patch=inst.get("patch", ""),
                 env_spec=env_spec,
                 timeout=600,
                 repo_path=target["repo_path"],
+                repo_tarball_path=repo_tarball_path,
             )
 
             if result.status != "valid":

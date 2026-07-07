@@ -427,27 +427,27 @@ def main() -> None:
     print("SUMMARY")
     print("=" * 72)
 
-    print(f"\n  Data sources:")
+    print("\n  Data sources:")
     for source_name, instances in all_instances.items():
         print(f"    {source_name}: {len(instances)} instances loaded")
     print(f"    Total: {total_loaded} instances across {len(all_instances)} files")
 
-    print(f"\n  Sample:")
+    print("\n  Sample:")
     print(f"    Selected: {len(sample)} instances")
     for lang, count in sorted(sample_langs.items()):
         print(f"      {lang}: {count}")
 
-    print(f"\n  Emission:")
+    print("\n  Emission:")
     print(f"    Task dirs created: {len(task_dirs)}")
     print(f"    Time: {emit_time:.2f}s")
 
-    print(f"\n  Validation:")
+    print("\n  Validation:")
     print(f"    Passed: {pass_count}")
     print(f"    Failed: {fail_count}")
     print(f"    Supplementary file errors: {supp_errors}")
 
     if oracle_results:
-        print(f"\n  Harbor Oracle:")
+        print("\n  Harbor Oracle:")
         for r in oracle_results:
             print(f"    {r['instance_id']}: {r['status']} (reward={r['reward']})")
 

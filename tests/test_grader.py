@@ -27,6 +27,7 @@ from swebenchify.grader import (
     _make_run_script,
     _parse_f2p_output,
     compute_f2p,
+    create_repo_tarball,
     grade,
 )
 
@@ -605,3 +606,226 @@ class TestComputeF2PFunction:
             result = compute_f2p("etcd-io/etcd", "abc123", self._FAKE_TEST_PATCH, "gold")
         assert result.status == "valid"
         assert len(result.FAIL_TO_PASS) > 0
+
+    def test_repo_tarball_path_uses_prebuilt_tarball(self, tmp_path: Any) -> None:
+        """When repo_tarball_path is provided, compute_f2p uses the pre-built
+        tarball and passes repo_tarball=True to the Dockerfile maker."""
+        tarball = tmp_path / "repo.tar.gz"
+        tarball.write_bytes(b"fake tarball content")
+
+        pre = _failing_output(_PKG, "TestHTTPSubPath")
+        post = _passing_output(_PKG, "TestHTTPSubPath")
+        raw = (
+            f"{_F2P_PHASE_SEPARATOR}_RUN_1_PRE\n{pre}\n"
+            f"{_F2P_PHASE_SEPARATOR}_RUN_1_POST\n{post}\n"
+        )
+
+        captured_dockerfile = {}
+
+        def capture_build(tag, context_dir, dockerfile, timeout=1800):
+            captured_dockerfile["content"] = dockerfile
+            assert (Path(context_dir) / "repo.tar.gz").exists()
+            return (0, "ok")
+
+        from pathlib import Path
+
+        with patch.multiple(
+            "swebenchify.grader",
+            _docker_available=MagicMock(return_value=True),
+            _docker_build=MagicMock(side_effect=capture_build),
+            _docker_run=MagicMock(return_value=(0, raw)),
+        ):
+            result = compute_f2p(
+                "etcd-io/etcd", "abc123", self._FAKE_TEST_PATCH, "gold",
+                repo_tarball_path=str(tarball),
+            )
+        assert result.status == "valid"
+        assert "COPY repo.tar.gz" in captured_dockerfile["content"]
+        assert "git clone" not in captured_dockerfile["content"]
+
+    def test_repo_path_creates_tarball_from_local_repo(self, tmp_path: Any) -> None:
+        """When repo_path is provided and the commit exists locally,
+        compute_f2p creates a tarball via git archive."""
+        from pathlib import Path
+
+        pre = _failing_output(_PKG, "TestHTTPSubPath")
+        post = _passing_output(_PKG, "TestHTTPSubPath")
+        raw = (
+            f"{_F2P_PHASE_SEPARATOR}_RUN_1_PRE\n{pre}\n"
+            f"{_F2P_PHASE_SEPARATOR}_RUN_1_POST\n{post}\n"
+        )
+
+        captured_dockerfile = {}
+
+        def capture_build(tag, context_dir, dockerfile, timeout=1800):
+            captured_dockerfile["content"] = dockerfile
+            return (0, "ok")
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if "cat-file" in cmd:
+                return MagicMock(returncode=0)
+            if "archive" in cmd:
+                for a in cmd:
+                    if str(a).endswith(".tar.gz"):
+                        Path(a).write_bytes(b"fake")
+                return MagicMock(returncode=0)
+            if "rmi" in cmd:
+                return MagicMock(returncode=0)
+            raise ValueError(f"Unexpected command: {cmd}")
+
+        with patch.multiple(
+            "swebenchify.grader",
+            _docker_available=MagicMock(return_value=True),
+            _docker_build=MagicMock(side_effect=capture_build),
+            _docker_run=MagicMock(return_value=(0, raw)),
+        ), patch("subprocess.run", side_effect=mock_subprocess_run):
+            result = compute_f2p(
+                "etcd-io/etcd", "abc123", self._FAKE_TEST_PATCH, "gold",
+                repo_path="/tmp/fake-repo",
+            )
+        assert result.status == "valid"
+        assert "COPY repo.tar.gz" in captured_dockerfile["content"]
+
+    def test_repo_path_falls_back_to_clone_on_missing_commit(self) -> None:
+        """When the commit doesn't exist in repo_path, falls back to GitHub clone."""
+        pre = _failing_output(_PKG, "TestHTTPSubPath")
+        post = _passing_output(_PKG, "TestHTTPSubPath")
+        raw = (
+            f"{_F2P_PHASE_SEPARATOR}_RUN_1_PRE\n{pre}\n"
+            f"{_F2P_PHASE_SEPARATOR}_RUN_1_POST\n{post}\n"
+        )
+
+        captured_dockerfile = {}
+
+        def capture_build(tag, context_dir, dockerfile, timeout=1800):
+            captured_dockerfile["content"] = dockerfile
+            return (0, "ok")
+
+        import subprocess as sp
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if "cat-file" in cmd:
+                raise sp.CalledProcessError(128, cmd)
+            if "rmi" in cmd:
+                return MagicMock(returncode=0)
+            raise ValueError(f"Unexpected command: {cmd}")
+
+        with patch.multiple(
+            "swebenchify.grader",
+            _docker_available=MagicMock(return_value=True),
+            _docker_build=MagicMock(side_effect=capture_build),
+            _docker_run=MagicMock(return_value=(0, raw)),
+        ), patch("subprocess.run", side_effect=mock_subprocess_run):
+            result = compute_f2p(
+                "etcd-io/etcd", "abc123", self._FAKE_TEST_PATCH, "gold",
+                repo_path="/tmp/fake-repo",
+            )
+        assert result.status == "valid"
+        assert "git clone" in captured_dockerfile["content"] or "git archive" in captured_dockerfile["content"]
+        assert "COPY repo.tar.gz" not in captured_dockerfile["content"]
+
+
+class TestCreateRepoTarball:
+    def test_creates_git_ready_tarball(self, tmp_path: Any) -> None:
+        """create_repo_tarball produces a tarball with a .git directory."""
+        import os
+        import subprocess as sp
+
+        src = tmp_path / "src_repo"
+        src.mkdir()
+        sp.run(["git", "init", str(src)], check=True, capture_output=True)
+        sp.run(["git", "config", "user.email", "t@t.com"], cwd=str(src), check=True, capture_output=True)
+        sp.run(["git", "config", "user.name", "T"], cwd=str(src), check=True, capture_output=True)
+        (src / "hello.txt").write_text("hello")
+        sp.run(["git", "add", "-A"], cwd=str(src), check=True, capture_output=True)
+        sp.run(["git", "commit", "-m", "init"], cwd=str(src), check=True, capture_output=True)
+        sha = sp.run(["git", "rev-parse", "HEAD"], cwd=str(src), check=True, capture_output=True, text=True).stdout.strip()
+
+        output = str(tmp_path / "repo.tar.gz")
+        result = create_repo_tarball(str(src), sha, output)
+        assert result is True
+        assert os.path.exists(output)
+
+        extract_dir = tmp_path / "extracted"
+        extract_dir.mkdir()
+        sp.run(["tar", "xzf", output, "-C", str(extract_dir)], check=True, capture_output=True)
+        assert (extract_dir / ".git").is_dir()
+        assert (extract_dir / "hello.txt").exists()
+
+        git_status = sp.run(["git", "status"], cwd=str(extract_dir), check=True, capture_output=True, text=True)
+        assert "nothing to commit" in git_status.stdout
+
+    def test_missing_commit(self) -> None:
+        import subprocess as sp
+        with patch("subprocess.run", side_effect=sp.CalledProcessError(128, "git")):
+            result = create_repo_tarball("/tmp/repo", "missing123", "/tmp/out.tar.gz")
+        assert result is False
+
+
+class TestDockerfileTarballMode:
+    """Verify all 4 language backends generate correct Dockerfiles with repo_tarball=True.
+
+    Tarballs now include .git, so Dockerfiles should NOT contain git init/add/commit.
+    """
+
+    def test_go_tarball_dockerfile(self) -> None:
+        from swebenchify.backends import _go_make_dockerfile
+        from swebenchify.models import GoEnvironmentSpec
+        df = _go_make_dockerfile("org/repo", "abc123", GoEnvironmentSpec(), repo_tarball=True)
+        assert "COPY repo.tar.gz" in df
+        assert "tar xzf" in df
+        assert "git init" not in df
+        assert "git add" not in df
+        assert "git commit" not in df
+        assert "git clone" not in df
+
+    def test_python_tarball_dockerfile(self) -> None:
+        from swebenchify.backends import _python_make_dockerfile
+        from swebenchify.models import EnvironmentSpec
+        spec = EnvironmentSpec(
+            language="python", language_version="3.11",
+            package_manager="pip", install_cmd="pip install -e .",
+            test_cmd="pytest -xvs",
+        )
+        df = _python_make_dockerfile("org/repo", "abc123", spec, repo_tarball=True)
+        assert "COPY repo.tar.gz" in df
+        assert "tar xzf" in df
+        assert "git init" not in df
+        assert "git add" not in df
+        assert "git commit" not in df
+        assert "git clone" not in df
+
+    def test_java_tarball_dockerfile(self) -> None:
+        from swebenchify.backends import _java_make_dockerfile
+        from swebenchify.models import EnvironmentSpec
+        spec = EnvironmentSpec(
+            language="java", language_version="17",
+            package_manager="maven", install_cmd="mvn install -DskipTests -q",
+            test_cmd="mvn test -pl .",
+        )
+        df = _java_make_dockerfile("org/repo", "abc123", spec, repo_tarball=True)
+        assert "COPY repo.tar.gz" in df
+        assert "tar xzf" in df
+        assert "git init" not in df
+        assert "git add" not in df
+        assert "git commit" not in df
+        assert "git clone" not in df
+
+    def test_rust_tarball_dockerfile(self) -> None:
+        from swebenchify.backends import _rust_make_dockerfile
+        from swebenchify.models import RustEnvironmentSpec
+        df = _rust_make_dockerfile("org/repo", "abc123", RustEnvironmentSpec(), repo_tarball=True)
+        assert "COPY repo.tar.gz" in df
+        assert "tar xzf" in df
+        assert "git init" not in df
+        assert "git add" not in df
+        assert "git commit" not in df
+        assert "git clone" not in df
+
+    def test_go_clone_dockerfile(self) -> None:
+        """Verify backward compat: repo_tarball=False uses git clone."""
+        from swebenchify.backends import _go_make_dockerfile
+        from swebenchify.models import GoEnvironmentSpec
+        df = _go_make_dockerfile("org/repo", "abc123", GoEnvironmentSpec(), repo_tarball=False)
+        assert "COPY repo.tar.gz" not in df
+        assert "git clone" in df or "git archive" in df
