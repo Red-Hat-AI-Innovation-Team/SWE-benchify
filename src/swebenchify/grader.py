@@ -403,13 +403,17 @@ def _docker_available() -> bool:
 
 def _docker_build(tag: str, context_dir: str, dockerfile: str) -> tuple[int, str]:
     Path(context_dir, "Dockerfile").write_text(dockerfile)
-    r = subprocess.run(
-        [_DOCKER, "build", "-t", tag, context_dir],
-        capture_output=True,
-        text=True,
-        timeout=900,
-    )
-    return r.returncode, r.stdout + r.stderr
+    try:
+        r = subprocess.run(
+            [_DOCKER, "build", "-t", tag, context_dir],
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+        return r.returncode, r.stdout + r.stderr
+    except subprocess.TimeoutExpired:
+        logger.warning("Docker build timed out for image %s", tag)
+        return -1, "TIMEOUT after 900s"
 
 
 def _docker_run(image: str, script: str, timeout: int) -> tuple[int, str]:
