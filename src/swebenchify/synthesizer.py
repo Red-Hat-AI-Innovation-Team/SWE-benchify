@@ -233,10 +233,131 @@ def _extract_python_functions(lines: list[str]) -> list[dict[str, str | int]]:
     return functions
 
 
-def _extract_go_functions(lines: list[str]) -> list[dict[str, str | int]]:
-    """Extract function bodies from Go source using brace counting."""
+class _BraceCounter:
+    """Tracks parser state to count only code-level braces, skipping those
+    inside string literals, character literals, raw strings, and comments."""
+
+    def __init__(self, language: str) -> None:
+        self.language = language
+        self.in_block_comment = False
+        self.in_backtick_string = False  # Go only
+        self.in_rust_raw_string = False  # Rust r#"..."#
+        self.rust_raw_hashes = 0
+
+    def count_braces(self, line: str) -> tuple[int, int]:
+        """Return (open_count, close_count) of braces in code context."""
+        opens = 0
+        closes = 0
+        i = 0
+        n = len(line)
+
+        while i < n:
+            ch = line[i]
+
+            if self.in_block_comment:
+                if ch == "*" and i + 1 < n and line[i + 1] == "/":
+                    self.in_block_comment = False
+                    i += 2
+                    continue
+                i += 1
+                continue
+
+            if self.in_backtick_string:
+                if ch == "`":
+                    self.in_backtick_string = False
+                i += 1
+                continue
+
+            if self.in_rust_raw_string:
+                if ch == '"':
+                    hashes_after = 0
+                    j = i + 1
+                    while j < n and line[j] == "#":
+                        hashes_after += 1
+                        j += 1
+                    if hashes_after >= self.rust_raw_hashes:
+                        self.in_rust_raw_string = False
+                        i = j
+                        continue
+                i += 1
+                continue
+
+            if ch == "/" and i + 1 < n:
+                if line[i + 1] == "/":
+                    break
+                if line[i + 1] == "*":
+                    self.in_block_comment = True
+                    i += 2
+                    continue
+
+            if ch == '"':
+                if self.language == "rust" and i > 0:
+                    lookback = i - 1
+                    hashes = 0
+                    while lookback >= 0 and line[lookback] == "#":
+                        hashes += 1
+                        lookback -= 1
+                    if lookback >= 0 and line[lookback] == "r":
+                        self.in_rust_raw_string = True
+                        self.rust_raw_hashes = hashes
+                        i += 1
+                        continue
+                i += 1
+                while i < n:
+                    if line[i] == "\\" and i + 1 < n:
+                        i += 2
+                        continue
+                    if line[i] == '"':
+                        i += 1
+                        break
+                    i += 1
+                continue
+
+            if ch == "'" and self.language in ("go", "java", "rust"):
+                if self.language == "rust":
+                    if i + 1 < n and line[i + 1] == "\\" and i + 3 < n and line[i + 3] == "'":
+                        i += 4
+                        continue
+                    if i + 2 < n and line[i + 2] == "'":
+                        i += 3
+                        continue
+                    # Rust lifetime annotation — not a char literal
+                    i += 1
+                    continue
+                i += 1
+                while i < n:
+                    if line[i] == "\\" and i + 1 < n:
+                        i += 2
+                        continue
+                    if line[i] == "'":
+                        i += 1
+                        break
+                    i += 1
+                continue
+
+            if ch == "`" and self.language == "go":
+                self.in_backtick_string = True
+                i += 1
+                continue
+
+            if ch == "{":
+                opens += 1
+            elif ch == "}":
+                closes += 1
+
+            i += 1
+
+        return opens, closes
+
+
+def _extract_brace_language_functions(
+    lines: list[str],
+    language: str,
+) -> list[dict[str, str | int]]:
+    """Extract function bodies from a brace-delimited language (Go/Rust/Java)."""
     functions: list[dict[str, str | int]] = []
-    pat = _FUNC_PATTERNS["go"]
+    pat = _FUNC_PATTERNS[language]
+    counter = _BraceCounter(language)
     i = 0
     while i < len(lines):
         m = pat.match(lines[i])
@@ -245,16 +366,23 @@ def _extract_go_functions(lines: list[str]) -> list[dict[str, str | int]]:
             start = i
             brace_count = 0
             found_open = False
+            fn_counter = _BraceCounter(language)
+            fn_counter.in_block_comment = counter.in_block_comment
+            fn_counter.in_backtick_string = counter.in_backtick_string
+            fn_counter.in_rust_raw_string = counter.in_rust_raw_string
+            fn_counter.rust_raw_hashes = counter.rust_raw_hashes
             while i < len(lines):
-                for ch in lines[i]:
-                    if ch == "{":
-                        brace_count += 1
-                        found_open = True
-                    elif ch == "}":
-                        brace_count -= 1
+                opens, closes = fn_counter.count_braces(lines[i])
+                if opens > 0:
+                    found_open = True
+                brace_count += opens - closes
                 i += 1
-                if found_open and brace_count == 0:
+                if found_open and brace_count <= 0:
                     break
+            counter.in_block_comment = fn_counter.in_block_comment
+            counter.in_backtick_string = fn_counter.in_backtick_string
+            counter.in_rust_raw_string = fn_counter.in_rust_raw_string
+            counter.rust_raw_hashes = fn_counter.rust_raw_hashes
             end = i
             source = "\n".join(lines[start:end])
             if len(source.splitlines()) >= 3:
@@ -265,80 +393,24 @@ def _extract_go_functions(lines: list[str]) -> list[dict[str, str | int]]:
                     "end_line": end,
                 })
         else:
+            counter.count_braces(lines[i])
             i += 1
     return functions
+
+
+def _extract_go_functions(lines: list[str]) -> list[dict[str, str | int]]:
+    """Extract function bodies from Go source using brace counting."""
+    return _extract_brace_language_functions(lines, "go")
 
 
 def _extract_rust_functions(lines: list[str]) -> list[dict[str, str | int]]:
     """Extract function bodies from Rust source using brace counting."""
-    functions: list[dict[str, str | int]] = []
-    pat = _FUNC_PATTERNS["rust"]
-    i = 0
-    while i < len(lines):
-        m = pat.match(lines[i])
-        if m:
-            name = m.group("name")
-            start = i
-            brace_count = 0
-            found_open = False
-            while i < len(lines):
-                for ch in lines[i]:
-                    if ch == "{":
-                        brace_count += 1
-                        found_open = True
-                    elif ch == "}":
-                        brace_count -= 1
-                i += 1
-                if found_open and brace_count == 0:
-                    break
-            end = i
-            source = "\n".join(lines[start:end])
-            if len(source.splitlines()) >= 3:
-                functions.append({
-                    "function_name": name,
-                    "source": source,
-                    "start_line": start + 1,
-                    "end_line": end,
-                })
-        else:
-            i += 1
-    return functions
+    return _extract_brace_language_functions(lines, "rust")
 
 
 def _extract_java_functions(lines: list[str]) -> list[dict[str, str | int]]:
     """Extract method bodies from Java source using brace counting."""
-    functions: list[dict[str, str | int]] = []
-    pat = _FUNC_PATTERNS["java"]
-    i = 0
-    while i < len(lines):
-        m = pat.match(lines[i])
-        if m:
-            name = m.group("name")
-            start = i
-            brace_count = 0
-            found_open = False
-            while i < len(lines):
-                for ch in lines[i]:
-                    if ch == "{":
-                        brace_count += 1
-                        found_open = True
-                    elif ch == "}":
-                        brace_count -= 1
-                i += 1
-                if found_open and brace_count == 0:
-                    break
-            end = i
-            source = "\n".join(lines[start:end])
-            if len(source.splitlines()) >= 3:
-                functions.append({
-                    "function_name": name,
-                    "source": source,
-                    "start_line": start + 1,
-                    "end_line": end,
-                })
-        else:
-            i += 1
-    return functions
+    return _extract_brace_language_functions(lines, "java")
 
 
 _EXTRACTORS = {
