@@ -401,19 +401,19 @@ def _docker_available() -> bool:
         return False
 
 
-def _docker_build(tag: str, context_dir: str, dockerfile: str) -> tuple[int, str]:
+def _docker_build(tag: str, context_dir: str, dockerfile: str, timeout: int = 1800) -> tuple[int, str]:
     Path(context_dir, "Dockerfile").write_text(dockerfile)
     try:
         r = subprocess.run(
             [_DOCKER, "build", "-t", tag, context_dir],
             capture_output=True,
             text=True,
-            timeout=900,
+            timeout=timeout,
         )
         return r.returncode, r.stdout + r.stderr
     except subprocess.TimeoutExpired:
         logger.warning("Docker build timed out for image %s", tag)
-        return -1, "TIMEOUT after 900s"
+        return -1, f"TIMEOUT after {timeout}s"
 
 
 def _docker_run(image: str, script: str, timeout: int) -> tuple[int, str]:
@@ -678,6 +678,7 @@ def compute_f2p(
     n_runs: int = 1,
     repo_path: str | None = None,
     repo_tarball_path: str | None = None,
+    build_timeout: int = 1800,
 ) -> ValidationResult:
     """Compute FAIL_TO_PASS and PASS_TO_PASS via Docker-based validation.
 
@@ -765,6 +766,7 @@ def compute_f2p(
             context_dir=str(tmp),
             dockerfile=backend.make_dockerfile(repo, base_commit, fallback_spec,
                                                repo_tarball=use_tarball),
+            timeout=build_timeout,
         )
 
         if build_rc != 0:

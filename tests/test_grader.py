@@ -622,7 +622,7 @@ class TestComputeF2PFunction:
 
         captured_dockerfile = {}
 
-        def capture_build(tag, context_dir, dockerfile):
+        def capture_build(tag, context_dir, dockerfile, timeout=1800):
             captured_dockerfile["content"] = dockerfile
             assert (Path(context_dir) / "repo.tar.gz").exists()
             return (0, "ok")
@@ -657,7 +657,7 @@ class TestComputeF2PFunction:
 
         captured_dockerfile = {}
 
-        def capture_build(tag, context_dir, dockerfile):
+        def capture_build(tag, context_dir, dockerfile, timeout=1800):
             captured_dockerfile["content"] = dockerfile
             return (0, "ok")
 
@@ -697,7 +697,7 @@ class TestComputeF2PFunction:
 
         captured_dockerfile = {}
 
-        def capture_build(tag, context_dir, dockerfile):
+        def capture_build(tag, context_dir, dockerfile, timeout=1800):
             captured_dockerfile["content"] = dockerfile
             return (0, "ok")
 
