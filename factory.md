@@ -54,7 +54,7 @@ python -m mypy ./
 
 - generator.eval_command: python3 scripts/eval_synthesizer.py --role generator
 - generator.metric_name: judge_evasion_score
-- generator.threshold: 0.4
+- generator.threshold: 0.9
 - generator.scope: src/swebenchify/, tests/
 - generator.timeout: 3600
 - discriminator.eval_command: python3 scripts/eval_synthesizer.py --role discriminator
