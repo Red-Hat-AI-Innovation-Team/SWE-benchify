@@ -4602,8 +4602,31 @@ async def synthesize_repo(
         "Found %d mutation targets (%d with test files)",
         len(all_targets), len(with_tests),
     )
-    # Prioritize targets with test files, pad with others to fill attempt budget
-    targets = with_tests + without_tests
+    # H4: Assertion-aware prioritization — targets with direct test assertions first
+    with_assertions = []
+    with_tests_no_assertions = []
+    for t in with_tests:
+        test_file = _find_existing_test_file(repo_path, t["file"], language)
+        if test_file:
+            assertions = _analyze_test_assertions(
+                os.path.join(repo_path, test_file), language
+            )
+            relevant = [
+                a for a in assertions
+                if (a.get('called_function') == t['function_name']
+                    or t['function_name'] in a.get('expression', ''))
+            ]
+            if relevant:
+                with_assertions.append(t)
+                continue
+        with_tests_no_assertions.append(t)
+
+    logger.info(
+        "Assertion-aware split: %d with assertions, %d with tests only, %d without tests",
+        len(with_assertions), len(with_tests_no_assertions), len(without_tests),
+    )
+    # Prioritize: targets with assertions first, then with tests, then without
+    targets = with_assertions + with_tests_no_assertions + without_tests
 
     _ensure_venv(repo_path, language)
 
