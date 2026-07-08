@@ -2856,99 +2856,6 @@ def _enforce_banned_openers(text: str) -> str:
     return '\n'.join(lines)
 
 
-_PERSONAL_OPENERS = [
-    "I noticed this when ",
-    "Hit this today — ",
-    "We ran into ",
-    "Ran into this while ",
-    "Seeing this after ",
-    "Just hit ",
-    "Found this when ",
-    "Stumbled on this — ",
-    "Was debugging something else and noticed ",
-    "Anyone else getting ",
-]
-
-_CONTRACTION_MAP = {
-    "does not": "doesn't",
-    "do not": "don't",
-    "can not": "can't",
-    "cannot": "can't",
-    "will not": "won't",
-    "is not": "isn't",
-    "are not": "aren't",
-    "I am": "I'm",
-    "we are": "we're",
-    "they are": "they're",
-    "it is": "it's",
-    "would not": "wouldn't",
-    "should not": "shouldn't",
-    "could not": "couldn't",
-    "has not": "hasn't",
-    "have not": "haven't",
-    "did not": "didn't",
-    "was not": "wasn't",
-    "were not": "weren't",
-}
-
-
-def _add_issue_noise(text: str) -> str:
-    """Inject human-like variance into generated issue text.
-
-    Stochastic post-processor that makes LLM-generated issues less
-    formulaic by mimicking real developer writing patterns.
-    """
-    lines = text.split('\n')
-    result: list[str] = []
-
-    # Strip markdown headers with 25% probability each
-    for line in lines:
-        if line.strip().startswith('## ') and random.random() < 0.25:
-            continue
-        if line.strip().startswith('# ') and random.random() < 0.25:
-            continue
-        result.append(line)
-
-    text = '\n'.join(result)
-
-    # Add personal opener at 40% probability
-    if random.random() < 0.40:
-        lines = text.split('\n')
-        first_content_idx = 0
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            if stripped and not stripped.startswith('#') and not stripped.startswith('```'):
-                first_content_idx = i
-                break
-        opener = random.choice(_PERSONAL_OPENERS)
-        first_line = lines[first_content_idx]
-        if first_line.strip():
-            lowered = first_line.strip()
-            lowered = lowered[0].lower() + lowered[1:] if lowered else lowered
-            lines[first_content_idx] = opener + lowered
-        text = '\n'.join(lines)
-
-    # Apply contractions naturally (30% chance per occurrence)
-    for full_form, contraction in _CONTRACTION_MAP.items():
-        if full_form in text and random.random() < 0.30:
-            text = text.replace(full_form, contraction, 1)
-
-    # Vary trailing punctuation
-    lines = text.split('\n')
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if not stripped or stripped.startswith('```') or stripped.startswith('#'):
-            continue
-        # Add trailing ellipsis occasionally (5%)
-        if stripped.endswith('.') and random.random() < 0.05:
-            lines[i] = line.rstrip()[:-1] + '...'
-        # Remove trailing period occasionally (15%) — real devs often skip them
-        elif stripped.endswith('.') and not stripped.endswith('...') and random.random() < 0.15:
-            lines[i] = line.rstrip()[:-1]
-
-    return '\n'.join(lines)
-
-
 def _truncate_issue(text: str) -> str:
     """Keep only the first paragraph and first code block."""
     lines = text.split('\n')
@@ -3689,11 +3596,7 @@ async def _generate_test_patch_existing(
     model: str,
     test_output: str | None = None,
 ) -> str | None:
-    """Generate a test patch by adding a new test function to an existing file.
-
-    Primary path: create a standalone test function (matches real PR patterns).
-    Fallback: append assertions into an existing test function body.
-    """
+    """Generate a test patch by adding tests to an existing test file."""
     try:
         original_test_content = (Path(repo_path) / test_file).read_text(
             encoding="utf-8", errors="replace",
@@ -3705,57 +3608,49 @@ async def _generate_test_patch_existing(
     if language not in ("python", "go", "rust", "java"):
         return None
 
-    file_imports = _extract_file_imports(original_test_content, language)
-
-    # Primary path: add a new standalone test function (real PRs add new tests)
-    result = await _generate_new_test_in_existing_file(
-        bug_spec, repo_path, test_file, original_test_content,
-        language, model, file_imports, test_output,
-    )
-    if result:
-        return result
-
-    logger.info("  New test function failed — falling back to assertion append")
-
-    # Fallback: append assertions into an existing test function
-    return await _append_assertions_to_existing_test(
-        bug_spec, repo_path, test_file, original_test_content,
-        language, model, file_imports, test_output,
-    )
-
-
-async def _append_assertions_to_existing_test(
-    bug_spec: BugSpec,
-    repo_path: str,
-    test_file: str,
-    original_test_content: str,
-    language: str,
-    model: str,
-    file_imports: str,
-    test_output: str | None = None,
-) -> str | None:
-    """Fallback: append assertions into an existing test function body."""
     test_functions = _extract_test_functions(original_test_content, language)
     if not test_functions:
-        return None
+        logger.warning("  No test functions found in %s — falling back to new test function", test_file)
+        file_imports = _extract_file_imports(original_test_content, language)
+        return await _generate_new_test_in_existing_file(
+            bug_spec, repo_path, test_file, original_test_content,
+            language, model, file_imports, test_output,
+        )
 
     ranked = _rank_test_functions(test_functions, bug_spec)
     if not ranked:
-        return None
+        logger.warning(
+            "  No relevant test functions found for %s — falling back to new test function",
+            bug_spec.function_name,
+        )
+        file_imports = _extract_file_imports(original_test_content, language)
+        return await _generate_new_test_in_existing_file(
+            bug_spec, repo_path, test_file, original_test_content,
+            language, model, file_imports, test_output,
+        )
 
     if test_output:
         ranked = _boost_failing_tests(ranked, test_output, test_functions, bug_spec)
 
+    file_imports = _extract_file_imports(original_test_content, language)
     resolved_model = MODEL_MAP.get(model, model)
     options = ClaudeCodeOptions(max_turns=1, model=resolved_model)
 
     best_score = _rank_test_functions_score(ranked[0], bug_spec) if ranked else 0
     if best_score == 0:
-        return None
+        logger.warning(
+            "  Best test score is 0 for %s — falling back to new test function",
+            bug_spec.function_name,
+        )
+        return await _generate_new_test_in_existing_file(
+            bug_spec, repo_path, test_file, original_test_content,
+            language, model, file_imports, test_output,
+        )
 
     for attempt, target in enumerate(ranked):
         target_source = str(target["source"])
 
+        # Extract the actual function signature line from source
         source_lines = target_source.strip().splitlines()
         func_sig_line = source_lines[0].rstrip() if source_lines else str(target["name"])
 
@@ -3839,6 +3734,7 @@ Requirements:
             )
             continue
 
+        # Re-indent LLM output to match the original function's indentation
         orig_lines = target_source.splitlines(keepends=True)
         mod_lines = modified_func.splitlines(keepends=True)
         if orig_lines and mod_lines:
@@ -3875,7 +3771,7 @@ Requirements:
 
         return generate_patch(modified_content, original_test_content, test_file)
 
-    logger.warning("  All %d assertion-append attempts failed", len(ranked))
+    logger.warning("  All %d test function attempts failed", len(ranked))
     return None
 
 
@@ -5032,7 +4928,6 @@ async def synthesize_repo(
             repo_name=Path(repo_path).name,
             language=language,
         )
-        problem_statement = _add_issue_noise(problem_statement)
 
         test_patch = ''.join(test_patch_parts)
 
