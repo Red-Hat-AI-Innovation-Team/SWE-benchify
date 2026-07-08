@@ -2904,6 +2904,196 @@ def _truncate_issue(text: str) -> str:
     return result
 
 
+_PERSONAL_OPENERS = [
+    'I noticed this when ',
+    'Hit this today — ',
+    'We ran into ',
+    'Saw this pop up while ',
+    'Ran into this after ',
+    'Just hit ',
+    'Stumbled on this — ',
+    'This bit us when ',
+    'Found this while ',
+    'Was debugging something else and noticed ',
+]
+
+_CONTRACTIONS: list[tuple[str, str]] = [
+    ('does not', "doesn't"),
+    ('do not', "don't"),
+    ('can not', "can't"),
+    ('cannot', "can't"),
+    ('will not', "won't"),
+    ('is not', "isn't"),
+    ('are not', "aren't"),
+    ('was not', "wasn't"),
+    ('should not', "shouldn't"),
+    ('would not', "wouldn't"),
+    ('could not', "couldn't"),
+    ('have not', "haven't"),
+    ('has not', "hasn't"),
+    ('did not', "didn't"),
+    ('it is', "it's"),
+    ('that is', "that's"),
+    ('there is', "there's"),
+    ('I am', "I'm"),
+    ('we are', "we're"),
+    ('they are', "they're"),
+]
+
+_ELLIPSIS_PHRASES = [
+    'not sure why',
+    'not sure if',
+    'might be related',
+    'seems like',
+    'looks like',
+    'could be',
+    'hard to tell',
+]
+
+_FILLER_SENTENCES = [
+    'Let me know if you need more info.',
+    'Happy to provide more details.',
+    'Not blocking but would be good to fix.',
+    'Reproducible on my end at least.',
+    'Saw this on a clean checkout too.',
+    'Not sure how long this has been broken.',
+    'This might affect other callers too.',
+    'Would be great to get a fix for this soon.',
+    'Spent a while debugging this one.',
+    'Took me a bit to narrow it down.',
+]
+
+
+def _add_issue_noise(text: str) -> str:
+    """Inject stochastic human-like variance into generated issue text.
+
+    Operates on the final issue string AFTER generation. Designed to
+    increase issue_length_cv by varying length: short issues get padding,
+    long issues get trimming, and all issues get random stylistic noise.
+    """
+    if not text or not text.strip():
+        return text
+
+    lines = text.split('\n')
+    result_lines: list[str] = []
+    in_code_block = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        if stripped.startswith('```'):
+            in_code_block = not in_code_block
+            result_lines.append(line)
+            continue
+
+        if in_code_block:
+            result_lines.append(line)
+            continue
+
+        if stripped.startswith('## ') or stripped.startswith('### '):
+            if random.random() < 0.25:
+                continue
+            result_lines.append(line)
+            continue
+
+        result_lines.append(line)
+
+    result = '\n'.join(result_lines)
+
+    if random.random() < 0.30:
+        for orig, contracted in _CONTRACTIONS:
+            if orig in result:
+                result = result.replace(orig, contracted, 1)
+                break
+            orig_lower = orig.lower()
+            if orig_lower in result.lower():
+                idx = result.lower().find(orig_lower)
+                result = result[:idx] + contracted + result[idx + len(orig):]
+                break
+
+    content_len = len(result.strip())
+
+    if random.random() < 0.40:
+        opener = random.choice(_PERSONAL_OPENERS)
+        first_content_idx = 0
+        r_lines = result.split('\n')
+        for i, line in enumerate(r_lines):
+            s = line.strip()
+            if s and not s.startswith('```') and not s.startswith('## '):
+                first_content_idx = i
+                break
+        first_line = r_lines[first_content_idx]
+        first_char = ''
+        for ch in first_line:
+            if ch.isalpha():
+                first_char = ch
+                break
+        if first_char and first_char.isupper():
+            char_idx = first_line.index(first_char)
+            r_lines[first_content_idx] = (
+                first_line[:char_idx]
+                + opener
+                + first_char.lower()
+                + first_line[char_idx + 1:]
+            )
+        else:
+            r_lines.insert(first_content_idx, opener.rstrip(' —'))
+        result = '\n'.join(r_lines)
+
+    if random.random() < 0.20:
+        r_lines = result.split('\n')
+        for i in range(len(r_lines) - 1, -1, -1):
+            s = r_lines[i].strip()
+            if s and not s.startswith('```') and s.endswith('.'):
+                for phrase in _ELLIPSIS_PHRASES:
+                    if phrase in s.lower():
+                        r_lines[i] = r_lines[i].rstrip()[:-1] + '...'
+                        break
+                else:
+                    if random.random() < 0.3:
+                        r_lines[i] = r_lines[i].rstrip()[:-1] + '...'
+                break
+        result = '\n'.join(r_lines)
+
+    if random.random() < 0.15:
+        r_lines = result.split('\n')
+        in_cb = False
+        for i in range(len(r_lines)):
+            if r_lines[i].strip().startswith('```'):
+                in_cb = not in_cb
+                continue
+            if in_cb:
+                continue
+            s = r_lines[i].strip()
+            if s and s.endswith('.') and not s.endswith('...') and len(s) > 20:
+                r_lines[i] = r_lines[i].rstrip()[:-1]
+                break
+        result = '\n'.join(r_lines)
+
+    if content_len < 200 and random.random() < 0.50:
+        filler = random.choice(_FILLER_SENTENCES)
+        result = result.rstrip() + '\n\n' + filler
+
+    if content_len > 800 and random.random() < 0.40:
+        r_lines = result.split('\n')
+        non_empty_non_code = []
+        in_cb = False
+        for i, line in enumerate(r_lines):
+            if line.strip().startswith('```'):
+                in_cb = not in_cb
+                continue
+            if not in_cb and line.strip() and not line.strip().startswith('##'):
+                non_empty_non_code.append(i)
+        if len(non_empty_non_code) > 4:
+            to_remove = random.choice(non_empty_non_code[2:-1])
+            r_lines.pop(to_remove)
+            result = '\n'.join(r_lines)
+
+    result = re.sub(r'\n{4,}', '\n\n\n', result)
+
+    return result
+
+
 async def generate_issue_description(
     bug_spec: BugSpec,
     test_output: str | None = None,
@@ -4928,6 +5118,7 @@ async def synthesize_repo(
             repo_name=Path(repo_path).name,
             language=language,
         )
+        problem_statement = _add_issue_noise(problem_statement)
 
         test_patch = ''.join(test_patch_parts)
 

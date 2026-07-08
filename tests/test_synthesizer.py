@@ -13,6 +13,7 @@ from swebenchify.synthesizer import (
     BugSpec,
     RepoSynthesisResult,
     SynthesisResult,
+    _add_issue_noise,
     _align_indentation,
     _analyze_test_assertions,
     _BraceCounter,
@@ -4423,3 +4424,101 @@ class TestTryTargetedMutation:
     def test_returns_none_for_non_python(self, tmp_path: Path) -> None:
         result = _try_targeted_mutation(str(tmp_path), {}, "test.go", "go")
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _add_issue_noise
+# ---------------------------------------------------------------------------
+
+
+class TestAddIssueNoise:
+    def test_empty_input(self) -> None:
+        assert _add_issue_noise("") == ""
+        assert _add_issue_noise("   ") == "   "
+
+    def test_preserves_code_blocks(self) -> None:
+        text = "Some text\n\n```\nerror output\n```\n\nMore text"
+        import random
+        random.seed(42)
+        result = _add_issue_noise(text)
+        assert "```\nerror output\n```" in result
+
+    def test_header_removal_with_seed(self) -> None:
+        text = "## Summary\nSome text\n### Details\nMore text\nFinal line"
+        import random
+        removed_count = 0
+        for seed in range(100):
+            random.seed(seed)
+            result = _add_issue_noise(text)
+            if "## Summary" not in result or "### Details" not in result:
+                removed_count += 1
+        assert removed_count > 0, "Headers should sometimes be removed"
+        assert removed_count < 100, "Headers should not always be removed"
+
+    def test_contraction_application(self) -> None:
+        text = "It does not work. This is not expected. The test can not pass."
+        import random
+        contracted = 0
+        for seed in range(100):
+            random.seed(seed)
+            result = _add_issue_noise(text)
+            if "doesn't" in result or "isn't" in result or "can't" in result:
+                contracted += 1
+        assert contracted > 0, "Contractions should sometimes be applied"
+
+    def test_personal_opener_injection(self) -> None:
+        text = "Test failure in TestFoo.\n\nGetting unexpected results."
+        import random
+        opener_found = 0
+        for seed in range(100):
+            random.seed(seed)
+            result = _add_issue_noise(text)
+            if any(
+                opener.rstrip(' —').rstrip() in result
+                for opener in [
+                    'I noticed this when',
+                    'Hit this today',
+                    'We ran into',
+                    'Saw this pop up while',
+                    'Ran into this after',
+                    'Just hit',
+                    'Stumbled on this',
+                    'This bit us when',
+                    'Found this while',
+                    'Was debugging something else',
+                ]
+            ):
+                opener_found += 1
+        assert opener_found > 0, "Personal openers should sometimes be injected"
+
+    def test_length_variation_increases_cv(self) -> None:
+        base_texts = [
+            "Test failure in module A.\n\nGetting wrong results.\n\n```\nFAILED test_a\n```",
+            "## Bug Report\nSomething broke.\n\n```\nAssertionError\n```\n\nNot sure what changed.",
+            "CI started failing.\n\n```\npanic: runtime error\n```",
+            "Getting unexpected test failures.\n\n```\nFAIL TestFoo\n```\n\nThis was working before.",
+            "Build is red on main.\n\n```\nerror: cannot use\n```\n\nLooks like a regression.",
+        ]
+        import random
+        import statistics
+
+        noisy_lengths: list[int] = []
+        for seed in range(50):
+            for text in base_texts:
+                random.seed(seed)
+                noisy = _add_issue_noise(text)
+                noisy_lengths.append(len(noisy))
+
+        noisy_mean = statistics.mean(noisy_lengths)
+        noisy_stdev = statistics.stdev(noisy_lengths)
+        noisy_cv = noisy_stdev / noisy_mean if noisy_mean > 0 else 0
+
+        assert noisy_cv > 0, "Noisy output should have non-zero length variation"
+
+    def test_does_not_corrupt_code_blocks(self) -> None:
+        text = "Broken.\n\n```go\nfunc main() {\n\tfmt.Println(\"hello\")\n}\n```\n\nPlease fix."
+        import random
+        for seed in range(20):
+            random.seed(seed)
+            result = _add_issue_noise(text)
+            assert 'fmt.Println("hello")' in result
