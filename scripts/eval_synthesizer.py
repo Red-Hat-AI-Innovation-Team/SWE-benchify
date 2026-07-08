@@ -46,11 +46,11 @@ DATASET_PATHS = [
 
 EVAL_TARGETS = [
     {
-        "repo_slug": "pallets/click",
-        "repo_url": "https://github.com/pallets/click.git",
-        "repo_path": "/tmp/click-synth-test",
+        "repo_slug": "more-itertools/more-itertools",
+        "repo_url": "https://github.com/more-itertools/more-itertools.git",
+        "repo_path": "/tmp/more-itertools-synth-test",
         "language": "python",
-        "base_commit": "16fc00e2f4a2717a521084f193709a6058afc693",
+        "base_commit": "d82024d025ec48f1197f92d5b66560a537a78184",
         "n_synthetic": 5,
         "n_real": 3,
     },
