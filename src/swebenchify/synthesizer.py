@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -711,6 +712,508 @@ def _extract_test_context(
     # Cap at ~150 lines to avoid bloating the prompt
     snippet = "\n".join(snippet_lines[:150])
     return f"\n\nEXISTING TESTS (from `{test_file}`) that exercise `{function_name}`:\n```{language}\n{snippet}\n```\n"
+
+
+# ---------------------------------------------------------------------------
+# H10: Targeted mutation — analyze test assertions and craft breaking mutations
+# ---------------------------------------------------------------------------
+
+_BUILTINS_SET = frozenset({
+    'len', 'str', 'int', 'float', 'list', 'dict', 'set', 'tuple',
+    'type', 'isinstance', 'issubclass', 'print', 'range', 'sorted',
+    'reversed', 'enumerate', 'zip', 'map', 'filter', 'any', 'all',
+    'min', 'max', 'sum', 'abs', 'round', 'repr', 'bool', 'bytes',
+    'ord', 'chr', 'hex', 'oct', 'bin', 'hash', 'id', 'format',
+})
+
+
+def _extract_called_func(expr: str) -> str | None:
+    """Extract the non-builtin function/method name being called in an expression.
+
+    Given an expression like ``calculate(x, y)`` or ``obj.process(data)``,
+    returns the function name (``calculate`` or ``process``).  Builtins
+    such as ``len`` or ``str`` are skipped in favour of the first
+    non-builtin call found.
+    """
+    calls = re.findall(r'(?:[\w.]+\.)?(\w+)\s*\(', expr)
+    for name in calls:
+        if name not in _BUILTINS_SET:
+            return name
+    return calls[0] if calls else None
+
+
+def _parse_assertion_line(
+    stripped: str, all_lines: list[str], idx: int,
+) -> dict | None:
+    """Parse a single assertion line into structured info.
+
+    Returns a dict with keys *type*, *expression*, *expected*,
+    *called_function*, and *line*, or ``None`` if the line is not a
+    recognisable assertion.
+    """
+    # self.assertEqual / assertEquals / assertAlmostEqual
+    m = re.match(
+        r'self\.assert(?:Equal|Equals|AlmostEqual)\s*\(\s*(.+?)\s*,\s*(.+)\s*\)\s*$',
+        stripped,
+    )
+    if m:
+        expr = m.group(1).strip()
+        expected = m.group(2).strip().rstrip(')')
+        return {
+            'type': 'equality', 'expression': expr, 'expected': expected,
+            'called_function': _extract_called_func(expr) or _extract_called_func(expected),
+            'line': idx + 1,
+        }
+
+    # self.assertRaises(ExcType, func, ...)
+    m = re.match(r'self\.assertRaises\s*\(\s*(\w+)\s*,\s*([\w.]+)', stripped)
+    if m:
+        return {
+            'type': 'raises', 'expression': m.group(2),
+            'expected': m.group(1),
+            'called_function': m.group(2).split('.')[-1],
+            'line': idx + 1,
+        }
+
+    # self.assertIn(val, expr)
+    m = re.match(
+        r'self\.assertIn\s*\(\s*(.+?)\s*,\s*(.+)\s*\)\s*$', stripped,
+    )
+    if m:
+        collection = m.group(2).strip().rstrip(')')
+        return {
+            'type': 'in', 'expression': collection,
+            'expected': m.group(1).strip(),
+            'called_function': _extract_called_func(collection),
+            'line': idx + 1,
+        }
+
+    # self.assertTrue / self.assertFalse
+    for method, atype in [('assertTrue', 'truthy'), ('assertFalse', 'falsy')]:
+        m = re.match(rf'self\.{method}\s*\(\s*(.+?)\s*\)\s*$', stripped)
+        if m:
+            expr = m.group(1).strip()
+            return {
+                'type': atype, 'expression': expr,
+                'expected': 'True' if atype == 'truthy' else 'False',
+                'called_function': _extract_called_func(expr),
+                'line': idx + 1,
+            }
+
+    # self.assertIsNone / assertIsNotNone
+    m = re.match(r'self\.assertIsNone\s*\(\s*(.+?)\s*\)\s*$', stripped)
+    if m:
+        expr = m.group(1).strip()
+        return {
+            'type': 'is_none', 'expression': expr, 'expected': 'None',
+            'called_function': _extract_called_func(expr),
+            'line': idx + 1,
+        }
+    m = re.match(r'self\.assertIsNotNone\s*\(\s*(.+?)\s*\)\s*$', stripped)
+    if m:
+        expr = m.group(1).strip()
+        return {
+            'type': 'not_none', 'expression': expr, 'expected': 'not None',
+            'called_function': _extract_called_func(expr),
+            'line': idx + 1,
+        }
+
+    # with pytest.raises(ExcType):
+    m = re.match(r'with\s+pytest\.raises\s*\(\s*(\w+)', stripped)
+    if m:
+        next_func = None
+        for j in range(idx + 1, min(idx + 5, len(all_lines))):
+            nline = all_lines[j].strip()
+            if nline and not nline.startswith('#'):
+                next_func = _extract_called_func(nline)
+                if next_func:
+                    break
+        return {
+            'type': 'raises', 'expression': '', 'expected': m.group(1),
+            'called_function': next_func, 'line': idx + 1,
+        }
+
+    # assert expr == value
+    m = re.match(r'assert\s+(.+?)\s*==\s*(.+?)$', stripped)
+    if m:
+        expr = m.group(1).strip()
+        return {
+            'type': 'equality', 'expression': expr,
+            'expected': m.group(2).strip(),
+            'called_function': _extract_called_func(expr),
+            'line': idx + 1,
+        }
+
+    # assert expr != value
+    m = re.match(r'assert\s+(.+?)\s*!=\s*(.+?)$', stripped)
+    if m:
+        expr = m.group(1).strip()
+        return {
+            'type': 'inequality', 'expression': expr,
+            'expected': m.group(2).strip(),
+            'called_function': _extract_called_func(expr),
+            'line': idx + 1,
+        }
+
+    # assert expr is None
+    m = re.match(r'assert\s+(.+?)\s+is\s+None\s*$', stripped)
+    if m:
+        expr = m.group(1).strip()
+        return {
+            'type': 'is_none', 'expression': expr, 'expected': 'None',
+            'called_function': _extract_called_func(expr),
+            'line': idx + 1,
+        }
+
+    # assert expr is not None
+    m = re.match(r'assert\s+(.+?)\s+is\s+not\s+None\s*$', stripped)
+    if m:
+        expr = m.group(1).strip()
+        return {
+            'type': 'not_none', 'expression': expr, 'expected': 'not None',
+            'called_function': _extract_called_func(expr),
+            'line': idx + 1,
+        }
+
+    # assert expr in collection (but not 'assert x not in y')
+    if ' not in ' not in stripped:
+        m = re.match(r'assert\s+(.+?)\s+in\s+(.+?)$', stripped)
+        if m:
+            collection = m.group(2).strip()
+            return {
+                'type': 'in', 'expression': collection,
+                'expected': m.group(1).strip(),
+                'called_function': _extract_called_func(collection),
+                'line': idx + 1,
+            }
+
+    # assert not expr
+    m = re.match(r'assert\s+not\s+(.+?)$', stripped)
+    if m:
+        expr = m.group(1).strip()
+        return {
+            'type': 'falsy', 'expression': expr, 'expected': 'False',
+            'called_function': _extract_called_func(expr),
+            'line': idx + 1,
+        }
+
+    # Generic assert expr (truthy) — only when no more specific pattern matched
+    m = re.match(r'assert\s+(.+?)$', stripped)
+    if m:
+        expr = m.group(1).strip()
+        if ('==' not in expr and '!=' not in expr
+                and ' is ' not in expr and ' in ' not in expr
+                and ' not ' not in expr):
+            return {
+                'type': 'truthy', 'expression': expr, 'expected': 'True',
+                'called_function': _extract_called_func(expr),
+                'line': idx + 1,
+            }
+
+    return None
+
+
+def _analyze_test_assertions(
+    test_source: str, language: str,
+) -> list[dict]:
+    """Extract assertions from test files.
+
+    For Python: finds ``assert``, ``assertEqual``, ``assertRaises``,
+    ``assertIn``, ``pytest.raises`` patterns and extracts what is
+    being asserted.
+
+    Args:
+        test_source: Full source code of the test file.
+        language: Programming language (only ``'python'`` supported).
+
+    Returns:
+        List of dicts with keys: *type* (``'equality'``,
+        ``'raises'``, ``'truthy'``, ``'in'``, ``'is_none'``,
+        ``'not_none'``, ``'falsy'``, ``'inequality'``), *expression*,
+        *expected*, *called_function*, and *line*.
+    """
+    if language != "python":
+        return []
+
+    assertions: list[dict] = []
+    lines = test_source.splitlines()
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not any(kw in stripped for kw in ('assert', 'Assert', 'raises')):
+            continue
+        info = _parse_assertion_line(stripped, lines, i)
+        if info:
+            assertions.append(info)
+
+    return assertions
+
+
+_OPERATOR_SWAPS: list[tuple[str, str]] = [
+    (' + ', ' - '),
+    (' - ', ' + '),
+    (' * ', ' + '),
+    (' // ', ' % '),
+    (' >= ', ' > '),
+    (' <= ', ' < '),
+    (' > ', ' >= '),
+    (' < ', ' <= '),
+    (' == ', ' != '),
+    (' != ', ' == '),
+    (' and ', ' or '),
+    (' or ', ' and '),
+]
+
+
+def _mutate_remove_raise(
+    lines: list[str], exc_type: str,
+) -> tuple[str, str] | None:
+    """Remove or bypass a ``raise`` statement to break an assertRaises test.
+
+    When the raise is guarded by an ``if``, inverts the condition so
+    the error fires for the *wrong* inputs — a realistic refactoring
+    mistake.
+    """
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith('raise '):
+            continue
+        if exc_type and exc_type not in stripped:
+            continue
+
+        # If guarded by an if-clause, invert the condition
+        if i > 0 and lines[i - 1].strip().startswith('if '):
+            guard = lines[i - 1]
+            guard_stripped = guard.strip()
+            if ' not ' in guard_stripped:
+                inverted = guard.replace(' not ', ' ', 1)
+            else:
+                inverted = guard.replace('if ', 'if not ', 1)
+            if inverted != guard:
+                return (guard, inverted)
+
+        # Stand-alone raise: replace with pass
+        indent = len(line) - len(line.lstrip())
+        return (line, ' ' * indent + 'pass')
+
+    return None
+
+
+def _mutate_swap_operator(lines: list[str]) -> tuple[str, str] | None:
+    """Swap a binary/comparison operator, prioritising return statements.
+
+    Skips definition lines, decorators, docstrings, and comments.
+    """
+    # First pass: return statements
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith('return '):
+            continue
+        for orig_op, new_op in _OPERATOR_SWAPS:
+            if orig_op in line:
+                mutated = line.replace(orig_op, new_op, 1)
+                if mutated != line:
+                    return (line, mutated)
+
+    # Second pass: assignment / computation lines
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(('def ', '@', '#', '"""', "'''", 'class ', 'return ')):
+            continue
+        if not stripped:
+            continue
+        for orig_op, new_op in _OPERATOR_SWAPS:
+            if orig_op in line:
+                mutated = line.replace(orig_op, new_op, 1)
+                if mutated != line:
+                    return (line, mutated)
+
+    return None
+
+
+def _mutate_return_none(lines: list[str]) -> tuple[str, str] | None:
+    """Change the last non-None return to ``return None``."""
+    for i in range(len(lines) - 1, -1, -1):
+        stripped = lines[i].strip()
+        if stripped.startswith('return ') and stripped != 'return None':
+            indent = len(lines[i]) - len(lines[i].lstrip())
+            return (lines[i], ' ' * indent + 'return None')
+    return None
+
+
+def _mutate_return_non_none(lines: list[str]) -> tuple[str, str] | None:
+    """Change a ``return None`` / bare ``return`` to ``return 0``."""
+    for i in range(len(lines) - 1, -1, -1):
+        stripped = lines[i].strip()
+        if stripped in ('return None', 'return'):
+            indent = len(lines[i]) - len(lines[i].lstrip())
+            return (lines[i], ' ' * indent + 'return 0')
+    return None
+
+
+def _targeted_mutation(
+    source: str, assertion_info: dict, language: str,
+) -> tuple[str, str] | None:
+    """Generate a mutation designed to break a specific assertion.
+
+    Given a source function and an assertion that exercises it,
+    finds a specific code location to mutate that will violate
+    the assertion.  The mutation is deterministic (no LLM call)
+    and designed to look like a realistic developer mistake.
+
+    Args:
+        source: Complete source of the function under test.
+        assertion_info: Dict from :func:`_analyze_test_assertions`.
+        language: Programming language (only ``'python'`` supported).
+
+    Returns:
+        ``(original_snippet, mutated_snippet)`` where replacing
+        *original_snippet* in *source* with *mutated_snippet*
+        produces the buggy function.  ``None`` if no viable
+        mutation is found.
+    """
+    if language != "python":
+        return None
+
+    assertion_type = assertion_info['type']
+    lines = source.splitlines()
+
+    # Strategy 1: For 'raises' assertions, remove/invert the raise guard
+    if assertion_type == 'raises':
+        result = _mutate_remove_raise(lines, assertion_info.get('expected', ''))
+        if result:
+            return result
+
+    # Strategy 2: For value-checking assertions, swap operators
+    if assertion_type in ('equality', 'inequality', 'truthy', 'falsy', 'in'):
+        result = _mutate_swap_operator(lines)
+        if result:
+            return result
+
+    # Strategy 3: For None checks, alter return statements
+    if assertion_type == 'is_none':
+        result = _mutate_return_non_none(lines)
+        if result:
+            return result
+    elif assertion_type == 'not_none':
+        result = _mutate_return_none(lines)
+        if result:
+            return result
+
+    # Strategy 4: Last resort — swap any operator
+    result = _mutate_swap_operator(lines)
+    if result:
+        return result
+
+    return None
+
+
+def _describe_targeted_mutation(
+    original: str, mutated: str, assertion: dict,
+) -> str:
+    """Generate a realistic bug description for a targeted mutation."""
+    orig_s = original.strip()
+    mut_s = mutated.strip()
+
+    # Detect operator swap
+    for orig_op, new_op in _OPERATOR_SWAPS:
+        if orig_op in original and new_op in mutated:
+            return (
+                f"Changed '{orig_op.strip()}' to '{new_op.strip()}' in "
+                f"computation, producing wrong results for certain inputs"
+            )
+
+    # Detect condition inversion
+    if ' not ' in mut_s and ' not ' not in orig_s:
+        return "Inverted guard condition, causing validation to trigger for wrong inputs"
+    if ' not ' in orig_s and ' not ' not in mut_s:
+        return "Removed negation from condition, skipping important validation"
+
+    # Detect raise removal
+    if 'raise ' in orig_s and 'raise ' not in mut_s:
+        return "Removed error handling, allowing invalid state to propagate silently"
+
+    # Detect return value change
+    if 'return None' in mut_s and 'return None' not in orig_s:
+        return "Changed return value to None, breaking callers that expect a value"
+    if 'return None' not in mut_s and ('return None' in orig_s or orig_s == 'return'):
+        return "Changed None return to a value, breaking callers that check for None"
+
+    return "Subtle logic change affecting function output under certain inputs"
+
+
+def _try_targeted_mutation(
+    repo_path: str,
+    target: dict,
+    test_file: str,
+    language: str,
+) -> BugSpec | None:
+    """Try to generate a targeted mutation based on test assertion analysis.
+
+    Reads the test file, extracts assertions, identifies ones that
+    exercise the target function, and crafts a minimal mutation
+    designed to break those assertions.  No LLM call is needed.
+
+    Returns a :class:`BugSpec` if successful, ``None`` otherwise.
+    """
+    if language != "python":
+        return None
+
+    root = Path(repo_path)
+    test_path = root / test_file
+    try:
+        test_source = test_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    assertions = _analyze_test_assertions(test_source, language)
+    if not assertions:
+        return None
+
+    func_name = target["function_name"]
+    source = target["source"]
+
+    # Filter to assertions relevant to this function
+    relevant = [
+        a for a in assertions
+        if (a.get('called_function') == func_name
+            or func_name in a.get('expression', ''))
+    ]
+    if not relevant:
+        return None
+
+    # Try each relevant assertion until we find a working mutation
+    for assertion in relevant:
+        result = _targeted_mutation(source, assertion, language)
+        if result is None:
+            continue
+
+        orig_snippet, mutated_snippet = result
+        mutated_func = source.replace(orig_snippet, mutated_snippet, 1)
+
+        if mutated_func == source:
+            continue
+
+        # Validate the mutation parses (dedent for class methods)
+        if not _validate_mutation_parses(
+            textwrap.dedent(mutated_func), language,
+        ):
+            continue
+
+        desc = _describe_targeted_mutation(
+            orig_snippet, mutated_snippet, assertion,
+        )
+
+        return BugSpec(
+            file=target["file"],
+            function_name=func_name,
+            original_code=source,
+            buggy_code=mutated_func,
+            bug_description=desc,
+            bug_category="targeted-mutation",
+        )
+
+    return None
 
 
 async def _plan_multi_file_mutation(
@@ -4136,16 +4639,46 @@ async def synthesize_repo(
         if bug_plan:
             logger.info("  Multi-file plan: %s", bug_plan.primary_description[:80])
 
-        # H2: retry introduce_bug up to 2 times if patch is too simple
+        # H10: Try targeted mutation for Python (higher data-first pass rate)
         bug_spec = None
         patch = ""
         mutated_content = ""
         original_content = ""
+        if language == "python":
+            _tfile = _find_existing_test_file(repo_path, target["file"], language)
+            if _tfile:
+                _tspec = _try_targeted_mutation(repo_path, target, _tfile, language)
+                if _tspec:
+                    try:
+                        _torig = (Path(repo_path) / _tspec.file).read_text(
+                            encoding="utf-8", errors="replace",
+                        )
+                        _tmut = _torig.replace(
+                            _tspec.original_code, _tspec.buggy_code, 1,
+                        )
+                        if (_tmut != _torig
+                                and _validate_mutation_parses(_tmut, language)):
+                            _tmut = _normalize_test_whitespace(_tmut, _torig)
+                            _tpatch = generate_patch(_torig, _tmut, _tspec.file)
+                            if _tpatch.strip():
+                                bug_spec = _tspec
+                                patch = _tpatch
+                                mutated_content = _tmut
+                                original_content = _torig
+                                logger.info(
+                                    "  Targeted mutation: %s",
+                                    _tspec.bug_description[:80],
+                                )
+                    except OSError:
+                        pass
+
+        # H2: Fall back to LLM introduce_bug (retry up to 2 times if patch too simple)
         for attempt in range(3):
-            bug_spec = await introduce_bug(
-                target, model=model, related_files=related_files,
-                bug_plan=bug_plan, test_context=test_context,
-            )
+            if bug_spec is None:
+                bug_spec = await introduce_bug(
+                    target, model=model, related_files=related_files,
+                    bug_plan=bug_plan, test_context=test_context,
+                )
             if bug_spec is None:
                 logger.warning("  Skipped — LLM did not produce a valid mutation")
                 break

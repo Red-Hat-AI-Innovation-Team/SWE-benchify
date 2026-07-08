@@ -10,6 +10,7 @@ import pytest
 
 from swebenchify.synthesizer import (
     _align_indentation,
+    _analyze_test_assertions,
     _preserve_unchanged_lines,
     _BraceCounter,
     BugPlan,
@@ -20,10 +21,12 @@ from swebenchify.synthesizer import (
     _collect_repo_context,
     _count_changed_lines,
     _count_test_functions,
+    _describe_targeted_mutation,
     _discover_repo_modules,
     _edge_case_score,
     _enforce_banned_openers,
     _extract_brace_language_functions,
+    _extract_called_func,
     _extract_failed_test_names,
     _find_existing_test_file,
     _find_file_commits,
@@ -36,6 +39,10 @@ from swebenchify.synthesizer import (
     _load_dataset_examples,
     _mine_issue_style_examples,
     _mine_social_artifacts,
+    _mutate_remove_raise,
+    _mutate_return_none,
+    _mutate_return_non_none,
+    _mutate_swap_operator,
     _normalize_test_whitespace,
     _parse_bug_response,
     _parse_incidental_changes,
@@ -46,7 +53,9 @@ from swebenchify.synthesizer import (
     _source_to_module_name,
     _strip_strategy_labels,
     _strip_issue_shas,
+    _targeted_mutation,
     _truncate_issue,
+    _try_targeted_mutation,
     _validate_mutation_parses,
     _validate_rst_references,
     _validate_test_code,
@@ -3920,3 +3929,453 @@ def test_humanize_traceback_handles_var_folders(tmp_path: Path) -> None:
     result = _humanize_traceback(test_output, str(tmp_path))
     assert "/var/folders/" not in result
     assert "/home/" in result
+
+
+# ---------------------------------------------------------------------------
+# H10: Targeted mutation — test assertion analysis & mutation
+# ---------------------------------------------------------------------------
+
+
+class TestExtractCalledFunc:
+    """Tests for _extract_called_func."""
+
+    def test_simple_call(self) -> None:
+        assert _extract_called_func("calculate(x, y)") == "calculate"
+
+    def test_method_call(self) -> None:
+        assert _extract_called_func("obj.process(data)") == "process"
+
+    def test_builtin_skipped(self) -> None:
+        assert _extract_called_func("len(items)") == "len"
+
+    def test_builtin_then_custom(self) -> None:
+        assert _extract_called_func("len(get_items())") == "get_items"
+
+    def test_no_call(self) -> None:
+        assert _extract_called_func("x + y") is None
+
+
+class TestAnalyzeTestAssertions:
+    """Tests for _analyze_test_assertions."""
+
+    def test_assert_equal(self) -> None:
+        src = "def test_add():\n    assert add(2, 3) == 5\n"
+        result = _analyze_test_assertions(src, "python")
+        assert len(result) == 1
+        assert result[0]["type"] == "equality"
+        assert "add" in result[0]["expression"]
+        assert result[0]["expected"] == "5"
+        assert result[0]["called_function"] == "add"
+
+    def test_unittest_assertEqual(self) -> None:
+        src = (
+            "class TestCalc(unittest.TestCase):\n"
+            "    def test_add(self):\n"
+            "        self.assertEqual(add(2, 3), 5)\n"
+        )
+        result = _analyze_test_assertions(src, "python")
+        assert len(result) == 1
+        assert result[0]["type"] == "equality"
+        assert result[0]["called_function"] == "add"
+
+    def test_assert_raises(self) -> None:
+        src = (
+            "class TestCalc(unittest.TestCase):\n"
+            "    def test_invalid(self):\n"
+            "        self.assertRaises(ValueError, validate, -1)\n"
+        )
+        result = _analyze_test_assertions(src, "python")
+        assert len(result) == 1
+        assert result[0]["type"] == "raises"
+        assert result[0]["expected"] == "ValueError"
+        assert result[0]["called_function"] == "validate"
+
+    def test_pytest_raises(self) -> None:
+        src = (
+            "def test_invalid():\n"
+            "    with pytest.raises(ValueError):\n"
+            "        validate(-1)\n"
+        )
+        result = _analyze_test_assertions(src, "python")
+        assert len(result) == 1
+        assert result[0]["type"] == "raises"
+        assert result[0]["expected"] == "ValueError"
+        assert result[0]["called_function"] == "validate"
+
+    def test_assert_is_none(self) -> None:
+        src = "def test_empty():\n    assert get_value() is None\n"
+        result = _analyze_test_assertions(src, "python")
+        assert len(result) == 1
+        assert result[0]["type"] == "is_none"
+        assert result[0]["called_function"] == "get_value"
+
+    def test_assert_is_not_none(self) -> None:
+        src = "def test_exists():\n    assert find_item(x) is not None\n"
+        result = _analyze_test_assertions(src, "python")
+        assert len(result) == 1
+        assert result[0]["type"] == "not_none"
+        assert result[0]["called_function"] == "find_item"
+
+    def test_assert_in(self) -> None:
+        src = "def test_contains():\n    assert 'hello' in get_words()\n"
+        result = _analyze_test_assertions(src, "python")
+        assert len(result) == 1
+        assert result[0]["type"] == "in"
+        assert result[0]["called_function"] == "get_words"
+
+    def test_assert_true(self) -> None:
+        src = (
+            "class TestCalc(unittest.TestCase):\n"
+            "    def test_positive(self):\n"
+            "        self.assertTrue(is_valid(42))\n"
+        )
+        result = _analyze_test_assertions(src, "python")
+        assert len(result) == 1
+        assert result[0]["type"] == "truthy"
+        assert result[0]["called_function"] == "is_valid"
+
+    def test_assert_false(self) -> None:
+        src = (
+            "class TestCalc(unittest.TestCase):\n"
+            "    def test_negative(self):\n"
+            "        self.assertFalse(is_valid(-1))\n"
+        )
+        result = _analyze_test_assertions(src, "python")
+        assert len(result) == 1
+        assert result[0]["type"] == "falsy"
+        assert result[0]["called_function"] == "is_valid"
+
+    def test_non_python_returns_empty(self) -> None:
+        src = "func TestAdd(t *testing.T) {}\n"
+        result = _analyze_test_assertions(src, "go")
+        assert result == []
+
+    def test_multiple_assertions(self) -> None:
+        src = (
+            "def test_math():\n"
+            "    assert add(1, 2) == 3\n"
+            "    assert subtract(5, 2) == 3\n"
+            "    assert multiply(2, 3) == 6\n"
+        )
+        result = _analyze_test_assertions(src, "python")
+        assert len(result) == 3
+        funcs = [a["called_function"] for a in result]
+        assert "add" in funcs
+        assert "subtract" in funcs
+        assert "multiply" in funcs
+
+    def test_assertIn(self) -> None:
+        src = (
+            "class TestFoo(unittest.TestCase):\n"
+            "    def test_search(self):\n"
+            "        self.assertIn('key', get_results())\n"
+        )
+        result = _analyze_test_assertions(src, "python")
+        assert len(result) == 1
+        assert result[0]["type"] == "in"
+        assert result[0]["called_function"] == "get_results"
+
+    def test_assertIsNone(self) -> None:
+        src = (
+            "class TestFoo(unittest.TestCase):\n"
+            "    def test_empty(self):\n"
+            "        self.assertIsNone(lookup('missing'))\n"
+        )
+        result = _analyze_test_assertions(src, "python")
+        assert len(result) == 1
+        assert result[0]["type"] == "is_none"
+        assert result[0]["called_function"] == "lookup"
+
+    def test_assertIsNotNone(self) -> None:
+        src = (
+            "class TestFoo(unittest.TestCase):\n"
+            "    def test_present(self):\n"
+            "        self.assertIsNotNone(lookup('key'))\n"
+        )
+        result = _analyze_test_assertions(src, "python")
+        assert len(result) == 1
+        assert result[0]["type"] == "not_none"
+        assert result[0]["called_function"] == "lookup"
+
+    def test_generic_assert(self) -> None:
+        src = "def test_check():\n    assert validate(data)\n"
+        result = _analyze_test_assertions(src, "python")
+        assert len(result) == 1
+        assert result[0]["type"] == "truthy"
+        assert result[0]["called_function"] == "validate"
+
+    def test_assert_not(self) -> None:
+        src = "def test_check():\n    assert not is_empty(data)\n"
+        result = _analyze_test_assertions(src, "python")
+        assert len(result) == 1
+        assert result[0]["type"] == "falsy"
+        assert result[0]["called_function"] == "is_empty"
+
+
+class TestMutateSwapOperator:
+    """Tests for _mutate_swap_operator."""
+
+    def test_swaps_in_return(self) -> None:
+        lines = ["def add(a, b):", "    return a + b"]
+        result = _mutate_swap_operator(lines)
+        assert result is not None
+        orig, mutated = result
+        assert " + " in orig
+        assert " - " in mutated
+
+    def test_swaps_comparison(self) -> None:
+        lines = ["def check(x):", "    if x >= 0:", "        return True"]
+        result = _mutate_swap_operator(lines)
+        assert result is not None
+        orig, mutated = result
+        assert " >= " in orig
+        assert " > " in mutated
+
+    def test_no_operators(self) -> None:
+        lines = ["def noop():", "    pass"]
+        result = _mutate_swap_operator(lines)
+        assert result is None
+
+    def test_skips_def_lines(self) -> None:
+        lines = ["def add(a, b):", "    x = 42", "    return x"]
+        result = _mutate_swap_operator(lines)
+        assert result is None  # no operators in non-def, non-return lines either
+
+
+class TestMutateRemoveRaise:
+    """Tests for _mutate_remove_raise."""
+
+    def test_inverts_guard(self) -> None:
+        lines = [
+            "def validate(x):",
+            "    if x < 0:",
+            "        raise ValueError('negative')",
+            "    return x",
+        ]
+        result = _mutate_remove_raise(lines, "ValueError")
+        assert result is not None
+        orig, mutated = result
+        assert "if x < 0:" in orig
+        assert "if not x < 0:" in mutated
+
+    def test_removes_standalone_raise(self) -> None:
+        lines = [
+            "def fail():",
+            "    raise RuntimeError('oops')",
+        ]
+        result = _mutate_remove_raise(lines, "RuntimeError")
+        assert result is not None
+        orig, mutated = result
+        assert "raise " in orig
+        assert mutated.strip() == "pass"
+
+    def test_no_matching_raise(self) -> None:
+        lines = [
+            "def validate(x):",
+            "    raise ValueError('negative')",
+        ]
+        result = _mutate_remove_raise(lines, "TypeError")
+        assert result is None
+
+
+class TestMutateReturnNone:
+    """Tests for _mutate_return_none and _mutate_return_non_none."""
+
+    def test_return_none(self) -> None:
+        lines = ["def calc():", "    return 42"]
+        result = _mutate_return_none(lines)
+        assert result is not None
+        orig, mutated = result
+        assert "return 42" in orig
+        assert "return None" in mutated
+
+    def test_already_none(self) -> None:
+        lines = ["def calc():", "    return None"]
+        result = _mutate_return_none(lines)
+        assert result is None
+
+    def test_return_non_none(self) -> None:
+        lines = ["def calc():", "    return None"]
+        result = _mutate_return_non_none(lines)
+        assert result is not None
+        orig, mutated = result
+        assert "return None" in orig
+        assert "return 0" in mutated
+
+    def test_bare_return(self) -> None:
+        lines = ["def noop():", "    return"]
+        result = _mutate_return_non_none(lines)
+        assert result is not None
+        _, mutated = result
+        assert "return 0" in mutated
+
+
+class TestTargetedMutation:
+    """Tests for _targeted_mutation."""
+
+    def test_equality_assertion_swaps_operator(self) -> None:
+        source = "def add(a, b):\n    return a + b\n"
+        assertion = {
+            "type": "equality",
+            "expression": "add(2, 3)",
+            "expected": "5",
+            "called_function": "add",
+            "line": 1,
+        }
+        result = _targeted_mutation(source, assertion, "python")
+        assert result is not None
+        orig, mutated = result
+        assert " + " in orig
+        assert " - " in mutated
+
+    def test_raises_assertion_removes_raise(self) -> None:
+        source = (
+            "def validate(x):\n"
+            "    if x < 0:\n"
+            "        raise ValueError('negative')\n"
+            "    return x\n"
+        )
+        assertion = {
+            "type": "raises",
+            "expression": "validate",
+            "expected": "ValueError",
+            "called_function": "validate",
+            "line": 1,
+        }
+        result = _targeted_mutation(source, assertion, "python")
+        assert result is not None
+
+    def test_is_none_changes_return(self) -> None:
+        source = "def empty():\n    return None\n"
+        assertion = {
+            "type": "is_none",
+            "expression": "empty()",
+            "expected": "None",
+            "called_function": "empty",
+            "line": 1,
+        }
+        result = _targeted_mutation(source, assertion, "python")
+        assert result is not None
+        _, mutated = result
+        assert "return 0" in mutated
+
+    def test_not_none_returns_none(self) -> None:
+        source = "def find():\n    return 42\n"
+        assertion = {
+            "type": "not_none",
+            "expression": "find()",
+            "expected": "not None",
+            "called_function": "find",
+            "line": 1,
+        }
+        result = _targeted_mutation(source, assertion, "python")
+        assert result is not None
+        _, mutated = result
+        assert "return None" in mutated
+
+    def test_non_python_returns_none(self) -> None:
+        result = _targeted_mutation("fn main() {}", {}, "rust")
+        assert result is None
+
+
+class TestDescribeTargetedMutation:
+    """Tests for _describe_targeted_mutation."""
+
+    def test_operator_swap_description(self) -> None:
+        desc = _describe_targeted_mutation(
+            "    return a + b", "    return a - b",
+            {"type": "equality"},
+        )
+        assert "+" in desc and "-" in desc
+
+    def test_raise_removal_description(self) -> None:
+        desc = _describe_targeted_mutation(
+            "        raise ValueError('x')", "        pass",
+            {"type": "raises"},
+        )
+        assert "error" in desc.lower() or "raise" in desc.lower()
+
+    def test_return_none_description(self) -> None:
+        desc = _describe_targeted_mutation(
+            "    return 42", "    return None",
+            {"type": "not_none"},
+        )
+        assert "None" in desc
+
+    def test_generic_description(self) -> None:
+        desc = _describe_targeted_mutation(
+            "    x = foo()", "    x = bar()",
+            {"type": "equality"},
+        )
+        assert len(desc) > 10  # some meaningful text
+
+
+class TestTryTargetedMutation:
+    """Tests for _try_targeted_mutation (integration test with temp files)."""
+
+    def test_returns_bugspec_for_matching_test(self, tmp_path: Path) -> None:
+        # Source file
+        src_dir = tmp_path / "mylib"
+        src_dir.mkdir()
+        src_file = src_dir / "calc.py"
+        src_file.write_text(
+            "def add(a, b):\n    return a + b\n\n"
+            "def subtract(a, b):\n    return a - b\n",
+        )
+
+        # Test file
+        test_dir = tmp_path / "tests"
+        test_dir.mkdir()
+        test_file = test_dir / "test_calc.py"
+        test_file.write_text(
+            "from mylib.calc import add, subtract\n\n"
+            "def test_add():\n"
+            "    assert add(2, 3) == 5\n\n"
+            "def test_subtract():\n"
+            "    assert subtract(5, 2) == 3\n",
+        )
+
+        target = {
+            "file": "mylib/calc.py",
+            "function_name": "add",
+            "source": "def add(a, b):\n    return a + b",
+        }
+
+        result = _try_targeted_mutation(
+            str(tmp_path), target, "tests/test_calc.py", "python",
+        )
+        assert result is not None
+        assert isinstance(result, BugSpec)
+        assert result.file == "mylib/calc.py"
+        assert result.function_name == "add"
+        assert result.bug_category == "targeted-mutation"
+        assert " - " in result.buggy_code  # + swapped to -
+
+    def test_returns_none_for_no_matching_assertion(self, tmp_path: Path) -> None:
+        src_dir = tmp_path / "mylib"
+        src_dir.mkdir()
+        src_file = src_dir / "calc.py"
+        src_file.write_text("def add(a, b):\n    return a + b\n")
+
+        test_dir = tmp_path / "tests"
+        test_dir.mkdir()
+        test_file = test_dir / "test_calc.py"
+        test_file.write_text(
+            "def test_other():\n"
+            "    assert other_func() == 42\n",
+        )
+
+        target = {
+            "file": "mylib/calc.py",
+            "function_name": "add",
+            "source": "def add(a, b):\n    return a + b",
+        }
+
+        result = _try_targeted_mutation(
+            str(tmp_path), target, "tests/test_calc.py", "python",
+        )
+        assert result is None
+
+    def test_returns_none_for_non_python(self, tmp_path: Path) -> None:
+        result = _try_targeted_mutation(str(tmp_path), {}, "test.go", "go")
+        assert result is None
