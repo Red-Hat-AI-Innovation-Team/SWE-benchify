@@ -15,6 +15,7 @@ from swebenchify.synthesizer import (
     SynthesisResult,
     _align_indentation,
     _analyze_test_assertions,
+    _analyze_test_assertions_go,
     _BraceCounter,
     _build_social_context,
     _collect_repo_context,
@@ -4089,9 +4090,9 @@ class TestAnalyzeTestAssertions:
         assert result[0]["type"] == "falsy"
         assert result[0]["called_function"] == "is_valid"
 
-    def test_non_python_returns_empty(self) -> None:
+    def test_non_supported_language_returns_empty(self) -> None:
         src = "func TestAdd(t *testing.T) {}\n"
-        result = _analyze_test_assertions(src, "go")
+        result = _analyze_test_assertions(src, "rust")
         assert result == []
 
     def test_multiple_assertions(self) -> None:
@@ -4154,6 +4155,232 @@ class TestAnalyzeTestAssertions:
         assert len(result) == 1
         assert result[0]["type"] == "falsy"
         assert result[0]["called_function"] == "is_empty"
+
+
+class TestAnalyzeTestAssertionsGo:
+    """Tests for _analyze_test_assertions_go and Go support in _analyze_test_assertions."""
+
+    def test_pattern1_inline_if_init(self) -> None:
+        """Pattern 1: if got := FuncName(args); got != expected { t.Errorf(...) }"""
+        src = (
+            'func TestMethodFamily(t *testing.T) {\n'
+            '\tif got := methodFamily(ut.method); got != ut.wantMethodFamily {\n'
+            '\t\tt.Fatalf("methodFamily(%s) = %s, want %s", ut.method, got, ut.wantMethodFamily)\n'
+            '\t}\n'
+            '}\n'
+        )
+        result = _analyze_test_assertions(src, "go")
+        assert len(result) >= 1
+        a = result[0]
+        assert a["type"] == "equality"
+        assert a["called_function"] == "methodFamily"
+        assert "methodFamily" in a["expression"]
+        assert a["line"] == 2
+
+    def test_pattern1_equality_operator(self) -> None:
+        """Pattern 1 with == instead of !=."""
+        src = (
+            'func TestFoo(t *testing.T) {\n'
+            '\tif got := Compute(x); got == badValue {\n'
+            '\t\tt.Errorf("unexpected")\n'
+            '\t}\n'
+            '}\n'
+        )
+        result = _analyze_test_assertions(src, "go")
+        assert len(result) >= 1
+        assert result[0]["type"] == "inequality"
+        assert result[0]["called_function"] == "Compute"
+
+    def test_pattern2a_testify_assert_equal(self) -> None:
+        """Pattern 2a: assert.Equal(t, expected, FunctionName(args))"""
+        src = 'assert.Equal(t, expectedVal, ComputeHash(data))\n'
+        result = _analyze_test_assertions_go(src)
+        assert len(result) == 1
+        assert result[0]["type"] == "equality"
+        assert result[0]["called_function"] == "ComputeHash"
+        assert result[0]["expected"] == "expectedVal"
+
+    def test_pattern2a_require_equal(self) -> None:
+        """Pattern 2a: require.Equal(t, expected, FunctionName(args))"""
+        src = 'require.Equal(t, 42, GetCount(ctx))\n'
+        result = _analyze_test_assertions_go(src)
+        assert len(result) == 1
+        assert result[0]["type"] == "equality"
+        assert result[0]["called_function"] == "GetCount"
+
+    def test_pattern2b_assert_noerror(self) -> None:
+        """Pattern 2b: assert.NoError(t, FunctionName(args))"""
+        src = 'assert.NoError(t, Validate(input))\n'
+        result = _analyze_test_assertions_go(src)
+        assert len(result) == 1
+        assert result[0]["type"] == "error_check"
+        assert result[0]["called_function"] == "Validate"
+
+    def test_pattern2c_assert_true(self) -> None:
+        """Pattern 2c: assert.True(t, FunctionName(args))"""
+        src = 'assert.True(t, IsValid(config))\n'
+        result = _analyze_test_assertions_go(src)
+        assert len(result) == 1
+        assert result[0]["type"] == "truthy"
+        assert result[0]["called_function"] == "IsValid"
+
+    def test_pattern2c_assert_false(self) -> None:
+        """Pattern 2c: assert.False(t, FunctionName(args))"""
+        src = 'assert.False(t, IsEmpty(list))\n'
+        result = _analyze_test_assertions_go(src)
+        assert len(result) == 1
+        assert result[0]["type"] == "falsy"
+        assert result[0]["called_function"] == "IsEmpty"
+
+    def test_pattern2d_assert_nil(self) -> None:
+        """Pattern 2d: assert.Nil(t, FunctionName(args))"""
+        src = 'assert.Nil(t, GetError(ctx))\n'
+        result = _analyze_test_assertions_go(src)
+        assert len(result) == 1
+        assert result[0]["type"] == "nil_check"
+        assert result[0]["called_function"] == "GetError"
+
+    def test_pattern2d_assert_not_nil(self) -> None:
+        """Pattern 2d: assert.NotNil(t, FunctionName(args))"""
+        src = 'assert.NotNil(t, CreateClient(opts))\n'
+        result = _analyze_test_assertions_go(src)
+        assert len(result) == 1
+        assert result[0]["type"] == "not_nil"
+        assert result[0]["called_function"] == "CreateClient"
+
+    def test_pattern2e_assert_error(self) -> None:
+        """Pattern 2e: assert.Error(t, FunctionName(args))"""
+        src = 'assert.Error(t, ParseConfig(badInput))\n'
+        result = _analyze_test_assertions_go(src)
+        assert len(result) == 1
+        assert result[0]["type"] == "error_check"
+        assert result[0]["called_function"] == "ParseConfig"
+
+    def test_pattern3_direct_comparison(self) -> None:
+        """Pattern 3: got := FunctionName(args) / if got != want { ... }"""
+        src = (
+            'want := expectedValue\n'
+            'got := ComputeResult(input)\n'
+            'if got != want {\n'
+            '\tt.Fatalf("ComputeResult() = %v, want %v", got, want)\n'
+            '}\n'
+        )
+        result = _analyze_test_assertions_go(src)
+        assert len(result) >= 1
+        found = [a for a in result if a["called_function"] == "ComputeResult"]
+        assert len(found) >= 1
+        assert found[0]["type"] == "equality"
+
+    def test_pattern4_error_check(self) -> None:
+        """Pattern 4: result, err := FunctionName(args) / if err != nil { ... }"""
+        src = (
+            'result, err := Connect(addr)\n'
+            'if err != nil {\n'
+            '\tt.Fatal(err)\n'
+            '}\n'
+        )
+        result = _analyze_test_assertions_go(src)
+        assert len(result) >= 1
+        found = [a for a in result if a["called_function"] == "Connect"]
+        assert len(found) >= 1
+        assert found[0]["type"] == "error_check"
+
+    def test_pattern4_single_return_error(self) -> None:
+        """Pattern 4: err := FunctionName(args) / if err != nil { ... }"""
+        src = (
+            'err := Initialize(config)\n'
+            'if err != nil {\n'
+            '\tt.Fatal(err)\n'
+            '}\n'
+        )
+        result = _analyze_test_assertions_go(src)
+        assert len(result) >= 1
+        found = [a for a in result if a["called_function"] == "Initialize"]
+        assert len(found) >= 1
+
+    def test_stdlib_terrorf_function_extraction(self) -> None:
+        """t.Errorf/t.Fatalf with function name in format string."""
+        src = (
+            'if encoding.GetCodecV2(proto.Name) == nil {\n'
+            '\tt.Fatalf("encoding.GetCodec(%q) must not be nil", proto.Name)\n'
+            '}\n'
+        )
+        result = _analyze_test_assertions_go(src)
+        # Should extract GetCodec or GetCodecV2 from either the code or format string
+        assert len(result) >= 1
+
+    def test_multiple_assertions(self) -> None:
+        """Multiple assertion patterns in a single test."""
+        src = (
+            'func TestAll(t *testing.T) {\n'
+            '\tif got := Add(1, 2); got != 3 {\n'
+            '\t\tt.Errorf("Add() = %v, want 3", got)\n'
+            '\t}\n'
+            '\terr := Validate(input)\n'
+            '\tif err != nil {\n'
+            '\t\tt.Fatal(err)\n'
+            '\t}\n'
+            '\tresult := Transform(data)\n'
+            '\tif result != expected {\n'
+            '\t\tt.Fatalf("wrong result")\n'
+            '\t}\n'
+            '}\n'
+        )
+        result = _analyze_test_assertions_go(src)
+        funcs = [a.get("called_function") for a in result if a.get("called_function")]
+        assert "Add" in funcs
+        assert "Validate" in funcs
+        assert "Transform" in funcs
+
+    def test_via_analyze_test_assertions(self) -> None:
+        """Verify _analyze_test_assertions dispatches to Go correctly."""
+        src = (
+            'func TestFoo(t *testing.T) {\n'
+            '\tif got := DoWork(x); got != want {\n'
+            '\t\tt.Errorf("failed")\n'
+            '\t}\n'
+            '}\n'
+        )
+        result = _analyze_test_assertions(src, "go")
+        assert len(result) >= 1
+        assert result[0]["called_function"] == "DoWork"
+
+    def test_real_grpc_trace_test(self) -> None:
+        """Verify extraction on real grpc-go trace_test.go content."""
+        src = (
+            'func (s) TestMethodFamily(t *testing.T) {\n'
+            '\tcases := []struct {\n'
+            '\t\tdesc             string\n'
+            '\t\tmethod           string\n'
+            '\t\twantMethodFamily string\n'
+            '\t}{\n'
+            '\t\t{desc: "No leading slash", method: "pkg.service/method", wantMethodFamily: "pkg.service"},\n'
+            '\t}\n'
+            '\tfor _, ut := range cases {\n'
+            '\t\tt.Run(ut.desc, func(t *testing.T) {\n'
+            '\t\t\tif got := methodFamily(ut.method); got != ut.wantMethodFamily {\n'
+            '\t\t\t\tt.Fatalf("methodFamily(%s) = %s, want %s", ut.method, got, ut.wantMethodFamily)\n'
+            '\t\t\t}\n'
+            '\t\t})\n'
+            '\t}\n'
+            '}\n'
+        )
+        result = _analyze_test_assertions(src, "go")
+        assert len(result) >= 1
+        funcs = [a.get("called_function") for a in result]
+        assert "methodFamily" in funcs
+
+    def test_real_grpc_codec_test(self) -> None:
+        """Verify extraction on real grpc-go codec_test.go content."""
+        src = (
+            'func (s) TestGetCodecForProtoIsNotNil(t *testing.T) {\n'
+            '\tif encoding.GetCodecV2(proto.Name) == nil {\n'
+            '\t\tt.Fatalf("encoding.GetCodec(%q) must not be nil by default", proto.Name)\n'
+            '\t}\n'
+            '}\n'
+        )
+        result = _analyze_test_assertions(src, "go")
+        assert len(result) >= 1
 
 
 class TestMutateSwapOperator:

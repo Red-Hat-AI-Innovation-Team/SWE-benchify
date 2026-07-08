@@ -913,6 +913,260 @@ def _parse_assertion_line(
     return None
 
 
+def _analyze_test_assertions_go(test_source: str) -> list[dict]:
+    """Extract assertions from Go test files.
+
+    Handles four major patterns:
+
+    1. **Standard library** ``if got := Func(args); got != expected``
+       with ``t.Errorf`` / ``t.Fatalf`` / ``t.Error`` / ``t.Fatal``.
+    2. **testify assert/require** — ``assert.Equal``,
+       ``assert.NoError``, ``require.Equal``, ``assert.True``,
+       ``assert.Nil``, ``assert.NotNil``, etc.
+    3. **Direct comparison** — separate ``got := Func(args)`` followed
+       by ``if got != want``.
+    4. **Error checking** — ``result, err := Func(args)`` followed by
+       ``if err != nil``.
+
+    Returns a list of dicts matching the same schema as
+    :func:`_parse_assertion_line`.
+    """
+    assertions: list[dict] = []
+    lines = test_source.splitlines()
+
+    # ── Pattern 1: if got := Func(args); got != expected { ──
+    # e.g.  if got := methodFamily(ut.method); got != ut.wantMethodFamily {
+    pat_inline = re.compile(
+        r'if\s+\w+\s*:=\s*(.+?)\s*;\s*\w+\s*(!?=)\s*(.+?)\s*\{',
+    )
+    # ── Pattern 2a: testify assert.Equal / require.Equal ──
+    # e.g.  assert.Equal(t, expected, FunctionName(args))
+    pat_testify_eq = re.compile(
+        r'(?:assert|require)\.(?:Equal|Equalf)\s*\(\s*\w+\s*,\s*(.+?)\s*,\s*(.+?)(?:\s*,\s*".*?)?\s*\)\s*$',
+    )
+    # ── Pattern 2b: testify assert.NoError / require.NoError ──
+    pat_testify_noerr = re.compile(
+        r'(?:assert|require)\.(?:NoError|NoErrorf)\s*\(\s*\w+\s*,\s*(.+?)(?:\s*,\s*".*?)?\s*\)\s*$',
+    )
+    # ── Pattern 2c: testify assert.True / assert.False ──
+    pat_testify_bool = re.compile(
+        r'(?:assert|require)\.(True|False|Truef|Falsef)\s*\(\s*\w+\s*,\s*(.+?)(?:\s*,\s*".*?)?\s*\)\s*$',
+    )
+    # ── Pattern 2d: testify assert.Nil / assert.NotNil ──
+    pat_testify_nil = re.compile(
+        r'(?:assert|require)\.(Nil|NotNil|Nilf|NotNilf)\s*\(\s*\w+\s*,\s*(.+?)(?:\s*,\s*".*?)?\s*\)\s*$',
+    )
+    # ── Pattern 2e: testify assert.Error / require.Error ──
+    pat_testify_err = re.compile(
+        r'(?:assert|require)\.(?:Error|Errorf)\s*\(\s*\w+\s*,\s*(.+?)(?:\s*,\s*".*?)?\s*\)\s*$',
+    )
+
+    # Helper: extract function name from a Go expression
+    def _go_extract_func(expr: str) -> str | None:
+        """Extract the function/method name from a Go expression."""
+        # Strip receiver/package prefix: pkg.Func(args) -> Func
+        calls = re.findall(r'(?:[\w.]+\.)?(\w+)\s*\(', expr)
+        # Skip Go builtins and test-framework calls
+        go_skip = frozenset({
+            'make', 'len', 'cap', 'append', 'copy', 'close', 'delete',
+            'new', 'panic', 'recover', 'print', 'println', 'string',
+            'int', 'int32', 'int64', 'float32', 'float64', 'byte',
+            'Errorf', 'Fatalf', 'Error', 'Fatal', 'Logf', 'Log',
+            'Run', 'Cleanup', 'Helper', 'Skip', 'Skipf',
+            'Sprintf', 'Printf', 'Fprintf',
+            'Equal', 'NotEqual', 'True', 'False', 'Nil', 'NotNil',
+            'NoError', 'Equalf', 'NoErrorf', 'Truef', 'Falsef',
+            'Nilf', 'NotNilf', 'Errorf', 'Contains',
+        })
+        for name in calls:
+            if name not in go_skip:
+                return name
+        return calls[0] if calls else None
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+
+        # ── Pattern 1: inline if-init with comparison ──
+        m = pat_inline.match(stripped)
+        if m:
+            expr = m.group(1).strip()
+            op = m.group(2).strip()
+            expected = m.group(3).strip()
+            atype = 'equality' if op == '!=' else 'inequality'
+            assertions.append({
+                'type': atype,
+                'expression': expr,
+                'expected': expected,
+                'called_function': _go_extract_func(expr),
+                'line': i + 1,
+            })
+            continue
+
+        # ── Pattern 2a: testify assert.Equal ──
+        m = pat_testify_eq.match(stripped)
+        if m:
+            expected = m.group(1).strip()
+            expr = m.group(2).strip()
+            func_name = _go_extract_func(expr) or _go_extract_func(expected)
+            assertions.append({
+                'type': 'equality',
+                'expression': expr,
+                'expected': expected,
+                'called_function': func_name,
+                'line': i + 1,
+            })
+            continue
+
+        # ── Pattern 2b: testify NoError ──
+        m = pat_testify_noerr.match(stripped)
+        if m:
+            expr = m.group(1).strip()
+            assertions.append({
+                'type': 'error_check',
+                'expression': expr,
+                'expected': 'nil',
+                'called_function': _go_extract_func(expr),
+                'line': i + 1,
+            })
+            continue
+
+        # ── Pattern 2c: testify True/False ──
+        m = pat_testify_bool.match(stripped)
+        if m:
+            kind = m.group(1).strip()
+            expr = m.group(2).strip()
+            atype = 'falsy' if kind.startswith('False') else 'truthy'
+            assertions.append({
+                'type': atype,
+                'expression': expr,
+                'expected': 'false' if atype == 'falsy' else 'true',
+                'called_function': _go_extract_func(expr),
+                'line': i + 1,
+            })
+            continue
+
+        # ── Pattern 2d: testify Nil/NotNil ──
+        m = pat_testify_nil.match(stripped)
+        if m:
+            kind = m.group(1).strip()
+            expr = m.group(2).strip()
+            atype = 'nil_check' if kind.startswith('Nil') else 'not_nil'
+            assertions.append({
+                'type': atype,
+                'expression': expr,
+                'expected': 'nil' if atype == 'nil_check' else 'not nil',
+                'called_function': _go_extract_func(expr),
+                'line': i + 1,
+            })
+            continue
+
+        # ── Pattern 2e: testify Error ──
+        m = pat_testify_err.match(stripped)
+        if m:
+            expr = m.group(1).strip()
+            assertions.append({
+                'type': 'error_check',
+                'expression': expr,
+                'expected': 'error',
+                'called_function': _go_extract_func(expr),
+                'line': i + 1,
+            })
+            continue
+
+        # ── Pattern 4: Error checking — if err != nil { ──
+        # Preceded by result, err := Func(args) within 3 lines
+        # NOTE: must come before Pattern 3 since `if err != nil` also matches
+        # the generic `if \w+ != \w+` pattern.
+        if re.match(r'if\s+err\s*!=\s*nil\s*\{', stripped):
+            for j in range(max(0, i - 3), i):
+                prev = lines[j].strip()
+                m_assign = re.match(r'[\w,\s]+:=\s*(.+)', prev)
+                if m_assign:
+                    expr = m_assign.group(1).strip()
+                    func_name = _go_extract_func(expr)
+                    if func_name:
+                        assertions.append({
+                            'type': 'error_check',
+                            'expression': expr,
+                            'expected': 'nil',
+                            'called_function': func_name,
+                            'line': i + 1,
+                        })
+                        break
+            continue
+
+        # ── Pattern 3: Direct comparison: if got != want { ──
+        # Preceded by got := Func(args) within 3 lines
+        if re.match(r'if\s+\w+\s*!=\s*\w+\s*\{', stripped):
+            # Look backwards for assignment
+            for j in range(max(0, i - 3), i):
+                prev = lines[j].strip()
+                m_assign = re.match(r'\w+\s*:=\s*(.+)', prev)
+                if m_assign:
+                    expr = m_assign.group(1).strip()
+                    func_name = _go_extract_func(expr)
+                    if func_name:
+                        assertions.append({
+                            'type': 'equality',
+                            'expression': expr,
+                            'expected': '',
+                            'called_function': func_name,
+                            'line': i + 1,
+                        })
+                        break
+            continue
+
+        # ── Pattern 5: Standalone nil check on a call expression ──
+        # e.g. if encoding.GetCodecV2(proto.Name) == nil {
+        # or   if SomeFunc(args) != nil {
+        m_nil_cmp = re.match(
+            r'if\s+(.+?)\s*(==|!=)\s*nil\s*\{', stripped,
+        )
+        if m_nil_cmp:
+            expr = m_nil_cmp.group(1).strip()
+            op = m_nil_cmp.group(2).strip()
+            func_name = _go_extract_func(expr)
+            if func_name:
+                atype = 'nil_check' if op == '==' else 'not_nil'
+                assertions.append({
+                    'type': atype,
+                    'expression': expr,
+                    'expected': 'nil' if atype == 'nil_check' else 'not nil',
+                    'called_function': func_name,
+                    'line': i + 1,
+                })
+                continue
+
+        # ── Stdlib t.Errorf/t.Fatalf with function name in message ──
+        # Lines like: t.Fatalf("FuncName() = %v, want %v", got, expected)
+        # These are assertions too — the function name is in the format string
+        if re.match(r't\.(Errorf|Fatalf|Error|Fatal)\s*\(', stripped):
+            # Try to extract function name from the format string
+            m_fmt = re.search(r'"(\w+)\(', stripped)
+            if m_fmt:
+                func_name = m_fmt.group(1)
+                go_skip = frozenset({
+                    'Error', 'Errorf', 'Fatal', 'Fatalf',
+                    'Sprintf', 'Printf', 'Fprintf',
+                })
+                if func_name not in go_skip:
+                    # Check if already captured by Pattern 1 on a previous line
+                    already = any(
+                        a['line'] >= i and a.get('called_function') == func_name
+                        for a in assertions
+                    )
+                    if not already:
+                        assertions.append({
+                            'type': 'equality',
+                            'expression': '',
+                            'expected': '',
+                            'called_function': func_name,
+                            'line': i + 1,
+                        })
+
+    return assertions
+
+
 def _analyze_test_assertions(
     test_source: str, language: str,
 ) -> list[dict]:
@@ -922,16 +1176,24 @@ def _analyze_test_assertions(
     ``assertIn``, ``pytest.raises`` patterns and extracts what is
     being asserted.
 
+    For Go: finds standard library ``if got := Func(...); got != want``
+    patterns, testify ``assert.*`` / ``require.*`` calls, direct
+    comparisons, and ``err != nil`` checks.
+
     Args:
         test_source: Full source code of the test file.
-        language: Programming language (only ``'python'`` supported).
+        language: Programming language (``'python'`` or ``'go'``).
 
     Returns:
         List of dicts with keys: *type* (``'equality'``,
         ``'raises'``, ``'truthy'``, ``'in'``, ``'is_none'``,
-        ``'not_none'``, ``'falsy'``, ``'inequality'``), *expression*,
-        *expected*, *called_function*, and *line*.
+        ``'not_none'``, ``'falsy'``, ``'inequality'``,
+        ``'error_check'``, ``'nil_check'``, ``'not_nil'``),
+        *expression*, *expected*, *called_function*, and *line*.
     """
+    if language == "go":
+        return _analyze_test_assertions_go(test_source)
+
     if language != "python":
         return []
 
@@ -1064,7 +1326,7 @@ def _targeted_mutation(
     Args:
         source: Complete source of the function under test.
         assertion_info: Dict from :func:`_analyze_test_assertions`.
-        language: Programming language (only ``'python'`` supported).
+        language: Programming language (``'python'`` or ``'go'``).
 
     Returns:
         ``(original_snippet, mutated_snippet)`` where replacing
@@ -1072,7 +1334,7 @@ def _targeted_mutation(
         produces the buggy function.  ``None`` if no viable
         mutation is found.
     """
-    if language != "python":
+    if language not in ("python", "go"):
         return None
 
     assertion_type = assertion_info['type']
@@ -1085,17 +1347,18 @@ def _targeted_mutation(
             return result
 
     # Strategy 2: For value-checking assertions, swap operators
-    if assertion_type in ('equality', 'inequality', 'truthy', 'falsy', 'in'):
+    if assertion_type in ('equality', 'inequality', 'truthy', 'falsy', 'in',
+                          'error_check', 'nil_check', 'not_nil'):
         result = _mutate_swap_operator(lines)
         if result:
             return result
 
-    # Strategy 3: For None checks, alter return statements
-    if assertion_type == 'is_none':
+    # Strategy 3: For None/nil checks, alter return statements
+    if assertion_type in ('is_none', 'nil_check'):
         result = _mutate_return_non_none(lines)
         if result:
             return result
-    elif assertion_type == 'not_none':
+    elif assertion_type in ('not_none', 'not_nil'):
         result = _mutate_return_none(lines)
         if result:
             return result
@@ -1156,7 +1419,7 @@ def _try_targeted_mutation(
 
     Returns a :class:`BugSpec` if successful, ``None`` otherwise.
     """
-    if language != "python":
+    if language not in ("python", "go"):
         return None
 
     root = Path(repo_path)
@@ -4608,9 +4871,13 @@ async def synthesize_repo(
     for t in with_tests:
         test_file = _find_existing_test_file(repo_path, t["file"], language)
         if test_file:
-            assertions = _analyze_test_assertions(
-                os.path.join(repo_path, test_file), language
-            )
+            try:
+                test_source = Path(os.path.join(repo_path, test_file)).read_text(
+                    encoding="utf-8", errors="replace",
+                )
+            except OSError:
+                test_source = ""
+            assertions = _analyze_test_assertions(test_source, language)
             relevant = [
                 a for a in assertions
                 if (a.get('called_function') == t['function_name']
@@ -4662,12 +4929,12 @@ async def synthesize_repo(
         if bug_plan:
             logger.info("  Multi-file plan: %s", bug_plan.primary_description[:80])
 
-        # H10: Try targeted mutation for Python (higher data-first pass rate)
+        # H10: Try targeted mutation (assertion-aware, data-first pass rate)
         bug_spec = None
         patch = ""
         mutated_content = ""
         original_content = ""
-        if language == "python":
+        if language in ("python", "go"):
             _tfile = _find_existing_test_file(repo_path, target["file"], language)
             if _tfile:
                 _tspec = _try_targeted_mutation(repo_path, target, _tfile, language)
