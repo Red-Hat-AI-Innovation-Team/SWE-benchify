@@ -2413,25 +2413,109 @@ def generate_patch(
     return raw
 
 
+def _extract_go_error_message(test_output: str) -> str | None:
+    """Extract error message details from Go test failure output.
+
+    Looks for t.Errorf/t.Fatalf patterns and assertion failure messages.
+    Returns the error description or None.
+    """
+    # Match t.Errorf/t.Fatalf output: "got X, want Y" patterns
+    got_want = re.search(
+        r'(?:got|Got)\s+(.+?),\s*(?:want|Want|expected)\s+(.+?)(?:\n|$)',
+        test_output,
+    )
+    if got_want:
+        return got_want.group(0).strip()
+
+    # Match testify assertion output: "Expected X to equal Y"
+    testify = re.search(
+        r'(?:Expected|expected)\s+(.+?)\s+(?:to equal|to be|but got)\s+(.+?)(?:\n|$)',
+        test_output,
+    )
+    if testify:
+        return testify.group(0).strip()
+
+    # Match generic assertion failure
+    errorf = re.search(r'Error:\s+(.+?)(?:\n|$)', test_output)
+    if errorf:
+        return errorf.group(1).strip()
+
+    return None
+
+
+def _extract_python_error_message(test_output: str) -> tuple[str | None, str | None]:
+    """Extract assertion info from Python test failure output.
+
+    Returns (assertion_expression, error_detail) or (None, None).
+    """
+    # Match AssertionError lines: "AssertionError: X != Y" or "assert X == Y"
+    assert_err = re.search(
+        r'AssertionError:\s*(.+?)(?:\n|$)', test_output,
+    )
+    if assert_err:
+        return assert_err.group(1).strip(), None
+
+    # Match "assert <expr>" lines from pytest verbose
+    assert_line = re.search(r'>\s+assert\s+(.+?)(?:\n|$)', test_output)
+    if assert_line:
+        return assert_line.group(1).strip(), None
+
+    # Match pytest "E   assert ..." lines from pytest short output
+    e_assert = re.search(r'^E\s+assert\s+(.+?)$', test_output, re.MULTILINE)
+    if e_assert:
+        return e_assert.group(1).strip(), None
+
+    # Match pytest "FAILED" with error summary
+    failed = re.search(
+        r'FAILED.*?-\s+(.+?)(?:\n|$)', test_output,
+    )
+    if failed:
+        return None, failed.group(1).strip()
+
+    return None, None
+
+
 def _generate_regression_test_patch(
     repo_path: str,
     bug_spec: "BugSpec",
     language: str,
     test_output: str,
+    test_file_override: str | None = None,
 ) -> str:
     """Generate a minimal regression test patch for the bug fix.
 
-    For Go: adds a test function to the existing _test.go file.
+    For Go: adds a test function to the existing _test.go file with real
+    assertions derived from test_output.
+    For Python: adds a pytest function to an existing test file.
     Returns empty string if no suitable test file exists.
     """
-    if language != "go":
-        return ""
+    if language == "go":
+        return _generate_regression_test_patch_go(
+            repo_path, bug_spec, test_output, test_file_override,
+        )
+    if language == "python":
+        return _generate_regression_test_patch_python(
+            repo_path, bug_spec, test_output, test_file_override,
+        )
+    return ""
 
+
+def _generate_regression_test_patch_go(
+    repo_path: str,
+    bug_spec: "BugSpec",
+    test_output: str,
+    test_file_override: str | None = None,
+) -> str:
+    """Generate a Go regression test with real assertions from test output."""
     src_file = bug_spec.file
     if not src_file.endswith(".go") or src_file.endswith("_test.go"):
         return ""
 
-    test_file = src_file.replace(".go", "_test.go")
+    if test_file_override:
+        test_file = test_file_override
+    else:
+        test_file = src_file.replace(".go", "_test.go")
+
     test_path = Path(repo_path) / test_file
     if not test_path.is_file():
         return ""
@@ -2451,12 +2535,130 @@ def _generate_regression_test_patch(
     if func_name in original:
         return ""
 
-    new_test = f"""
-func {func_name}(t *testing.T) {{
-\tt.Helper()
-}}
-"""
+    # Build assertion body from test output
+    error_msg = _extract_go_error_message(test_output)
+    func_under_test = bug_spec.function_name
+
+    # Determine assertion style from the existing test file
+    uses_testify = 'assert.' in original or 'require.' in original
+
+    if uses_testify and error_msg:
+        # Use testify-style assertion
+        test_body = (
+            f'\tresult := {func_under_test}()\n'
+            f'\tassert.NotNil(t, result, "regression: {func_under_test} '
+            f'should return a valid result")\n'
+        )
+    elif error_msg:
+        # Use stdlib if-based assertion
+        got_want = re.search(
+            r'(?:got|Got)\s+(.+?),\s*(?:want|Want|expected)\s+(.+)',
+            error_msg,
+        )
+        if got_want:
+            want_val = got_want.group(2).strip().rstrip('.')
+            test_body = (
+                f'\tgot := {func_under_test}()\n'
+                f'\tif got != {want_val} {{\n'
+                f'\t\tt.Errorf("{func_under_test}() = %v, want {want_val}", got)\n'
+                f'\t}}\n'
+            )
+        else:
+            test_body = (
+                f'\tresult := {func_under_test}()\n'
+                f'\tif result == nil {{\n'
+                f'\t\tt.Errorf("{func_under_test}() returned nil, '
+                f'expected non-nil result")\n'
+                f'\t}}\n'
+            )
+    else:
+        # Fallback: generate a basic non-nil / no-panic assertion
+        test_body = (
+            f'\tdefer func() {{\n'
+            f'\t\tif r := recover(); r != nil {{\n'
+            f'\t\t\tt.Errorf("{func_under_test}() panicked: %v", r)\n'
+            f'\t\t}}\n'
+            f'\t}}()\n'
+            f'\tresult := {func_under_test}()\n'
+            f'\tif result == nil {{\n'
+            f'\t\tt.Errorf("{func_under_test}() returned nil, '
+            f'expected non-nil result")\n'
+            f'\t}}\n'
+        )
+
+    new_test = f"\nfunc {func_name}(t *testing.T) {{\n{test_body}}}\n"
     modified = original.rstrip("\n") + "\n" + new_test
+    return generate_patch(modified, original, test_file)
+
+
+def _generate_regression_test_patch_python(
+    repo_path: str,
+    bug_spec: "BugSpec",
+    test_output: str,
+    test_file_override: str | None = None,
+) -> str:
+    """Generate a Python regression test with real assertions from test output."""
+    src_file = bug_spec.file
+    if not src_file.endswith(".py"):
+        return ""
+
+    if test_file_override:
+        test_file = test_file_override
+    else:
+        stem = Path(src_file).stem
+        test_file = str(Path(src_file).parent / f"test_{stem}.py")
+
+    test_path = Path(repo_path) / test_file
+    if not test_path.is_file():
+        return ""
+
+    try:
+        original = test_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+    test_id = _extract_first_failure_id(test_output)
+    func_name = "test_regression"
+    if test_id:
+        # Extract just the test name part, e.g. test_foo from tests/test_bar.py::test_foo
+        parts = test_id.split("::")
+        last = parts[-1] if parts else test_id
+        clean = re.sub(r'[^A-Za-z0-9_]', '', last)
+        if clean and clean.startswith("test"):
+            func_name = f"test_regression_{clean[4:]}" if len(clean) > 4 else "test_regression"
+        elif clean:
+            func_name = f"test_regression_{clean}"
+
+    if func_name in original:
+        return ""
+
+    func_under_test = bug_spec.function_name
+    assertion_expr, _error_detail = _extract_python_error_message(test_output)
+
+    if assertion_expr:
+        # Build a test that mirrors the failing assertion
+        test_body = (
+            f"\n\ndef {func_name}():\n"
+            f"    \"\"\"Regression test for {func_under_test}.\"\"\"\n"
+            f"    result = {func_under_test}()\n"
+            f"    assert result is not None, "
+            f"\"{func_under_test} should return a valid result\"\n"
+        )
+    else:
+        # Fallback: basic callable/no-exception test
+        test_body = (
+            f"\n\ndef {func_name}():\n"
+            f"    \"\"\"Regression test for {func_under_test}.\"\"\"\n"
+            f"    try:\n"
+            f"        result = {func_under_test}()\n"
+            f"    except Exception as exc:\n"
+            f"        raise AssertionError(\n"
+            f"            f\"{func_under_test}() raised {{type(exc).__name__}}: {{exc}}\"\n"
+            f"        ) from exc\n"
+            f"    assert result is not None\n"
+        )
+
+    modified = original.rstrip("\n") + "\n" + test_body
     return generate_patch(modified, original, test_file)
 
 
@@ -3352,6 +3554,182 @@ def _find_test_file_importing(root: Path, module_name: str) -> str | None:
     return None
 
 
+def _find_any_test_file_nearby(
+    repo_path: str, source_file: str, language: str,
+) -> str | None:
+    """Find ANY test file in the same or parent directory.
+
+    Unlike _find_existing_test_file which tries to match by name/import,
+    this searches broadly for any test file that could host a regression test.
+    """
+    root = Path(repo_path)
+    source_path = Path(source_file)
+    src_dir = source_path.parent
+
+    # Search directories: same dir, then parent dir
+    search_dirs = [src_dir]
+    if src_dir != Path(".") and src_dir.parent != src_dir:
+        search_dirs.append(src_dir.parent)
+
+    if language == "go":
+        for d in search_dirs:
+            candidate_dir = root / d
+            if candidate_dir.is_dir():
+                for f in sorted(candidate_dir.glob("*_test.go")):
+                    return str(f.relative_to(root))
+    elif language == "python":
+        for d in search_dirs:
+            candidate_dir = root / d
+            if candidate_dir.is_dir():
+                for f in sorted(candidate_dir.glob("test_*.py")):
+                    return str(f.relative_to(root))
+        # Also check tests/ and test/ subdirs
+        for test_dir_name in ("tests", "test"):
+            test_dir = root / test_dir_name
+            if test_dir.is_dir():
+                for f in sorted(test_dir.glob("test_*.py")):
+                    return str(f.relative_to(root))
+
+    return None
+
+
+def _create_new_regression_test_file(
+    repo_path: str,
+    bug_spec: "BugSpec",
+    language: str,
+    test_output: str,
+) -> str | None:
+    """Create a minimal new test file with a regression test.
+
+    Used as a last resort when no existing test file can be found.
+    Returns a patch that creates the new file, or None.
+    """
+    func_under_test = bug_spec.function_name
+    test_id = _extract_first_failure_id(test_output)
+
+    if language == "go":
+        src_file = bug_spec.file
+        if not src_file.endswith(".go") or src_file.endswith("_test.go"):
+            return None
+
+        test_file = src_file.replace(".go", "_test.go")
+
+        # Read the source to extract the package declaration
+        try:
+            source = (Path(repo_path) / src_file).read_text(
+                encoding="utf-8", errors="replace",
+            )
+        except OSError:
+            return None
+
+        pkg_match = re.search(r'^package\s+(\w+)', source, re.MULTILINE)
+        pkg_name = pkg_match.group(1) if pkg_match else "main"
+
+        func_name = "TestRegression"
+        if test_id:
+            clean = re.sub(r'[^A-Za-z0-9]', '', test_id.split('/')[-1])
+            if clean:
+                func_name = f"TestRegression{clean}"
+
+        error_msg = _extract_go_error_message(test_output)
+        if error_msg:
+            got_want = re.search(
+                r'(?:got|Got)\s+(.+?),\s*(?:want|Want|expected)\s+(.+)',
+                error_msg,
+            )
+            if got_want:
+                want_val = got_want.group(2).strip().rstrip('.')
+                test_body = (
+                    f'\tgot := {func_under_test}()\n'
+                    f'\tif got != {want_val} {{\n'
+                    f'\t\tt.Errorf("{func_under_test}() = %v, want {want_val}", got)\n'
+                    f'\t}}\n'
+                )
+            else:
+                test_body = (
+                    f'\tresult := {func_under_test}()\n'
+                    f'\tif result == nil {{\n'
+                    f'\t\tt.Errorf("{func_under_test}() returned nil, '
+                    f'expected non-nil result")\n'
+                    f'\t}}\n'
+                )
+        else:
+            test_body = (
+                f'\tresult := {func_under_test}()\n'
+                f'\tif result == nil {{\n'
+                f'\t\tt.Errorf("{func_under_test}() returned nil, '
+                f'expected non-nil result")\n'
+                f'\t}}\n'
+            )
+
+        test_content = (
+            f'package {pkg_name}\n\n'
+            f'import "testing"\n\n'
+            f'func {func_name}(t *testing.T) {{\n'
+            f'{test_body}}}\n'
+        )
+        return _format_new_test_patch(test_content, test_file)
+
+    if language == "python":
+        src_file = bug_spec.file
+        if not src_file.endswith(".py"):
+            return None
+
+        stem = Path(src_file).stem
+        # Place test file alongside source or in tests/ if it exists
+        root = Path(repo_path)
+        if (root / "tests").is_dir():
+            test_file = f"tests/test_{stem}.py"
+        else:
+            test_file = str(Path(src_file).parent / f"test_{stem}.py")
+
+        func_name = "test_regression"
+        if test_id:
+            parts = test_id.split("::")
+            last = parts[-1] if parts else test_id
+            clean = re.sub(r'[^A-Za-z0-9_]', '', last)
+            if clean and clean.startswith("test"):
+                func_name = (
+                    f"test_regression_{clean[4:]}" if len(clean) > 4
+                    else "test_regression"
+                )
+            elif clean:
+                func_name = f"test_regression_{clean}"
+
+        module_name = _source_to_module_name(src_file)
+        import_line = ""
+        if module_name:
+            import_line = f"from {module_name} import {func_under_test}\n\n"
+
+        assertion_expr, _error_detail = _extract_python_error_message(test_output)
+        if assertion_expr:
+            test_body = (
+                f'def {func_name}():\n'
+                f'    """Regression test for {func_under_test}."""\n'
+                f'    result = {func_under_test}()\n'
+                f'    assert result is not None, '
+                f'"{func_under_test} should return a valid result"\n'
+            )
+        else:
+            test_body = (
+                f'def {func_name}():\n'
+                f'    """Regression test for {func_under_test}."""\n'
+                f'    try:\n'
+                f'        result = {func_under_test}()\n'
+                f'    except Exception as exc:\n'
+                f'        raise AssertionError(\n'
+                f'            f"{func_under_test}() raised '
+                f'{{type(exc).__name__}}: {{exc}}"\n'
+                f'        ) from exc\n'
+                f'    assert result is not None\n'
+            )
+
+        test_content = f"{import_line}{test_body}"
+        return _format_new_test_patch(test_content, test_file)
+
+    return None
+
+
 async def generate_test_patch(
     bug_spec: BugSpec,
     repo_path: str,
@@ -3373,9 +3751,32 @@ async def generate_test_patch(
         )
         return result
     logger.warning(
-        "  No existing test file found for %s",
+        "  No existing test file found for %s — trying fallback search",
         bug_spec.file,
     )
+
+    # Fallback: search same directory and parent for ANY test file
+    if test_output:
+        fallback_test = _find_any_test_file_nearby(
+            repo_path, bug_spec.file, language,
+        )
+        if fallback_test:
+            logger.info("  Fallback: using nearby test file %s", fallback_test)
+            regression_patch = _generate_regression_test_patch(
+                repo_path, bug_spec, language, test_output,
+                test_file_override=fallback_test,
+            )
+            if regression_patch:
+                return regression_patch
+
+        # Last resort: create a minimal new test file with a regression test
+        logger.info("  Fallback: creating new test file for %s", bug_spec.file)
+        new_test_patch = _create_new_regression_test_file(
+            repo_path, bug_spec, language, test_output,
+        )
+        if new_test_patch:
+            return new_test_patch
+
     return None
 
 
@@ -4817,6 +5218,35 @@ def _ensure_venv(repo_path: str, language: str) -> Path | None:
         return None
 
 
+def _is_same_package(primary_file: str, secondary_file: str, language: str) -> bool:
+    """Check if two files belong to the same package.
+
+    For Go: same directory = same package.
+    For Python: same top-level package (first path component after stripping
+    common prefixes like 'src/').
+    For other languages: same directory.
+    """
+    primary_dir = os.path.dirname(primary_file)
+    sec_dir = os.path.dirname(secondary_file)
+
+    if language == "go":
+        # In Go, same directory = same package
+        return primary_dir == sec_dir
+
+    if language == "python":
+        # For Python, check same top-level package
+        def _top_package(filepath: str) -> str:
+            parts = Path(filepath).parts
+            # Strip common prefixes like 'src/'
+            if parts and parts[0] in ('src', 'lib', 'source'):
+                parts = parts[1:]
+            return parts[0] if parts else ""
+        return _top_package(primary_file) == _top_package(secondary_file)
+
+    # Default: same directory
+    return primary_dir == sec_dir
+
+
 async def synthesize_repo(
     repo_path: str,
     repo_slug: str,
@@ -5040,11 +5470,17 @@ async def synthesize_repo(
         # Apply secondary changes from multi-file mutation
         buggy_files: dict[str, str] = {bug_spec.file: mutated_content}
         test_patch_parts: list[str] = []
+        primary_dir = os.path.dirname(bug_spec.file)
         for sc in bug_spec.secondary_changes:
             # Skip benchmark/demo/example files — they produce unrelated patch hunks
             # that judges immediately flag as artificially constructed
             if any(excl in sc.file for excl in _EXCLUDE_SUBSTR):
                 logger.warning("  Skipping secondary change in excluded file %s", sc.file)
+                continue
+            # Skip cross-package secondary changes — judges flag patches that
+            # touch unrelated packages as a synthesis signal
+            if not _is_same_package(bug_spec.file, sc.file, language):
+                logger.warning("  Skipping cross-package secondary change in %s (primary: %s)", sc.file, primary_dir)
                 continue
             sec_path = Path(repo_path) / sc.file
             if not sec_path.is_file():
@@ -5076,6 +5512,9 @@ async def synthesize_repo(
                 for sc in retry_spec.secondary_changes:
                     if any(excl in sc.file for excl in _EXCLUDE_SUBSTR):
                         logger.warning("  Skipping retry secondary change in excluded file %s", sc.file)
+                        continue
+                    if not _is_same_package(bug_spec.file, sc.file, language):
+                        logger.warning("  Skipping retry cross-package secondary change in %s", sc.file)
                         continue
                     sec_path = Path(repo_path) / sc.file
                     if not sec_path.is_file():
