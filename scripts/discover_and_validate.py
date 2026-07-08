@@ -42,8 +42,8 @@ from swebenchify.grader import compute_f2p
 from swebenchify.models import (
     CandidateInstance,
     EnvironmentSpec,
-    RustEnvironmentSpec,
     Repository,
+    RustEnvironmentSpec,
     ValidationResult,
     compute_java_env_spec_hash,
     compute_python_env_spec_hash,

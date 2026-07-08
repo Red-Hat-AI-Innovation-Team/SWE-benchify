@@ -5,9 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-
 from swebenchify.decontam import DecontaminationChecker
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -181,6 +179,7 @@ class TestTaskInstanceDecontamFields:
     def test_fields_in_asdict(self) -> None:
         import json
         from dataclasses import asdict
+
         from swebenchify.models import TaskInstance
         inst = TaskInstance(
             repo="r", instance_id="i", base_commit="a",

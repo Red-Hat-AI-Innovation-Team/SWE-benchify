@@ -13,11 +13,11 @@ import shutil
 from swebenchify.dispatcher import AgentResult, CostTracker, run_agent_with_retry
 from swebenchify.go_registry import GoSpecRegistry
 from swebenchify.models import (
-    GoEnvironmentSpec,
-    RustEnvironmentSpec,
     EnvironmentSpec,
-    RepoVersion,
+    GoEnvironmentSpec,
     Repository,
+    RepoVersion,
+    RustEnvironmentSpec,
     compute_env_spec_hash,
     compute_rust_env_spec_hash,
 )

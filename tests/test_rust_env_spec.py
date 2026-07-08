@@ -7,7 +7,6 @@ from typing import Any
 from swebenchify.models import RustEnvironmentSpec, compute_rust_env_spec_hash
 from swebenchify.rust_registry import RustSpecRegistry
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

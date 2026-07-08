@@ -19,9 +19,9 @@ import subprocess
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger("predictions")
 
-from swebenchify.models import TaskInstance, Repository  # noqa: E402
-from swebenchify.dispatcher import run_agent_task, CostTracker  # noqa: E402
 from swebenchify.discovery import discover_environment  # noqa: E402
+from swebenchify.dispatcher import CostTracker, run_agent_task  # noqa: E402
+from swebenchify.models import Repository, TaskInstance  # noqa: E402
 from swebenchify.workspace import WorkspaceManager  # noqa: E402
 
 DATASET = "output/swebenchify-dataset.jsonl"

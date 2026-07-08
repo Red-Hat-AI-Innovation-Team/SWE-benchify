@@ -31,7 +31,12 @@ from pathlib import Path
 from typing import Any
 
 from swebenchify.backends import get_backend
-from swebenchify.models import AnyEnvironmentSpec, EnvironmentSpec, GoEnvironmentSpec, ValidationResult
+from swebenchify.models import (
+    AnyEnvironmentSpec,
+    EnvironmentSpec,
+    GoEnvironmentSpec,
+    ValidationResult,
+)
 from swebenchify.parsers import GoJSONParser, normalize_go_f2p, normalize_go_test_id
 
 __version__ = "1.0.0"

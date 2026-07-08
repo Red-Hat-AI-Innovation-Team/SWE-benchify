@@ -13,13 +13,24 @@ from pathlib import Path
 
 from swebenchify.collector import collect_prs, load_prs, save_prs
 from swebenchify.config import Config
-from swebenchify.discovery import discover_environment, discover_go_environment, discover_rust_environment
+from swebenchify.discovery import (
+    discover_environment,
+    discover_go_environment,
+    discover_rust_environment,
+)
 from swebenchify.dispatcher import CostTracker
 from swebenchify.emitter import emit_dataset, load_product_map
 from swebenchify.extractor import extract_all, load_candidates, save_candidates
 from swebenchify.filters import apply_filters
 from swebenchify.go_registry import GoSpecRegistry
-from swebenchify.models import AnyEnvironmentSpec, GoEnvironmentSpec, RustEnvironmentSpec, QualityScore, Repository, TaskInstance
+from swebenchify.models import (
+    AnyEnvironmentSpec,
+    GoEnvironmentSpec,
+    QualityScore,
+    Repository,
+    RustEnvironmentSpec,
+    TaskInstance,
+)
 from swebenchify.rust_registry import RustSpecRegistry
 from swebenchify.sandbox import GoImageCache, SandboxConfig, is_docker_available
 from swebenchify.validator import validate_instances
@@ -289,10 +300,16 @@ async def run_repo_pipeline(
 
     # Build TaskInstances from validated candidates
     from io import StringIO
-    from swebenchify.compat import snap_version, get_environment_setup_commit, get_go_version_string
+
+    from unidiff import PatchSet
+
+    from swebenchify.compat import (
+        get_environment_setup_commit,
+        get_go_version_string,
+        snap_version,
+    )
     from swebenchify.go_registry import get_go_environment_setup_commit
     from swebenchify.rust_registry import get_rust_environment_setup_commit
-    from unidiff import PatchSet
 
     # Get environment_setup_commit from the bare clone
     bare_clone = workspace_mgr.bare_clone_path(repo)

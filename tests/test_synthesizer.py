@@ -9,14 +9,14 @@ from pathlib import Path
 import pytest
 
 from swebenchify.synthesizer import (
-    _align_indentation,
-    _analyze_test_assertions,
-    _preserve_unchanged_lines,
-    _BraceCounter,
     BugPlan,
     BugSpec,
     RepoSynthesisResult,
     SynthesisResult,
+    _align_indentation,
+    _analyze_test_assertions,
+    _analyze_test_assertions_go,
+    _BraceCounter,
     _build_social_context,
     _collect_repo_context,
     _count_changed_lines,
@@ -25,6 +25,7 @@ from swebenchify.synthesizer import (
     _discover_repo_modules,
     _edge_case_score,
     _enforce_banned_openers,
+    _ensure_venv,
     _extract_brace_language_functions,
     _extract_called_func,
     _extract_failed_test_names,
@@ -40,19 +41,19 @@ from swebenchify.synthesizer import (
     _mine_issue_style_examples,
     _mine_social_artifacts,
     _mutate_remove_raise,
-    _mutate_return_none,
     _mutate_return_non_none,
+    _mutate_return_none,
     _mutate_swap_operator,
     _normalize_test_whitespace,
     _parse_bug_response,
     _parse_incidental_changes,
     _parse_secondary_changes,
-    _ensure_venv,
+    _preserve_unchanged_lines,
     _run_tests_on_buggy_code,
     _sanitize_test_output,
     _source_to_module_name,
-    _strip_strategy_labels,
     _strip_issue_shas,
+    _strip_strategy_labels,
     _targeted_mutation,
     _truncate_issue,
     _try_targeted_mutation,
@@ -64,7 +65,6 @@ from swebenchify.synthesizer import (
     find_mutation_targets,
     generate_patch,
 )
-
 
 # ---------------------------------------------------------------------------
 # find_mutation_targets — Python
@@ -1193,6 +1193,7 @@ def test_issue_description_no_file_leak() -> None:
     with patch("swebenchify.synthesizer.query", fake_query), \
          patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
+
         from swebenchify.synthesizer import generate_issue_description
         result = asyncio.run(generate_issue_description(bug_spec))
 
@@ -1210,6 +1211,7 @@ def test_issue_description_no_file_leak() -> None:
 def test_generate_issue_from_symptom_no_bugspec() -> None:
     """Without test_output, generate_issue_from_symptom returns symptom-based fallback."""
     import asyncio
+
     from swebenchify.synthesizer import generate_issue_from_symptom
     result = asyncio.run(generate_issue_from_symptom(
         symptom="time duration handling uses wrong units",
@@ -1221,6 +1223,7 @@ def test_generate_issue_from_symptom_no_bugspec() -> None:
 def test_generate_issue_from_symptom_with_style_examples() -> None:
     """Without test_output, style_examples are ignored and symptom fallback is returned."""
     import asyncio
+
     from swebenchify.synthesizer import generate_issue_from_symptom
     result = asyncio.run(generate_issue_from_symptom(
         symptom="parsing breaks on unicode input",
@@ -1271,7 +1274,8 @@ def test_find_existing_test_file_not_found(tmp_path: Path) -> None:
 
 def test_test_patch_modifies_existing_file(tmp_path: Path) -> None:
     """When an existing test file is found, the patch should modify it, not create a new file."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "calc.py").write_text("def add(a, b):\n    return a + b\n")
@@ -1300,6 +1304,7 @@ def test_test_patch_modifies_existing_file(tmp_path: Path) -> None:
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()), \
          mock_patch("swebenchify.synthesizer.ResultMessage", FakeResult):
         import asyncio
+
         from swebenchify.synthesizer import generate_test_patch
         result = asyncio.run(generate_test_patch(bug_spec, str(tmp_path), "python"))
 
@@ -1373,7 +1378,8 @@ def test_collect_repo_context_empty(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def test_issue_description_has_context(tmp_path: Path) -> None:
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text('[project]\nversion = "1.5.0"\n')
@@ -1397,6 +1403,7 @@ def test_issue_description_has_context(tmp_path: Path) -> None:
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
+
         from swebenchify.synthesizer import generate_issue_description
         asyncio.run(generate_issue_description(
             bug_spec, repo_path=str(tmp_path),
@@ -2100,7 +2107,8 @@ def test_validate_test_imports_rejects_completely_fake(tmp_path: Path) -> None:
 
 def test_generate_test_patch_returns_none_without_existing_test(tmp_path: Path) -> None:
     """When no existing test file exists, generate_test_patch returns None."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "orphan.py").write_text("def orphan(): pass\n")
@@ -2116,6 +2124,7 @@ def test_generate_test_patch_returns_none_without_existing_test(tmp_path: Path) 
 
     with mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
+
         from swebenchify.synthesizer import generate_test_patch
         result = asyncio.run(generate_test_patch(bug_spec, str(tmp_path), "python"))
 
@@ -2283,6 +2292,7 @@ def test_truncate_issue_keeps_title() -> None:
 def test_generate_issue_from_symptom_no_llm_without_test_output() -> None:
     """Without test_output, no LLM is called — symptom fallback is returned."""
     import asyncio
+
     from swebenchify.synthesizer import generate_issue_from_symptom
     result = asyncio.run(generate_issue_from_symptom(
         symptom="parsing breaks on unicode",
@@ -2365,7 +2375,8 @@ def test_find_related_files_finds_test_files(tmp_path: Path) -> None:
 
 def test_plan_multi_file_mutation_prompt() -> None:
     """Verify prompt is constructed correctly with target and related files."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     captured_prompts: list[str] = []
 
@@ -2377,6 +2388,7 @@ def test_plan_multi_file_mutation_prompt() -> None:
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
+
         from swebenchify.synthesizer import _plan_multi_file_mutation
         result = asyncio.run(_plan_multi_file_mutation(
             target_func_code="def process(x):\n    return x + 1",
@@ -2396,6 +2408,7 @@ def test_plan_multi_file_mutation_prompt() -> None:
 def test_plan_multi_file_mutation_returns_none_without_related() -> None:
     """Returns None when no related files are provided."""
     import asyncio
+
     from swebenchify.synthesizer import _plan_multi_file_mutation
     result = asyncio.run(_plan_multi_file_mutation(
         target_func_code="def foo(): pass",
@@ -2460,7 +2473,8 @@ def test_enforce_banned_openers_no_awkward_concatenation() -> None:
 
 def test_introduce_bug_receives_bug_plan() -> None:
     """When bug_plan is provided, its content appears in the LLM prompt."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     captured_prompts: list[str] = []
 
@@ -2485,6 +2499,7 @@ def test_introduce_bug_receives_bug_plan() -> None:
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
+
         from swebenchify.synthesizer import introduce_bug
         asyncio.run(introduce_bug(target, bug_plan=plan))
 
@@ -2611,7 +2626,9 @@ def test_build_social_context_empty_artifacts() -> None:
 
 def test_bug_to_symptom_includes_file_context() -> None:
     """When file_path is provided, the prompt anchors the symptom to that module."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
+
     import swebenchify.synthesizer as _synth
 
     captured_prompts: list[str] = []
@@ -2639,7 +2656,9 @@ def test_bug_to_symptom_includes_file_context() -> None:
 
 def test_bug_to_symptom_no_file_path() -> None:
     """Without file_path, no file context appears in the prompt."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
+
     import swebenchify.synthesizer as _synth
 
     captured_prompts: list[str] = []
@@ -2667,7 +2686,8 @@ def test_bug_to_symptom_no_file_path() -> None:
 
 def test_generate_issue_from_symptom_data_first() -> None:
     """When test_output is provided, the issue contains the traceback text."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     async def fake_query(prompt: str, options: object = None):
         class FakeResult:
@@ -2686,6 +2706,7 @@ def test_generate_issue_from_symptom_data_first() -> None:
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()), \
          mock_patch("swebenchify.synthesizer.ResultMessage", type("FR", (), {})):
         import asyncio
+
         from swebenchify.synthesizer import generate_issue_from_symptom
         result = asyncio.run(generate_issue_from_symptom(
             symptom="parsing fails on unicode",
@@ -2700,7 +2721,8 @@ def test_generate_issue_from_symptom_data_first() -> None:
 
 def test_generate_issue_from_symptom_data_first_fallback() -> None:
     """Data-first path produces reasonable output even when LLM fails."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     async def fake_query(prompt: str, options: object = None):
         return
@@ -2718,6 +2740,7 @@ def test_generate_issue_from_symptom_data_first_fallback() -> None:
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
+
         from swebenchify.synthesizer import generate_issue_from_symptom
         result = asyncio.run(generate_issue_from_symptom(
             symptom="broken feature",
@@ -2731,6 +2754,7 @@ def test_generate_issue_from_symptom_data_first_fallback() -> None:
 def test_generate_issue_from_symptom_with_social_context() -> None:
     """Social context is appended when test_output is provided."""
     import asyncio
+
     from swebenchify.synthesizer import generate_issue_from_symptom
     test_output = (
         "FAILED tests/test_foo.py::test_bar\n"
@@ -2750,6 +2774,7 @@ def test_generate_issue_from_symptom_with_social_context() -> None:
 def test_generate_issue_from_symptom_no_llm_for_symptom_only() -> None:
     """Without test_output, result contains symptom in a code block."""
     import asyncio
+
     from swebenchify.synthesizer import generate_issue_from_symptom
     result = asyncio.run(generate_issue_from_symptom(
         symptom="test symptom",
@@ -2764,8 +2789,9 @@ def test_generate_issue_from_symptom_no_llm_for_symptom_only() -> None:
 
 def test_patch_floor_accepts_5_lines_500_chars() -> None:
     """Verify new thresholds: 2 changed lines, 100 chars."""
-    import swebenchify.synthesizer as mod
     import inspect
+
+    import swebenchify.synthesizer as mod
     source = inspect.getsource(mod.synthesize_repo)
     assert "changed >= 2" in source
     assert 'len(patch) >= 100' in source
@@ -2773,8 +2799,9 @@ def test_patch_floor_accepts_5_lines_500_chars() -> None:
 
 def test_patch_floor_log_messages_updated() -> None:
     """Verify log messages reflect new thresholds."""
-    import swebenchify.synthesizer as mod
     import inspect
+
+    import swebenchify.synthesizer as mod
     source = inspect.getsource(mod.synthesize_repo)
     assert 'changed lines < 2' in source
     assert 'chars < 100' in source
@@ -2887,7 +2914,8 @@ def test_is_valid_test_output_all_pass() -> None:
 
 def test_generate_issue_from_symptom_module_not_found_fallback() -> None:
     """ModuleNotFoundError in test_output triggers LLM-only fallback."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     async def fake_query(prompt: str, options: object = None):
         return
@@ -2898,6 +2926,7 @@ def test_generate_issue_from_symptom_module_not_found_fallback() -> None:
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
+
         from swebenchify.synthesizer import generate_issue_from_symptom
         result = asyncio.run(generate_issue_from_symptom(
             symptom="debug warning inverted",
@@ -2910,7 +2939,8 @@ def test_generate_issue_from_symptom_module_not_found_fallback() -> None:
 
 def test_generate_issue_from_symptom_short_output_fallback() -> None:
     """Short test output (< 200 chars) triggers LLM-only fallback."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     async def fake_query(prompt: str, options: object = None):
         return
@@ -2919,6 +2949,7 @@ def test_generate_issue_from_symptom_short_output_fallback() -> None:
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
+
         from swebenchify.synthesizer import generate_issue_from_symptom
         result = asyncio.run(generate_issue_from_symptom(
             symptom="broken feature",
@@ -2930,7 +2961,8 @@ def test_generate_issue_from_symptom_short_output_fallback() -> None:
 
 def test_generate_issue_from_symptom_real_failure_uses_data_first() -> None:
     """Real test failure output uses the data-first path."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     async def fake_query(prompt: str, options: object = None):
         return
@@ -2948,6 +2980,7 @@ def test_generate_issue_from_symptom_real_failure_uses_data_first() -> None:
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
+
         from swebenchify.synthesizer import generate_issue_from_symptom
         result = asyncio.run(generate_issue_from_symptom(
             symptom="calculation returns wrong value",
@@ -3140,6 +3173,7 @@ def test_load_dataset_examples_handles_malformed_json(tmp_path: Path) -> None:
 def test_generate_issue_from_symptom_dataset_examples_ignored() -> None:
     """dataset_examples are ignored since LLM is no longer used for issues."""
     import asyncio
+
     from swebenchify.synthesizer import generate_issue_from_symptom
     result = asyncio.run(generate_issue_from_symptom(
         symptom="parsing breaks on unicode",
@@ -3150,7 +3184,8 @@ def test_generate_issue_from_symptom_dataset_examples_ignored() -> None:
 
 def test_generate_issue_from_symptom_few_shot_not_used_for_data_first() -> None:
     """The data-first path (with test_output) is unchanged by dataset_examples."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     captured_prompts: list[str] = []
 
@@ -3170,6 +3205,7 @@ def test_generate_issue_from_symptom_few_shot_not_used_for_data_first() -> None:
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
+
         from swebenchify.synthesizer import generate_issue_from_symptom
         result = asyncio.run(generate_issue_from_symptom(
             symptom="calculation fails",
@@ -3189,6 +3225,7 @@ def test_generate_issue_from_symptom_few_shot_not_used_for_data_first() -> None:
 def test_pip_install_uses_sys_executable() -> None:
     """Verify pip install commands use sys.executable, not bare 'pip'."""
     import inspect
+
     import swebenchify.synthesizer as mod
     source = inspect.getsource(mod._run_tests_on_buggy_code)
     assert "sys.executable" in source
@@ -3494,7 +3531,8 @@ def test_run_tests_no_deselect_when_baseline_clean(tmp_path: Path) -> None:
 
 def test_data_first_uses_narrative_rewrite_with_fallback() -> None:
     """Data-first path calls LLM for narrative rewrite, falls back to programmatic draft."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     captured_prompts: list[str] = []
 
@@ -3514,6 +3552,7 @@ def test_data_first_uses_narrative_rewrite_with_fallback() -> None:
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
+
         from swebenchify.synthesizer import generate_issue_from_symptom
         result = asyncio.run(generate_issue_from_symptom(
             symptom="calculation fails",
@@ -3562,7 +3601,8 @@ def test_count_test_functions_empty() -> None:
 
 def test_test_patch_rejects_missing_function_def(tmp_path: Path) -> None:
     """When the LLM response lacks the function definition, the patch is rejected."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "calc.py").write_text("def add(a, b):\n    return a + b\n")
@@ -3591,6 +3631,7 @@ def test_test_patch_rejects_missing_function_def(tmp_path: Path) -> None:
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()), \
          mock_patch("swebenchify.synthesizer.ResultMessage", FakeResult):
         import asyncio
+
         from swebenchify.synthesizer import _generate_test_patch_existing
         result = asyncio.run(_generate_test_patch_existing(
             bug_spec, str(tmp_path), "tests/test_calc.py", "python", "sonnet",
@@ -3601,7 +3642,8 @@ def test_test_patch_rejects_missing_function_def(tmp_path: Path) -> None:
 
 def test_test_patch_accepts_modified_existing_functions(tmp_path: Path) -> None:
     """When the LLM returns a modified function, the patch is accepted."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "calc.py").write_text("def add(a, b):\n    return a + b\n")
@@ -3630,6 +3672,7 @@ def test_test_patch_accepts_modified_existing_functions(tmp_path: Path) -> None:
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()), \
          mock_patch("swebenchify.synthesizer.ResultMessage", FakeResult):
         import asyncio
+
         from swebenchify.synthesizer import _generate_test_patch_existing
         result = asyncio.run(_generate_test_patch_existing(
             bug_spec, str(tmp_path), "tests/test_calc.py", "python", "sonnet",
@@ -3646,7 +3689,8 @@ def test_test_patch_accepts_modified_existing_functions(tmp_path: Path) -> None:
 
 def test_test_generation_prompt_function_level() -> None:
     """Verify the prompt sends only the target function and uses HARD CONSTRAINT."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     captured_prompts: list[str] = []
 
@@ -3671,6 +3715,7 @@ def test_test_generation_prompt_function_level() -> None:
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
+
         from swebenchify.synthesizer import _generate_test_patch_existing
         asyncio.run(_generate_test_patch_existing(
             bug_spec, str(tmp_dir), "test_calc.py", "python", "sonnet",
@@ -3717,8 +3762,8 @@ def test_align_indentation_normalizes_blank_lines() -> None:
 
 def test_synthesize_repo_skips_candidate_without_test_failures() -> None:
     """Candidates without valid test output are skipped (data-first path required)."""
-    from unittest.mock import AsyncMock, patch
     import asyncio
+    from unittest.mock import AsyncMock, patch
 
     target = {
         "file": "src/foo.py",
@@ -4045,9 +4090,9 @@ class TestAnalyzeTestAssertions:
         assert result[0]["type"] == "falsy"
         assert result[0]["called_function"] == "is_valid"
 
-    def test_non_python_returns_empty(self) -> None:
+    def test_non_supported_language_returns_empty(self) -> None:
         src = "func TestAdd(t *testing.T) {}\n"
-        result = _analyze_test_assertions(src, "go")
+        result = _analyze_test_assertions(src, "rust")
         assert result == []
 
     def test_multiple_assertions(self) -> None:
@@ -4110,6 +4155,232 @@ class TestAnalyzeTestAssertions:
         assert len(result) == 1
         assert result[0]["type"] == "falsy"
         assert result[0]["called_function"] == "is_empty"
+
+
+class TestAnalyzeTestAssertionsGo:
+    """Tests for _analyze_test_assertions_go and Go support in _analyze_test_assertions."""
+
+    def test_pattern1_inline_if_init(self) -> None:
+        """Pattern 1: if got := FuncName(args); got != expected { t.Errorf(...) }"""
+        src = (
+            'func TestMethodFamily(t *testing.T) {\n'
+            '\tif got := methodFamily(ut.method); got != ut.wantMethodFamily {\n'
+            '\t\tt.Fatalf("methodFamily(%s) = %s, want %s", ut.method, got, ut.wantMethodFamily)\n'
+            '\t}\n'
+            '}\n'
+        )
+        result = _analyze_test_assertions(src, "go")
+        assert len(result) >= 1
+        a = result[0]
+        assert a["type"] == "equality"
+        assert a["called_function"] == "methodFamily"
+        assert "methodFamily" in a["expression"]
+        assert a["line"] == 2
+
+    def test_pattern1_equality_operator(self) -> None:
+        """Pattern 1 with == instead of !=."""
+        src = (
+            'func TestFoo(t *testing.T) {\n'
+            '\tif got := Compute(x); got == badValue {\n'
+            '\t\tt.Errorf("unexpected")\n'
+            '\t}\n'
+            '}\n'
+        )
+        result = _analyze_test_assertions(src, "go")
+        assert len(result) >= 1
+        assert result[0]["type"] == "inequality"
+        assert result[0]["called_function"] == "Compute"
+
+    def test_pattern2a_testify_assert_equal(self) -> None:
+        """Pattern 2a: assert.Equal(t, expected, FunctionName(args))"""
+        src = 'assert.Equal(t, expectedVal, ComputeHash(data))\n'
+        result = _analyze_test_assertions_go(src)
+        assert len(result) == 1
+        assert result[0]["type"] == "equality"
+        assert result[0]["called_function"] == "ComputeHash"
+        assert result[0]["expected"] == "expectedVal"
+
+    def test_pattern2a_require_equal(self) -> None:
+        """Pattern 2a: require.Equal(t, expected, FunctionName(args))"""
+        src = 'require.Equal(t, 42, GetCount(ctx))\n'
+        result = _analyze_test_assertions_go(src)
+        assert len(result) == 1
+        assert result[0]["type"] == "equality"
+        assert result[0]["called_function"] == "GetCount"
+
+    def test_pattern2b_assert_noerror(self) -> None:
+        """Pattern 2b: assert.NoError(t, FunctionName(args))"""
+        src = 'assert.NoError(t, Validate(input))\n'
+        result = _analyze_test_assertions_go(src)
+        assert len(result) == 1
+        assert result[0]["type"] == "error_check"
+        assert result[0]["called_function"] == "Validate"
+
+    def test_pattern2c_assert_true(self) -> None:
+        """Pattern 2c: assert.True(t, FunctionName(args))"""
+        src = 'assert.True(t, IsValid(config))\n'
+        result = _analyze_test_assertions_go(src)
+        assert len(result) == 1
+        assert result[0]["type"] == "truthy"
+        assert result[0]["called_function"] == "IsValid"
+
+    def test_pattern2c_assert_false(self) -> None:
+        """Pattern 2c: assert.False(t, FunctionName(args))"""
+        src = 'assert.False(t, IsEmpty(list))\n'
+        result = _analyze_test_assertions_go(src)
+        assert len(result) == 1
+        assert result[0]["type"] == "falsy"
+        assert result[0]["called_function"] == "IsEmpty"
+
+    def test_pattern2d_assert_nil(self) -> None:
+        """Pattern 2d: assert.Nil(t, FunctionName(args))"""
+        src = 'assert.Nil(t, GetError(ctx))\n'
+        result = _analyze_test_assertions_go(src)
+        assert len(result) == 1
+        assert result[0]["type"] == "nil_check"
+        assert result[0]["called_function"] == "GetError"
+
+    def test_pattern2d_assert_not_nil(self) -> None:
+        """Pattern 2d: assert.NotNil(t, FunctionName(args))"""
+        src = 'assert.NotNil(t, CreateClient(opts))\n'
+        result = _analyze_test_assertions_go(src)
+        assert len(result) == 1
+        assert result[0]["type"] == "not_nil"
+        assert result[0]["called_function"] == "CreateClient"
+
+    def test_pattern2e_assert_error(self) -> None:
+        """Pattern 2e: assert.Error(t, FunctionName(args))"""
+        src = 'assert.Error(t, ParseConfig(badInput))\n'
+        result = _analyze_test_assertions_go(src)
+        assert len(result) == 1
+        assert result[0]["type"] == "error_check"
+        assert result[0]["called_function"] == "ParseConfig"
+
+    def test_pattern3_direct_comparison(self) -> None:
+        """Pattern 3: got := FunctionName(args) / if got != want { ... }"""
+        src = (
+            'want := expectedValue\n'
+            'got := ComputeResult(input)\n'
+            'if got != want {\n'
+            '\tt.Fatalf("ComputeResult() = %v, want %v", got, want)\n'
+            '}\n'
+        )
+        result = _analyze_test_assertions_go(src)
+        assert len(result) >= 1
+        found = [a for a in result if a["called_function"] == "ComputeResult"]
+        assert len(found) >= 1
+        assert found[0]["type"] == "equality"
+
+    def test_pattern4_error_check(self) -> None:
+        """Pattern 4: result, err := FunctionName(args) / if err != nil { ... }"""
+        src = (
+            'result, err := Connect(addr)\n'
+            'if err != nil {\n'
+            '\tt.Fatal(err)\n'
+            '}\n'
+        )
+        result = _analyze_test_assertions_go(src)
+        assert len(result) >= 1
+        found = [a for a in result if a["called_function"] == "Connect"]
+        assert len(found) >= 1
+        assert found[0]["type"] == "error_check"
+
+    def test_pattern4_single_return_error(self) -> None:
+        """Pattern 4: err := FunctionName(args) / if err != nil { ... }"""
+        src = (
+            'err := Initialize(config)\n'
+            'if err != nil {\n'
+            '\tt.Fatal(err)\n'
+            '}\n'
+        )
+        result = _analyze_test_assertions_go(src)
+        assert len(result) >= 1
+        found = [a for a in result if a["called_function"] == "Initialize"]
+        assert len(found) >= 1
+
+    def test_stdlib_terrorf_function_extraction(self) -> None:
+        """t.Errorf/t.Fatalf with function name in format string."""
+        src = (
+            'if encoding.GetCodecV2(proto.Name) == nil {\n'
+            '\tt.Fatalf("encoding.GetCodec(%q) must not be nil", proto.Name)\n'
+            '}\n'
+        )
+        result = _analyze_test_assertions_go(src)
+        # Should extract GetCodec or GetCodecV2 from either the code or format string
+        assert len(result) >= 1
+
+    def test_multiple_assertions(self) -> None:
+        """Multiple assertion patterns in a single test."""
+        src = (
+            'func TestAll(t *testing.T) {\n'
+            '\tif got := Add(1, 2); got != 3 {\n'
+            '\t\tt.Errorf("Add() = %v, want 3", got)\n'
+            '\t}\n'
+            '\terr := Validate(input)\n'
+            '\tif err != nil {\n'
+            '\t\tt.Fatal(err)\n'
+            '\t}\n'
+            '\tresult := Transform(data)\n'
+            '\tif result != expected {\n'
+            '\t\tt.Fatalf("wrong result")\n'
+            '\t}\n'
+            '}\n'
+        )
+        result = _analyze_test_assertions_go(src)
+        funcs = [a.get("called_function") for a in result if a.get("called_function")]
+        assert "Add" in funcs
+        assert "Validate" in funcs
+        assert "Transform" in funcs
+
+    def test_via_analyze_test_assertions(self) -> None:
+        """Verify _analyze_test_assertions dispatches to Go correctly."""
+        src = (
+            'func TestFoo(t *testing.T) {\n'
+            '\tif got := DoWork(x); got != want {\n'
+            '\t\tt.Errorf("failed")\n'
+            '\t}\n'
+            '}\n'
+        )
+        result = _analyze_test_assertions(src, "go")
+        assert len(result) >= 1
+        assert result[0]["called_function"] == "DoWork"
+
+    def test_real_grpc_trace_test(self) -> None:
+        """Verify extraction on real grpc-go trace_test.go content."""
+        src = (
+            'func (s) TestMethodFamily(t *testing.T) {\n'
+            '\tcases := []struct {\n'
+            '\t\tdesc             string\n'
+            '\t\tmethod           string\n'
+            '\t\twantMethodFamily string\n'
+            '\t}{\n'
+            '\t\t{desc: "No leading slash", method: "pkg.service/method", wantMethodFamily: "pkg.service"},\n'
+            '\t}\n'
+            '\tfor _, ut := range cases {\n'
+            '\t\tt.Run(ut.desc, func(t *testing.T) {\n'
+            '\t\t\tif got := methodFamily(ut.method); got != ut.wantMethodFamily {\n'
+            '\t\t\t\tt.Fatalf("methodFamily(%s) = %s, want %s", ut.method, got, ut.wantMethodFamily)\n'
+            '\t\t\t}\n'
+            '\t\t})\n'
+            '\t}\n'
+            '}\n'
+        )
+        result = _analyze_test_assertions(src, "go")
+        assert len(result) >= 1
+        funcs = [a.get("called_function") for a in result]
+        assert "methodFamily" in funcs
+
+    def test_real_grpc_codec_test(self) -> None:
+        """Verify extraction on real grpc-go codec_test.go content."""
+        src = (
+            'func (s) TestGetCodecForProtoIsNotNil(t *testing.T) {\n'
+            '\tif encoding.GetCodecV2(proto.Name) == nil {\n'
+            '\t\tt.Fatalf("encoding.GetCodec(%q) must not be nil by default", proto.Name)\n'
+            '\t}\n'
+            '}\n'
+        )
+        result = _analyze_test_assertions(src, "go")
+        assert len(result) >= 1
 
 
 class TestMutateSwapOperator:

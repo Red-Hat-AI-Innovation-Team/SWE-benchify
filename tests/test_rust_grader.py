@@ -8,11 +8,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from swebenchify.backends import LanguageBackend, get_backend
-from swebenchify.grader import _parse_f2p_output_generic, compute_f2p, _F2P_PHASE_SEPARATOR
+from swebenchify.grader import (
+    _F2P_PHASE_SEPARATOR,
+    _parse_f2p_output_generic,
+    compute_f2p,
+)
 from swebenchify.models import RustEnvironmentSpec
 from swebenchify.parsers import RustTestParser, normalize_rust_f2p
 from swebenchify.sandbox import RustImageCache
-
 
 # ---------------------------------------------------------------------------
 # Fixture helpers

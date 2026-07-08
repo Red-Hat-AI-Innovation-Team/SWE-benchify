@@ -186,8 +186,8 @@ def _cmd_validate(args: argparse.Namespace) -> None:
 
     config = load_config(args.config)
 
-    from swebenchify.dispatcher import CostTracker
     from swebenchify.discovery import discover_environment
+    from swebenchify.dispatcher import CostTracker
     from swebenchify.extractor import load_candidates
     from swebenchify.models import Repository
     from swebenchify.validator import validate_instance
@@ -336,12 +336,17 @@ def _cmd_remote_validate(args: argparse.Namespace) -> None:
 
 def _cmd_harbor(args: argparse.Namespace) -> None:
     """Convert existing JSONL to Harbor task format."""
+    import dataclasses
     import json
 
-    import dataclasses
-
     from swebenchify.harbor_emitter import emit_harbor_dataset
-    from swebenchify.models import AnyEnvironmentSpec, EnvironmentSpec, GoEnvironmentSpec, RustEnvironmentSpec, TaskInstance
+    from swebenchify.models import (
+        AnyEnvironmentSpec,
+        EnvironmentSpec,
+        GoEnvironmentSpec,
+        RustEnvironmentSpec,
+        TaskInstance,
+    )
 
     instances: list[TaskInstance] = []
     valid_fields = {f.name for f in dataclasses.fields(TaskInstance)}

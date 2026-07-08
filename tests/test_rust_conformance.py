@@ -88,6 +88,7 @@ class TestRustHunkClassification:
     def test_split_patch_rust_diff(self):
         """A diff with both src/ and tests/ changes splits correctly."""
         import textwrap
+
         from swebenchify.extractor import split_patch
 
         diff = textwrap.dedent("""\

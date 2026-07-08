@@ -15,13 +15,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from swebenchify.grader import (
+    _F2P_PHASE_SEPARATOR,
     GradeResult,
     __version__,
     _affected_packages,
     _compute_f2p_p2p,
     _decode_list,
     _extract_section,
-    _F2P_PHASE_SEPARATOR,
     _make_dockerfile,
     _make_f2p_run_script,
     _make_run_script,
@@ -30,7 +30,6 @@ from swebenchify.grader import (
     create_repo_tarball,
     grade,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixture helpers

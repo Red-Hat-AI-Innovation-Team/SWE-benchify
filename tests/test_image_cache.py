@@ -10,10 +10,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-
 from swebenchify.models import GoEnvironmentSpec
 from swebenchify.sandbox import GoDockerfile, GoImageCache
-
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -12,10 +12,10 @@ import os
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("eval_verified")
 
-from swebenchify.models import TaskInstance, Repository  # noqa: E402
-from swebenchify.eval_harness import eval_instance  # noqa: E402
 from swebenchify.discovery import discover_environment  # noqa: E402
 from swebenchify.dispatcher import CostTracker  # noqa: E402
+from swebenchify.eval_harness import eval_instance  # noqa: E402
+from swebenchify.models import Repository, TaskInstance  # noqa: E402
 from swebenchify.workspace import WorkspaceManager  # noqa: E402
 
 WORKSPACE_ROOT = "output/workspaces"
