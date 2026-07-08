@@ -21,6 +21,7 @@ from swebenchify.synthesizer import (
     _collect_repo_context,
     _count_changed_lines,
     _count_test_functions,
+    _create_new_regression_test_file,
     _describe_targeted_mutation,
     _discover_repo_modules,
     _edge_case_score,
@@ -29,12 +30,17 @@ from swebenchify.synthesizer import (
     _extract_brace_language_functions,
     _extract_called_func,
     _extract_failed_test_names,
+    _extract_go_error_message,
+    _extract_python_error_message,
+    _find_any_test_file_nearby,
     _find_existing_test_file,
     _find_file_commits,
     _find_related_files,
     _find_test_file_importing,
     _format_new_test_patch,
+    _generate_regression_test_patch,
     _humanize_traceback,
+    _is_same_package,
     _is_stdlib_or_installed,
     _is_valid_test_output,
     _load_dataset_examples,
@@ -4650,3 +4656,476 @@ class TestTryTargetedMutation:
     def test_returns_none_for_non_python(self, tmp_path: Path) -> None:
         result = _try_targeted_mutation(str(tmp_path), {}, "test.go", "go")
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _extract_go_error_message
+# ---------------------------------------------------------------------------
+
+class TestExtractGoErrorMessage:
+    def test_got_want_pattern(self) -> None:
+        output = 'resolver_test.go:42: got "foo", want "bar"'
+        result = _extract_go_error_message(output)
+        assert result is not None
+        assert "got" in result
+        assert "want" in result
+
+    def test_testify_expected_pattern(self) -> None:
+        output = 'Expected "foo" to equal "bar"'
+        result = _extract_go_error_message(output)
+        assert result is not None
+        assert "Expected" in result
+
+    def test_error_pattern(self) -> None:
+        output = 'Error: value mismatch'
+        result = _extract_go_error_message(output)
+        assert result is not None
+        assert "value mismatch" in result
+
+    def test_no_match(self) -> None:
+        output = 'PASS\nok  pkg 0.1s'
+        assert _extract_go_error_message(output) is None
+
+
+# ---------------------------------------------------------------------------
+# _extract_python_error_message
+# ---------------------------------------------------------------------------
+
+class TestExtractPythonErrorMessage:
+    def test_assertion_error(self) -> None:
+        output = 'AssertionError: 3 != 4'
+        expr, detail = _extract_python_error_message(output)
+        assert expr == '3 != 4'
+        assert detail is None
+
+    def test_assert_line(self) -> None:
+        output = '>       assert result == expected'
+        expr, detail = _extract_python_error_message(output)
+        assert expr is not None
+        assert 'result == expected' in expr
+
+    def test_e_assert_line(self) -> None:
+        output = 'E       assert 1 == 2'
+        expr, detail = _extract_python_error_message(output)
+        assert expr is not None
+        assert '1 == 2' in expr
+
+    def test_no_match(self) -> None:
+        output = '1 passed in 0.01s'
+        expr, detail = _extract_python_error_message(output)
+        assert expr is None
+        assert detail is None
+
+
+# ---------------------------------------------------------------------------
+# _generate_regression_test_patch — Go with real assertions
+# ---------------------------------------------------------------------------
+
+class TestGenerateRegressionTestPatchGo:
+    def test_generates_test_with_got_want_assertion(self, tmp_path: Path) -> None:
+        pkg_dir = tmp_path / "pkg"
+        pkg_dir.mkdir()
+        (pkg_dir / "foo.go").write_text("package pkg\nfunc Solve() int { return 42 }\n")
+        (pkg_dir / "foo_test.go").write_text(
+            "package pkg\n\nimport \"testing\"\n\n"
+            "func TestSolve(t *testing.T) {\n\tif Solve() != 42 {\n\t\tt.Fatal()\n\t}\n}\n"
+        )
+        bug_spec = BugSpec(
+            file="pkg/foo.go",
+            function_name="Solve",
+            original_code="func Solve() int { return 42 }",
+            buggy_code="func Solve() int { return 41 }",
+            bug_description="Off by one",
+            bug_category="off-by-one",
+        )
+        test_output = '--- FAIL: TestSolve (0.00s)\n    foo_test.go:5: got 41, want 42\nFAIL'
+        result = _generate_regression_test_patch(str(tmp_path), bug_spec, "go", test_output)
+        assert result != ""
+        assert "TestRegression" in result
+        assert "t.Errorf" in result or "assert." in result
+        # Must NOT contain empty t.Helper()-only body
+        assert "t.Helper()\n}" not in result
+
+    def test_generates_test_with_testify_style(self, tmp_path: Path) -> None:
+        pkg_dir = tmp_path / "pkg"
+        pkg_dir.mkdir()
+        (pkg_dir / "bar.go").write_text("package pkg\nfunc Bar() string { return \"ok\" }\n")
+        (pkg_dir / "bar_test.go").write_text(
+            "package pkg\n\nimport (\n\t\"testing\"\n\n"
+            "\t\"github.com/stretchr/testify/assert\"\n)\n\n"
+            "func TestBar(t *testing.T) {\n\tassert.Equal(t, \"ok\", Bar())\n}\n"
+        )
+        bug_spec = BugSpec(
+            file="pkg/bar.go",
+            function_name="Bar",
+            original_code='func Bar() string { return "ok" }',
+            buggy_code='func Bar() string { return "fail" }',
+            bug_description="Wrong return",
+            bug_category="wrong-return",
+        )
+        test_output = 'Expected "ok" to equal "fail"\n--- FAIL: TestBar (0.00s)\nFAIL'
+        result = _generate_regression_test_patch(str(tmp_path), bug_spec, "go", test_output)
+        assert result != ""
+        assert "TestRegression" in result
+        assert "assert.NotNil" in result
+
+    def test_empty_for_non_go(self, tmp_path: Path) -> None:
+        bug_spec = BugSpec(
+            file="pkg/foo.rs",
+            function_name="solve",
+            original_code="fn solve() {}",
+            buggy_code="fn solve() { panic!() }",
+            bug_description="Panic",
+            bug_category="panic",
+        )
+        result = _generate_regression_test_patch(str(tmp_path), bug_spec, "rust", "FAIL")
+        assert result == ""
+
+    def test_fallback_no_error_message(self, tmp_path: Path) -> None:
+        pkg_dir = tmp_path / "pkg"
+        pkg_dir.mkdir()
+        (pkg_dir / "foo.go").write_text("package pkg\nfunc Foo() *int { return nil }\n")
+        (pkg_dir / "foo_test.go").write_text(
+            "package pkg\n\nimport \"testing\"\n\nfunc TestFoo(t *testing.T) {}\n"
+        )
+        bug_spec = BugSpec(
+            file="pkg/foo.go",
+            function_name="Foo",
+            original_code="func Foo() *int { return nil }",
+            buggy_code="func Foo() *int { panic(\"oops\") }",
+            bug_description="Panic",
+            bug_category="panic",
+        )
+        test_output = 'FAIL\nexit status 1'
+        result = _generate_regression_test_patch(str(tmp_path), bug_spec, "go", test_output)
+        assert result != ""
+        assert "TestRegression" in result
+        assert "panicked" in result  # defer/recover pattern
+
+
+# ---------------------------------------------------------------------------
+# _generate_regression_test_patch — Python
+# ---------------------------------------------------------------------------
+
+class TestGenerateRegressionTestPatchPython:
+    def test_generates_test_with_assertion(self, tmp_path: Path) -> None:
+        (tmp_path / "utils.py").write_text("def compute(): return 42\n")
+        (tmp_path / "test_utils.py").write_text(
+            "from utils import compute\n\ndef test_compute():\n    assert compute() == 42\n"
+        )
+        bug_spec = BugSpec(
+            file="utils.py",
+            function_name="compute",
+            original_code="def compute(): return 42",
+            buggy_code="def compute(): return 0",
+            bug_description="Wrong return",
+            bug_category="wrong-return",
+        )
+        test_output = 'FAILED tests/test_utils.py::test_compute\nAssertionError: 0 != 42'
+        result = _generate_regression_test_patch(str(tmp_path), bug_spec, "python", test_output)
+        assert result != ""
+        assert "test_regression" in result
+        assert "assert" in result
+
+    def test_generates_test_without_assertion_match(self, tmp_path: Path) -> None:
+        (tmp_path / "foo.py").write_text("def foo(): return 1\n")
+        (tmp_path / "test_foo.py").write_text(
+            "def test_foo():\n    assert True\n"
+        )
+        bug_spec = BugSpec(
+            file="foo.py",
+            function_name="foo",
+            original_code="def foo(): return 1",
+            buggy_code="def foo(): raise ValueError()",
+            bug_description="Raises error",
+            bug_category="exception",
+        )
+        test_output = 'FAILED test_foo.py::test_foo - ValueError'
+        result = _generate_regression_test_patch(str(tmp_path), bug_spec, "python", test_output)
+        assert result != ""
+        assert "test_regression" in result
+        assert "except Exception" in result  # fallback pattern
+
+    def test_empty_for_non_python(self) -> None:
+        bug_spec = BugSpec(
+            file="Foo.java",
+            function_name="solve",
+            original_code="void solve() {}",
+            buggy_code="void solve() { throw null; }",
+            bug_description="NPE",
+            bug_category="npe",
+        )
+        result = _generate_regression_test_patch("/tmp", bug_spec, "java", "FAIL")
+        assert result == ""
+
+
+# ---------------------------------------------------------------------------
+# _find_any_test_file_nearby
+# ---------------------------------------------------------------------------
+
+class TestFindAnyTestFileNearby:
+    def test_finds_go_test_same_dir(self, tmp_path: Path) -> None:
+        pkg = tmp_path / "internal" / "resolver"
+        pkg.mkdir(parents=True)
+        (pkg / "resolver.go").write_text("package resolver\n")
+        (pkg / "other_test.go").write_text("package resolver\n")
+        result = _find_any_test_file_nearby(
+            str(tmp_path), "internal/resolver/resolver.go", "go",
+        )
+        assert result == "internal/resolver/other_test.go"
+
+    def test_finds_python_test_same_dir(self, tmp_path: Path) -> None:
+        pkg = tmp_path / "mypackage"
+        pkg.mkdir()
+        (pkg / "core.py").write_text("# code\n")
+        (pkg / "test_helpers.py").write_text("def test_helper(): pass\n")
+        result = _find_any_test_file_nearby(
+            str(tmp_path), "mypackage/core.py", "python",
+        )
+        assert result == "mypackage/test_helpers.py"
+
+    def test_finds_test_in_parent_dir(self, tmp_path: Path) -> None:
+        parent = tmp_path / "pkg"
+        child = parent / "sub"
+        child.mkdir(parents=True)
+        (child / "impl.go").write_text("package sub\n")
+        (parent / "parent_test.go").write_text("package pkg\n")
+        result = _find_any_test_file_nearby(
+            str(tmp_path), "pkg/sub/impl.go", "go",
+        )
+        assert result == "pkg/parent_test.go"
+
+    def test_returns_none_when_no_test_file(self, tmp_path: Path) -> None:
+        pkg = tmp_path / "pkg"
+        pkg.mkdir()
+        (pkg / "foo.go").write_text("package pkg\n")
+        result = _find_any_test_file_nearby(
+            str(tmp_path), "pkg/foo.go", "go",
+        )
+        assert result is None
+
+    def test_finds_python_test_in_tests_dir(self, tmp_path: Path) -> None:
+        tests = tmp_path / "tests"
+        tests.mkdir()
+        (tests / "test_something.py").write_text("def test_x(): pass\n")
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "orphan.py").write_text("# code\n")
+        result = _find_any_test_file_nearby(
+            str(tmp_path), "src/orphan.py", "python",
+        )
+        assert result == "tests/test_something.py"
+
+
+# ---------------------------------------------------------------------------
+# _create_new_regression_test_file
+# ---------------------------------------------------------------------------
+
+class TestCreateNewRegressionTestFile:
+    def test_creates_go_test_file(self, tmp_path: Path) -> None:
+        pkg = tmp_path / "pkg"
+        pkg.mkdir()
+        (pkg / "foo.go").write_text("package pkg\n\nfunc Foo() int { return 1 }\n")
+        bug_spec = BugSpec(
+            file="pkg/foo.go",
+            function_name="Foo",
+            original_code="func Foo() int { return 1 }",
+            buggy_code="func Foo() int { return 0 }",
+            bug_description="Wrong return",
+            bug_category="wrong-return",
+        )
+        test_output = '--- FAIL: TestFoo (0.00s)\n    got 0, want 1\nFAIL'
+        result = _create_new_regression_test_file(
+            str(tmp_path), bug_spec, "go", test_output,
+        )
+        assert result is not None
+        assert "pkg/foo_test.go" in result
+        assert "package pkg" in result
+        assert "import \"testing\"" in result
+        assert "TestRegression" in result
+        assert "t.Errorf" in result
+
+    def test_creates_python_test_file(self, tmp_path: Path) -> None:
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "utils.py").write_text("def compute(): return 42\n")
+        bug_spec = BugSpec(
+            file="src/utils.py",
+            function_name="compute",
+            original_code="def compute(): return 42",
+            buggy_code="def compute(): return 0",
+            bug_description="Wrong return",
+            bug_category="wrong-return",
+        )
+        test_output = 'AssertionError: 0 != 42'
+        result = _create_new_regression_test_file(
+            str(tmp_path), bug_spec, "python", test_output,
+        )
+        assert result is not None
+        assert "test_utils.py" in result
+        assert "test_regression" in result
+        assert "assert" in result
+
+    def test_creates_python_test_file_in_tests_dir(self, tmp_path: Path) -> None:
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "core.py").write_text("def process(): pass\n")
+        bug_spec = BugSpec(
+            file="src/core.py",
+            function_name="process",
+            original_code="def process(): pass",
+            buggy_code="def process(): raise ValueError()",
+            bug_description="Raises error",
+            bug_category="exception",
+        )
+        test_output = 'ValueError: unexpected error'
+        result = _create_new_regression_test_file(
+            str(tmp_path), bug_spec, "python", test_output,
+        )
+        assert result is not None
+        assert "tests/test_core.py" in result
+
+    def test_returns_none_for_unsupported_language(self, tmp_path: Path) -> None:
+        bug_spec = BugSpec(
+            file="Foo.java",
+            function_name="foo",
+            original_code="void foo() {}",
+            buggy_code="void foo() { throw null; }",
+            bug_description="NPE",
+            bug_category="npe",
+        )
+        result = _create_new_regression_test_file(
+            str(tmp_path), bug_spec, "java", "FAIL",
+        )
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _is_same_package
+# ---------------------------------------------------------------------------
+
+class TestIsSamePackage:
+    def test_go_same_directory(self) -> None:
+        assert _is_same_package(
+            "internal/resolver/resolver.go",
+            "internal/resolver/wrapper.go",
+            "go",
+        ) is True
+
+    def test_go_different_directory(self) -> None:
+        assert _is_same_package(
+            "internal/resolver/resolver.go",
+            "experimental/credentials/tls.go",
+            "go",
+        ) is False
+
+    def test_python_same_top_package(self) -> None:
+        assert _is_same_package(
+            "src/mypackage/core.py",
+            "src/mypackage/utils.py",
+            "python",
+        ) is True
+
+    def test_python_same_top_package_submodule(self) -> None:
+        assert _is_same_package(
+            "mypackage/sub/core.py",
+            "mypackage/other/utils.py",
+            "python",
+        ) is True
+
+    def test_python_different_top_package(self) -> None:
+        assert _is_same_package(
+            "src/package_a/core.py",
+            "src/package_b/utils.py",
+            "python",
+        ) is False
+
+    def test_python_src_prefix_stripped(self) -> None:
+        # Both under src/mypackage -> same package
+        assert _is_same_package(
+            "src/mypackage/a.py",
+            "src/mypackage/b.py",
+            "python",
+        ) is True
+
+    def test_default_same_dir(self) -> None:
+        assert _is_same_package("pkg/a.rs", "pkg/b.rs", "rust") is True
+
+    def test_default_different_dir(self) -> None:
+        assert _is_same_package("pkg/a.rs", "other/b.rs", "rust") is False
+
+
+# ---------------------------------------------------------------------------
+# generate_test_patch — fallback path
+# ---------------------------------------------------------------------------
+
+def test_generate_test_patch_fallback_nearby(tmp_path: Path) -> None:
+    """When no exact test file exists, fallback finds a nearby test file."""
+    import asyncio
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
+
+    pkg = tmp_path / "internal" / "resolver"
+    pkg.mkdir(parents=True)
+    (pkg / "resolver_wrapper.go").write_text(
+        "package resolver\n\nfunc Wrap() string { return \"ok\" }\n"
+    )
+    # No resolver_wrapper_test.go, but there IS resolver_test.go
+    (pkg / "resolver_test.go").write_text(
+        "package resolver\n\nimport \"testing\"\n\n"
+        "func TestResolve(t *testing.T) {\n\t// existing test\n}\n"
+    )
+
+    bug_spec = BugSpec(
+        file="internal/resolver/resolver_wrapper.go",
+        function_name="Wrap",
+        original_code='func Wrap() string { return "ok" }',
+        buggy_code='func Wrap() string { return "" }',
+        bug_description="Wrong return",
+        bug_category="wrong-return",
+    )
+
+    with mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        from swebenchify.synthesizer import generate_test_patch
+        result = asyncio.run(generate_test_patch(
+            bug_spec, str(tmp_path), "go",
+            test_output='--- FAIL: TestResolve (0.00s)\n    got "", want "ok"\nFAIL',
+        ))
+
+    assert result is not None
+    assert "TestRegression" in result
+    # Should use the nearby resolver_test.go file
+    assert "resolver_test.go" in result
+
+
+def test_generate_test_patch_fallback_creates_new_file(tmp_path: Path) -> None:
+    """When no test file exists at all, creates a new test file."""
+    import asyncio
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
+
+    pkg = tmp_path / "internal" / "orphan"
+    pkg.mkdir(parents=True)
+    (pkg / "orphan.go").write_text(
+        "package orphan\n\nfunc Process() int { return 1 }\n"
+    )
+    # No test files at all
+
+    bug_spec = BugSpec(
+        file="internal/orphan/orphan.go",
+        function_name="Process",
+        original_code="func Process() int { return 1 }",
+        buggy_code="func Process() int { return 0 }",
+        bug_description="Wrong return",
+        bug_category="wrong-return",
+    )
+
+    with mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        from swebenchify.synthesizer import generate_test_patch
+        result = asyncio.run(generate_test_patch(
+            bug_spec, str(tmp_path), "go",
+            test_output='--- FAIL: TestProcess (0.00s)\n    got 0, want 1\nFAIL',
+        ))
+
+    assert result is not None
+    assert "orphan_test.go" in result
+    assert "package orphan" in result
+    assert "TestRegression" in result
