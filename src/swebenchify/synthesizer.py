@@ -35,6 +35,8 @@ from swebenchify.models import CandidateInstance
 
 logger = logging.getLogger(__name__)
 
+_go_cross_pkg_cache: dict[str, dict[str, list[str]]] = {}
+
 _LANGUAGE_EXTENSIONS: dict[str, list[str]] = {
     "python": [".py"],
     "go": [".go"],
@@ -682,7 +684,9 @@ def _extract_test_context(
     surrounding context (~20 lines around each match) as a string.
     Returns empty string if no test file or no matches found.
     """
-    test_file = _find_existing_test_file(repo_path, target_file, language)
+    test_file = _find_existing_test_file(
+        repo_path, target_file, language, function_name=function_name,
+    )
     if not test_file:
         return ""
 
@@ -2973,8 +2977,38 @@ async def generate_issue_description(
     )
 
 
+def _find_go_cross_package_test(repo_path: str, function_name: str) -> str | None:
+    """Find a Go test file in a sibling package that references function_name.
+
+    Caches grep results per repo to avoid repeated filesystem scans.
+    """
+    cache = _go_cross_pkg_cache.get(repo_path)
+    if cache is None:
+        cache = {}
+        _go_cross_pkg_cache[repo_path] = cache
+
+    if function_name in cache:
+        hits = cache[function_name]
+        return hits[0] if hits else None
+
+    try:
+        result = subprocess.run(
+            ["grep", "-rn", "--include=*_test.go", "-l", function_name, "."],
+            cwd=repo_path, capture_output=True, text=True, timeout=30,
+        )
+        files = [
+            f.lstrip("./") for f in result.stdout.strip().splitlines() if f.strip()
+        ]
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        files = []
+
+    cache[function_name] = files
+    return files[0] if files else None
+
+
 def _find_existing_test_file(
     repo_path: str, source_file: str, language: str,
+    function_name: str | None = None,
 ) -> str | None:
     """Find an existing test file corresponding to a source file.
 
@@ -3033,6 +3067,10 @@ def _find_existing_test_file(
         test_file = str(source_path.parent / f"{stem}_test.go")
         if (root / test_file).is_file():
             return test_file
+        if function_name:
+            cross_pkg = _find_go_cross_package_test(repo_path, function_name)
+            if cross_pkg:
+                return cross_pkg
     elif language == "rust":
         rust_candidates = [
             f"tests/{stem}.rs",
@@ -3142,7 +3180,10 @@ async def generate_test_patch(
     Modifies existing test files. Falls back to adding a new test function
     in the existing file when no relevant functions are found.
     """
-    existing_test = _find_existing_test_file(repo_path, bug_spec.file, language)
+    existing_test = _find_existing_test_file(
+        repo_path, bug_spec.file, language,
+        function_name=bug_spec.function_name,
+    )
 
     if existing_test:
         result = await _generate_test_patch_existing(
@@ -4301,6 +4342,7 @@ def _run_tests_on_buggy_code(
     language: str,
     timeout: int = 120,
     target_file: str | None = None,
+    function_name: str | None = None,
 ) -> str | None:
     """Run the project's test suite against buggy code and capture output.
 
@@ -4348,8 +4390,18 @@ def _run_tests_on_buggy_code(
             logger.debug("  Running targeted tests: %s", test_file)
     elif target_file and language == "go":
         pkg_dir = os.path.dirname(target_file) or "."
-        test_cmd = ["go", "test", "-short", "-count=1", "-timeout", "90s", f"./{pkg_dir}"]
-        logger.debug("  Running targeted Go tests: ./%s", pkg_dir)
+        co_located_test = Path(repo_path) / (
+            str(Path(target_file).parent / f"{Path(target_file).stem}_test.go")
+        )
+        if co_located_test.is_file():
+            test_cmd = ["go", "test", "-short", "-count=1", "-timeout", "90s", f"./{pkg_dir}"]
+            logger.debug("  Running targeted Go tests: ./%s", pkg_dir)
+        elif function_name and _find_go_cross_package_test(repo_path, function_name):
+            test_cmd = ["go", "test", "-short", "-count=1", "-timeout", "90s", "./..."]
+            logger.debug("  Running cross-package Go tests for %s: ./...", function_name)
+        else:
+            test_cmd = ["go", "test", "-short", "-count=1", "-timeout", "90s", f"./{pkg_dir}"]
+            logger.debug("  Running targeted Go tests: ./%s", pkg_dir)
     elif target_file and language == "rust":
         rust_root = Path(repo_path)
         target_dir = (rust_root / target_file).parent
@@ -4636,7 +4688,9 @@ async def synthesize_repo(
     all_targets = find_mutation_targets(repo_path, language)
     with_tests = [
         t for t in all_targets
-        if _find_existing_test_file(repo_path, t["file"], language) is not None
+        if _find_existing_test_file(
+            repo_path, t["file"], language, function_name=t.get("function_name"),
+        ) is not None
     ]
     without_tests = [t for t in all_targets if t not in with_tests]
     logger.info(
@@ -4647,7 +4701,9 @@ async def synthesize_repo(
     with_assertions = []
     with_tests_no_assertions = []
     for t in with_tests:
-        test_file = _find_existing_test_file(repo_path, t["file"], language)
+        test_file = _find_existing_test_file(
+            repo_path, t["file"], language, function_name=t.get("function_name"),
+        )
         if test_file:
             assertions = _analyze_test_assertions(
                 os.path.join(repo_path, test_file), language
@@ -4709,7 +4765,10 @@ async def synthesize_repo(
         mutated_content = ""
         original_content = ""
         if language == "python":
-            _tfile = _find_existing_test_file(repo_path, target["file"], language)
+            _tfile = _find_existing_test_file(
+                repo_path, target["file"], language,
+                function_name=target.get("function_name"),
+            )
             if _tfile:
                 _tspec = _try_targeted_mutation(repo_path, target, _tfile, language)
                 if _tspec:
@@ -4945,6 +5004,7 @@ async def synthesize_repo(
         test_output = _run_tests_on_buggy_code(
             repo_path, buggy_commit, language,
             target_file=bug_spec.file,
+            function_name=bug_spec.function_name,
         )
         if test_output:
             logger.info("  Captured %d chars of test output", len(test_output))

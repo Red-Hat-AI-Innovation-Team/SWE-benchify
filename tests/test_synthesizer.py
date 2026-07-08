@@ -29,6 +29,8 @@ from swebenchify.synthesizer import (
     _extract_called_func,
     _extract_failed_test_names,
     _find_existing_test_file,
+    _find_go_cross_package_test,
+    _go_cross_pkg_cache,
     _find_file_commits,
     _find_related_files,
     _find_test_file_importing,
@@ -4593,3 +4595,120 @@ def test_introduce_bug_no_strategy_override() -> None:
     assert len(captured_prompts) == 1
     assert "FOCUS: Remove or bypass a guard clause" not in captured_prompts[0]
     assert "FOCUS: Return a wrong value" not in captured_prompts[0]
+
+
+# ---------------------------------------------------------------------------
+# H2: Cross-package test discovery for Go
+# ---------------------------------------------------------------------------
+
+def test_find_go_cross_package_test(tmp_path: Path) -> None:
+    """_find_go_cross_package_test finds test files referencing the function."""
+    _go_cross_pkg_cache.pop(str(tmp_path), None)
+
+    (tmp_path / "internal" / "transport").mkdir(parents=True)
+    (tmp_path / "internal" / "transport" / "handler.go").write_text(
+        "package transport\n\nfunc HandleStream() {}\n"
+    )
+    (tmp_path / "test" / "end2end").mkdir(parents=True)
+    (tmp_path / "test" / "end2end" / "end2end_test.go").write_text(
+        "package end2end\n\nfunc TestHandleStream(t *testing.T) {\n\tHandleStream()\n}\n"
+    )
+
+    result = _find_go_cross_package_test(str(tmp_path), "HandleStream")
+    assert result is not None
+    assert result.endswith("_test.go")
+    assert "HandleStream" in (tmp_path / result).read_text()
+
+
+def test_find_go_cross_package_test_caches(tmp_path: Path) -> None:
+    """Repeated calls use cached grep results."""
+    _go_cross_pkg_cache.pop(str(tmp_path), None)
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "util_test.go").write_text(
+        "package pkg\n\nfunc TestMyFunc(t *testing.T) { MyFunc() }\n"
+    )
+
+    result1 = _find_go_cross_package_test(str(tmp_path), "MyFunc")
+    assert result1 is not None
+
+    assert str(tmp_path) in _go_cross_pkg_cache
+    assert "MyFunc" in _go_cross_pkg_cache[str(tmp_path)]
+
+    result2 = _find_go_cross_package_test(str(tmp_path), "MyFunc")
+    assert result1 == result2
+
+
+def test_find_go_cross_package_test_no_match(tmp_path: Path) -> None:
+    """Returns None when no test file references the function."""
+    _go_cross_pkg_cache.pop(str(tmp_path), None)
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "other_test.go").write_text(
+        "package pkg\n\nfunc TestOther(t *testing.T) {}\n"
+    )
+
+    result = _find_go_cross_package_test(str(tmp_path), "NonExistentFunc")
+    assert result is None
+
+
+def test_find_existing_test_file_go_cross_package(tmp_path: Path) -> None:
+    """_find_existing_test_file falls back to cross-package discovery for Go."""
+    _go_cross_pkg_cache.pop(str(tmp_path), None)
+
+    (tmp_path / "internal").mkdir()
+    (tmp_path / "internal" / "server.go").write_text(
+        "package internal\n\nfunc Serve() {}\n"
+    )
+    (tmp_path / "test").mkdir()
+    (tmp_path / "test" / "integration_test.go").write_text(
+        "package test\n\nimport \"testing\"\n\nfunc TestServe(t *testing.T) { Serve() }\n"
+    )
+
+    result = _find_existing_test_file(
+        str(tmp_path), "internal/server.go", "go", function_name="Serve",
+    )
+    assert result is not None
+    assert result.endswith("_test.go")
+
+
+def test_find_existing_test_file_go_prefers_colocated(tmp_path: Path) -> None:
+    """Co-located test file takes priority over cross-package test."""
+    _go_cross_pkg_cache.pop(str(tmp_path), None)
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "handler.go").write_text("package pkg\nfunc Handle() {}\n")
+    (tmp_path / "pkg" / "handler_test.go").write_text("package pkg\nfunc TestHandle(t *testing.T) {}\n")
+    (tmp_path / "test").mkdir()
+    (tmp_path / "test" / "e2e_test.go").write_text("package test\nfunc TestHandle(t *testing.T) { Handle() }\n")
+
+    result = _find_existing_test_file(
+        str(tmp_path), "pkg/handler.go", "go", function_name="Handle",
+    )
+    assert result == "pkg/handler_test.go"
+
+
+def test_find_existing_test_file_go_no_function_name(tmp_path: Path) -> None:
+    """Without function_name, cross-package fallback is skipped."""
+    _go_cross_pkg_cache.pop(str(tmp_path), None)
+
+    (tmp_path / "internal").mkdir()
+    (tmp_path / "internal" / "server.go").write_text("package internal\nfunc Serve() {}\n")
+    (tmp_path / "test").mkdir()
+    (tmp_path / "test" / "integration_test.go").write_text(
+        "package test\nfunc TestServe(t *testing.T) { Serve() }\n"
+    )
+
+    result = _find_existing_test_file(str(tmp_path), "internal/server.go", "go")
+    assert result is None
+
+
+def test_find_existing_test_file_python_ignores_cross_package(tmp_path: Path) -> None:
+    """Cross-package discovery is Go-only; Python doesn't use it."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "foo.py").write_text("def foo(): pass\n")
+
+    result = _find_existing_test_file(
+        str(tmp_path), "src/foo.py", "python", function_name="foo",
+    )
+    assert result is None
