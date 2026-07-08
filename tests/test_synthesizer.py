@@ -70,6 +70,7 @@ from swebenchify.synthesizer import (
     build_candidate,
     find_mutation_targets,
     generate_patch,
+    introduce_bug,
 )
 
 # ---------------------------------------------------------------------------
@@ -758,7 +759,7 @@ def test_find_mutation_targets_excludes_examples_dir(tmp_path: Path) -> None:
 
 
 def test_find_mutation_targets_min_function_size(tmp_path: Path) -> None:
-    """Functions with fewer than 8 lines are excluded."""
+    """Functions with fewer than 5 lines are excluded."""
     src = tmp_path / "module.py"
     src.write_text(textwrap.dedent("""\
         def tiny():
@@ -5129,3 +5130,159 @@ def test_generate_test_patch_fallback_creates_new_file(tmp_path: Path) -> None:
     assert "orphan_test.go" in result
     assert "package orphan" in result
     assert "TestRegression" in result
+
+
+# ---------------------------------------------------------------------------
+# introduce_bug — assertion data in prompt
+# ---------------------------------------------------------------------------
+
+def test_introduce_bug_formats_assertion_data_in_prompt() -> None:
+    """When assertions are provided, they appear as a directive block in the prompt."""
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    target = {
+        "file": "core.py",
+        "function_name": "process",
+        "source": "def process(x):\n    return x + 1",
+        "language": "python",
+    }
+    assertions = [
+        {
+            'type': 'equality', 'expression': 'process(5)',
+            'expected': '6', 'called_function': 'process', 'line': 15,
+        },
+        {
+            'type': 'raises', 'expression': 'process',
+            'expected': 'ValueError', 'called_function': 'process', 'line': 22,
+        },
+    ]
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        asyncio.run(introduce_bug(target, assertions=assertions))
+
+    assert len(captured_prompts) == 1
+    prompt = captured_prompts[0]
+    assert "ASSERTIONS TO BREAK" in prompt
+    assert "assertEqual(process(5), 6)  [line 15]" in prompt
+    assert "assertRaises(ValueError, process)  [line 22]" in prompt
+    assert "Your mutation MUST change the function so at least one of these assertions fails" in prompt
+
+
+def test_introduce_bug_no_assertions_omits_block() -> None:
+    """When no assertions are provided, the assertion block is absent."""
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    target = {
+        "file": "core.py",
+        "function_name": "process",
+        "source": "def process(x):\n    return x + 1",
+        "language": "python",
+    }
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        asyncio.run(introduce_bug(target))
+
+    assert len(captured_prompts) == 1
+    assert "ASSERTIONS TO BREAK" not in captured_prompts[0]
+
+
+def test_introduce_bug_formats_all_assertion_types() -> None:
+    """All assertion types are correctly formatted in the prompt."""
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    target = {
+        "file": "core.py",
+        "function_name": "check",
+        "source": "def check(x):\n    return x > 0",
+        "language": "python",
+    }
+    assertions = [
+        {'type': 'in', 'expression': 'check(items)', 'expected': '"a"', 'called_function': 'check', 'line': 5},
+        {'type': 'truthy', 'expression': 'check(1)', 'expected': 'True', 'called_function': 'check', 'line': 10},
+        {'type': 'falsy', 'expression': 'check(-1)', 'expected': 'False', 'called_function': 'check', 'line': 11},
+        {'type': 'is_none', 'expression': 'check(None)', 'expected': 'None', 'called_function': 'check', 'line': 15},
+        {'type': 'not_none', 'expression': 'check(0)', 'expected': 'not None', 'called_function': 'check', 'line': 16},
+        {'type': 'error_check', 'expression': 'err != nil', 'expected': '', 'called_function': 'check', 'line': 20},
+    ]
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        asyncio.run(introduce_bug(target, assertions=assertions))
+
+    prompt = captured_prompts[0]
+    assert 'assertIn("a", check(items))  [line 5]' in prompt
+    assert "assertTrue(check(1))  [line 10]" in prompt
+    assert "assertFalse(check(-1))  [line 11]" in prompt
+    assert "assertIsNone(check(None))  [line 15]" in prompt
+    assert "assertIsNotNone(check(0))  [line 16]" in prompt
+    assert "err != nil  [line 20]" in prompt
+
+
+# ---------------------------------------------------------------------------
+# find_mutation_targets — min function size lowered to 5
+# ---------------------------------------------------------------------------
+
+def test_find_mutation_targets_includes_five_line_functions(tmp_path: Path) -> None:
+    """Functions with 5-7 lines are now included (threshold lowered from 8 to 5)."""
+    src = tmp_path / "module.py"
+    src.write_text(textwrap.dedent("""\
+        def tiny():
+            return 1
+
+        def five_liner(x):
+            if x < 0:
+                return -x
+            result = x * 2
+            return result
+
+        def six_liner(data):
+            if data is None:
+                raise ValueError
+            cleaned = data.strip()
+            parts = cleaned.split(",")
+            return parts
+
+        def seven_liner(items):
+            result = []
+            for item in items:
+                if item > 0:
+                    result.append(item)
+            result.sort()
+            return result
+    """))
+
+    targets = find_mutation_targets(str(tmp_path), "python")
+    names = {t["function_name"] for t in targets}
+    assert "five_liner" in names
+    assert "six_liner" in names
+    assert "seven_liner" in names
+    assert "tiny" not in names
