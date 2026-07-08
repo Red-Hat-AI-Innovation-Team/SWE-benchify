@@ -35,6 +35,8 @@ from swebenchify.models import CandidateInstance
 
 logger = logging.getLogger(__name__)
 
+_go_cross_pkg_cache: dict[str, dict[str, list[str]]] = {}
+
 _LANGUAGE_EXTENSIONS: dict[str, list[str]] = {
     "python": [".py"],
     "go": [".go"],
@@ -682,7 +684,9 @@ def _extract_test_context(
     surrounding context (~20 lines around each match) as a string.
     Returns empty string if no test file or no matches found.
     """
-    test_file = _find_existing_test_file(repo_path, target_file, language)
+    test_file = _find_existing_test_file(
+        repo_path, target_file, language, function_name=function_name,
+    )
     if not test_file:
         return ""
 
@@ -1574,6 +1578,31 @@ def _validate_mutation_parses(code: str, language: str) -> bool:
     return True
 
 
+_COMMENT_PATTERNS: dict[str, list[re.Pattern[str]]] = {
+    "go": [re.compile(r"//[^\n]*"), re.compile(r"/\*.*?\*/", re.DOTALL)],
+    "rust": [re.compile(r"//[^\n]*"), re.compile(r"/\*.*?\*/", re.DOTALL)],
+    "java": [re.compile(r"//[^\n]*"), re.compile(r"/\*.*?\*/", re.DOTALL)],
+}
+
+
+def _is_ast_equivalent(original: str, mutated: str, language: str) -> bool:
+    """Check if a mutation is semantically equivalent to the original."""
+    if language == "python":
+        try:
+            return ast.dump(ast.parse(original)) == ast.dump(ast.parse(mutated))
+        except SyntaxError:
+            return False
+    patterns = _COMMENT_PATTERNS.get(language, [])
+    orig_stripped = original
+    mut_stripped = mutated
+    for pat in patterns:
+        orig_stripped = pat.sub("", orig_stripped)
+        mut_stripped = pat.sub("", mut_stripped)
+    orig_tokens = orig_stripped.split()
+    mut_tokens = mut_stripped.split()
+    return orig_tokens == mut_tokens
+
+
 _TAUTOLOGY_PATTERNS = [
     re.compile(r"\bassert\s+True\b"),
     re.compile(r"\bassert\s+not\s+False\b"),
@@ -1937,6 +1966,7 @@ async def introduce_bug(
     related_files: list[dict[str, str]] | None = None,
     bug_plan: BugPlan | None = None,
     test_context: str = "",
+    mutation_strategy: str = "",
     assertions: list[dict] | None = None,
 ) -> BugSpec | None:
     """Use Claude to introduce a realistic bug into a function.
@@ -1947,6 +1977,8 @@ async def introduce_bug(
         model: Claude model shortname ('sonnet', 'haiku', 'opus').
         related_files: Optional list of dicts with 'file' and 'snippet'
             for files that reference this function.
+        mutation_strategy: Optional hint to guide the mutation type.
+            'guard_removal' or 'return_corruption' inject specific instructions.
 
     Returns:
         BugSpec if successful, None if the LLM fails to produce a valid
@@ -1999,7 +2031,20 @@ async def introduce_bug(
     avoid_override = ""
     if test_context:
         avoid_override = """
-Note: When EXISTING TESTS are shown below, the goal is to produce a mutation that the existing tests will CATCH. Prefer mutations that directly break the specific tests shown."""
+Note: When EXISTING TESTS are shown below, the goal is to produce a mutation that the existing tests will CATCH. Prefer mutations that directly break the specific tests shown.
+
+MUTATION STRATEGY: This function IS tested but no assertion directly calls it.
+Use the MOST IMPACTFUL mutation:
+1. Remove or bypass the most critical guard clause or validation
+2. Return the wrong value from the primary return path
+3. Remove a side-effect call (.flush()/.close()/cleanup)
+Do NOT make subtle operator swaps — a test-breaking mutation is needed."""
+
+    strategy_override = ""
+    if mutation_strategy == "guard_removal":
+        strategy_override = "\nFOCUS: Remove or bypass a guard clause, null check, or bounds validation."
+    elif mutation_strategy == "return_corruption":
+        strategy_override = "\nFOCUS: Return a wrong value, wrong type, or wrong error from the primary code path."
 
     language_guidance = ""
     if language == "rust":
@@ -2048,7 +2093,7 @@ PREFERRED mutation types:
 - Remove a guard clause (delete 'if len(x) == 0: return None' — edge case not handled)
 - Return wrong error variable (return None instead of raising, or vice versa)
 - Comparison operator changes, integer literal changes, argument swaps, and line reorderings are also acceptable
-{avoid_override}
+{avoid_override}{strategy_override}
 
 The bug must look like something that would happen during a real refactoring or API migration, not a deliberate sabotage.
 
@@ -2106,7 +2151,7 @@ If there is genuinely no way to apply the same mutation pattern to the related c
 IMPORTANT:
 - Do NOT change return type annotations, class hierarchy, or method decorators. Only modify the BODY of the function (inside the function, after the def line and docstring).
 - Return the COMPLETE function, not just the changed lines
-- The bug must be subtle — it should compile/parse correctly
+- {"The bug must be subtle — it should compile/parse correctly" if not test_context else "The mutation must compile/parse correctly"}
 - Do NOT add comments marking the bug
 - Do NOT explain the fix"""
 
@@ -3423,8 +3468,38 @@ async def generate_issue_description(
     )
 
 
+def _find_go_cross_package_test(repo_path: str, function_name: str) -> str | None:
+    """Find a Go test file in a sibling package that references function_name.
+
+    Caches grep results per repo to avoid repeated filesystem scans.
+    """
+    cache = _go_cross_pkg_cache.get(repo_path)
+    if cache is None:
+        cache = {}
+        _go_cross_pkg_cache[repo_path] = cache
+
+    if function_name in cache:
+        hits = cache[function_name]
+        return hits[0] if hits else None
+
+    try:
+        result = subprocess.run(
+            ["grep", "-rn", "--include=*_test.go", "-l", function_name, "."],
+            cwd=repo_path, capture_output=True, text=True, timeout=30,
+        )
+        files = [
+            f.lstrip("./") for f in result.stdout.strip().splitlines() if f.strip()
+        ]
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        files = []
+
+    cache[function_name] = files
+    return files[0] if files else None
+
+
 def _find_existing_test_file(
     repo_path: str, source_file: str, language: str,
+    function_name: str | None = None,
 ) -> str | None:
     """Find an existing test file corresponding to a source file.
 
@@ -3483,6 +3558,10 @@ def _find_existing_test_file(
         test_file = str(source_path.parent / f"{stem}_test.go")
         if (root / test_file).is_file():
             return test_file
+        if function_name:
+            cross_pkg = _find_go_cross_package_test(repo_path, function_name)
+            if cross_pkg:
+                return cross_pkg
     elif language == "rust":
         rust_candidates = [
             f"tests/{stem}.rs",
@@ -3768,7 +3847,10 @@ async def generate_test_patch(
     Modifies existing test files. Falls back to adding a new test function
     in the existing file when no relevant functions are found.
     """
-    existing_test = _find_existing_test_file(repo_path, bug_spec.file, language)
+    existing_test = _find_existing_test_file(
+        repo_path, bug_spec.file, language,
+        function_name=bug_spec.function_name,
+    )
 
     if existing_test:
         result = await _generate_test_patch_existing(
@@ -4950,6 +5032,7 @@ def _run_tests_on_buggy_code(
     language: str,
     timeout: int = 120,
     target_file: str | None = None,
+    function_name: str | None = None,
 ) -> str | None:
     """Run the project's test suite against buggy code and capture output.
 
@@ -4997,8 +5080,18 @@ def _run_tests_on_buggy_code(
             logger.debug("  Running targeted tests: %s", test_file)
     elif target_file and language == "go":
         pkg_dir = os.path.dirname(target_file) or "."
-        test_cmd = ["go", "test", "-short", "-count=1", "-timeout", "90s", f"./{pkg_dir}"]
-        logger.debug("  Running targeted Go tests: ./%s", pkg_dir)
+        co_located_test = Path(repo_path) / (
+            str(Path(target_file).parent / f"{Path(target_file).stem}_test.go")
+        )
+        if co_located_test.is_file():
+            test_cmd = ["go", "test", "-short", "-count=1", "-timeout", "90s", f"./{pkg_dir}"]
+            logger.debug("  Running targeted Go tests: ./%s", pkg_dir)
+        elif function_name and _find_go_cross_package_test(repo_path, function_name):
+            test_cmd = ["go", "test", "-short", "-count=1", "-timeout", "90s", "./..."]
+            logger.debug("  Running cross-package Go tests for %s: ./...", function_name)
+        else:
+            test_cmd = ["go", "test", "-short", "-count=1", "-timeout", "90s", f"./{pkg_dir}"]
+            logger.debug("  Running targeted Go tests: ./%s", pkg_dir)
     elif target_file and language == "rust":
         rust_root = Path(repo_path)
         target_dir = (rust_root / target_file).parent
@@ -5282,6 +5375,7 @@ async def synthesize_repo(
     operators: list[str] | None = None,
     model: str = "sonnet",
     screen_instances: bool = True,
+    yield_only: bool = False,
 ) -> RepoSynthesisResult:
     """Synthesize bug instances for a repository.
 
@@ -5314,7 +5408,9 @@ async def synthesize_repo(
     all_targets = find_mutation_targets(repo_path, language)
     with_tests = [
         t for t in all_targets
-        if _find_existing_test_file(repo_path, t["file"], language) is not None
+        if _find_existing_test_file(
+            repo_path, t["file"], language, function_name=t.get("function_name"),
+        ) is not None
     ]
     without_tests = [t for t in all_targets if t not in with_tests]
     logger.info(
@@ -5325,7 +5421,9 @@ async def synthesize_repo(
     with_assertions = []
     with_tests_no_assertions = []
     for t in with_tests:
-        test_file = _find_existing_test_file(repo_path, t["file"], language)
+        test_file = _find_existing_test_file(
+            repo_path, t["file"], language, function_name=t.get("function_name"),
+        )
         if test_file:
             try:
                 test_source = Path(os.path.join(repo_path, test_file)).read_text(
@@ -5379,12 +5477,15 @@ async def synthesize_repo(
             repo_path, target["file"], target["function_name"], language,
         )
 
-        bug_plan = await _plan_multi_file_mutation(
-            target["source"], related_files, model=model,
-            test_context=test_context,
-        )
-        if bug_plan:
-            logger.info("  Multi-file plan: %s", bug_plan.primary_description[:80])
+        if yield_only:
+            bug_plan = None
+        else:
+            bug_plan = await _plan_multi_file_mutation(
+                target["source"], related_files, model=model,
+                test_context=test_context,
+            )
+            if bug_plan:
+                logger.info("  Multi-file plan: %s", bug_plan.primary_description[:80])
 
         # H10: Try targeted mutation (assertion-aware, data-first pass rate)
         bug_spec = None
@@ -5392,7 +5493,10 @@ async def synthesize_repo(
         mutated_content = ""
         original_content = ""
         if language in ("python", "go"):
-            _tfile = _find_existing_test_file(repo_path, target["file"], language)
+            _tfile = _find_existing_test_file(
+                repo_path, target["file"], language,
+                function_name=target.get("function_name"),
+            )
             if _tfile:
                 _tspec = _try_targeted_mutation(repo_path, target, _tfile, language)
                 if _tspec:
@@ -5438,11 +5542,13 @@ async def synthesize_repo(
                     pass
 
         # H2: Fall back to LLM introduce_bug (retry up to 2 times if patch too simple)
+        _retry_strategies = ["", "guard_removal", "return_corruption"]
         for attempt in range(3):
             if bug_spec is None:
                 bug_spec = await introduce_bug(
                     target, model=model, related_files=related_files,
                     bug_plan=bug_plan, test_context=test_context,
+                    mutation_strategy=_retry_strategies[attempt],
                     assertions=target_assertions,
                 )
             if bug_spec is None:
@@ -5477,6 +5583,11 @@ async def synthesize_repo(
             mut_stripped = [ln.strip() for ln in mutated_content.splitlines() if ln.strip()]
             if orig_stripped == mut_stripped:
                 logger.warning('  Mutation is whitespace-only, retrying (%d/2)', attempt + 1)
+                bug_spec = None
+                continue
+
+            if _is_ast_equivalent(original_content, mutated_content, language):
+                logger.warning('  Mutation is semantically equivalent, retrying (%d/2)', attempt + 1)
                 bug_spec = None
                 continue
 
@@ -5549,7 +5660,7 @@ async def synthesize_repo(
                 buggy_files[sc.file] = sec_buggy
                 logger.info("  Secondary change in %s: %s", sc.file, sc.description)
 
-        if len(buggy_files) < 2 and related_files:
+        if not yield_only and len(buggy_files) < 2 and related_files:
             logger.info("  Only %d file changed, retrying with explicit multi-file instruction", len(buggy_files))
             retry_spec = await introduce_bug(
                 target, model=model, related_files=related_files,
@@ -5585,58 +5696,59 @@ async def synthesize_repo(
         ctx = _collect_repo_context(repo_path)
         real_issues = ctx.get("recent_issues", [])
 
-        incidentals = await _generate_incidental_changes(
-            repo_path, bug_spec, language, model=model,
-        )
-        for inc_path, inc_original, inc_modified in incidentals:
-            if inc_path in patched_files:
-                logger.info("  Skipping duplicate incidental for %s", inc_path)
-                continue
-            # Validate RST references in changelog files
-            if inc_path.lower().endswith((".rst", ".md")):
-                inc_modified = _validate_rst_references(inc_modified, real_issues)
-            try:
-                inc_file = Path(repo_path) / inc_path
-                inc_content = inc_file.read_text(encoding="utf-8", errors="replace")
-                if inc_original == "EMPTY":
-                    new_content = inc_content + "\n" + inc_modified
-                else:
-                    new_content = inc_content.replace(inc_original, inc_modified, 1)
-                if new_content != inc_content:
-                    # Reject CHANGES.rst edits that create duplicate version headers
-                    if Path(inc_path).name in (
-                        "CHANGES.rst", "CHANGELOG.rst", "CHANGELOG.md",
-                        "HISTORY.rst", "HISTORY.md",
-                    ):
-                        headers = re.findall(
-                            r"^(?:Version\s+\S+|#+\s+\S+)", new_content, re.MULTILINE,
-                        )
-                        if len(headers) != len(set(headers)):
-                            logger.debug(
-                                "Skipping %s — duplicate version header", inc_path,
+        if not yield_only:
+            incidentals = await _generate_incidental_changes(
+                repo_path, bug_spec, language, model=model,
+            )
+            for inc_path, inc_original, inc_modified in incidentals:
+                if inc_path in patched_files:
+                    logger.info("  Skipping duplicate incidental for %s", inc_path)
+                    continue
+                # Validate RST references in changelog files
+                if inc_path.lower().endswith((".rst", ".md")):
+                    inc_modified = _validate_rst_references(inc_modified, real_issues)
+                try:
+                    inc_file = Path(repo_path) / inc_path
+                    inc_content = inc_file.read_text(encoding="utf-8", errors="replace")
+                    if inc_original == "EMPTY":
+                        new_content = inc_content + "\n" + inc_modified
+                    else:
+                        new_content = inc_content.replace(inc_original, inc_modified, 1)
+                    if new_content != inc_content:
+                        # Reject CHANGES.rst edits that create duplicate version headers
+                        if Path(inc_path).name in (
+                            "CHANGES.rst", "CHANGELOG.rst", "CHANGELOG.md",
+                            "HISTORY.rst", "HISTORY.md",
+                        ):
+                            headers = re.findall(
+                                r"^(?:Version\s+\S+|#+\s+\S+)", new_content, re.MULTILINE,
                             )
-                            continue
-                        # Reject edits where underline is separated from header by blank lines
-                        _orphaned = False
-                        nc_lines = new_content.split("\n")
-                        for i, nc_line in enumerate(nc_lines):
-                            if re.match(r"^Version\s+\S+", nc_line):
-                                j = i + 1
-                                while j < len(nc_lines) and nc_lines[j].strip() == "":
-                                    j += 1
-                                if j < len(nc_lines) and re.match(r"^[-=~^]{3,}$", nc_lines[j].strip()):
-                                    if j != i + 1:
-                                        _orphaned = True
-                                        break
-                        if _orphaned:
-                            logger.debug(
-                                "Skipping %s — orphaned underline after header", inc_path,
-                            )
-                            continue
-                    patch += generate_patch(new_content, inc_content, inc_path)
-                    patched_files.add(inc_path)
-            except OSError:
-                continue
+                            if len(headers) != len(set(headers)):
+                                logger.debug(
+                                    "Skipping %s — duplicate version header", inc_path,
+                                )
+                                continue
+                            # Reject edits where underline is separated from header by blank lines
+                            _orphaned = False
+                            nc_lines = new_content.split("\n")
+                            for i, nc_line in enumerate(nc_lines):
+                                if re.match(r"^Version\s+\S+", nc_line):
+                                    j = i + 1
+                                    while j < len(nc_lines) and nc_lines[j].strip() == "":
+                                        j += 1
+                                    if j < len(nc_lines) and re.match(r"^[-=~^]{3,}$", nc_lines[j].strip()):
+                                        if j != i + 1:
+                                            _orphaned = True
+                                            break
+                            if _orphaned:
+                                logger.debug(
+                                    "Skipping %s — orphaned underline after header", inc_path,
+                                )
+                                continue
+                        patch += generate_patch(new_content, inc_content, inc_path)
+                        patched_files.add(inc_path)
+                except OSError:
+                    continue
 
         buggy_commit = _create_buggy_commit_multi(
             repo_path, buggy_files, bug_spec.bug_description,
@@ -5649,6 +5761,7 @@ async def synthesize_repo(
         test_output = _run_tests_on_buggy_code(
             repo_path, buggy_commit, language,
             target_file=bug_spec.file,
+            function_name=bug_spec.function_name,
         )
         if test_output:
             logger.info("  Captured %d chars of test output", len(test_output))
@@ -5657,6 +5770,28 @@ async def synthesize_repo(
 
         if not test_output or not _is_valid_test_output(test_output):
             logger.warning("  Skipped — mutation did not cause test failures (data-first path required)")
+            continue
+
+        if yield_only:
+            synthesis_result = SynthesisResult(
+                bug_spec=bug_spec,
+                patch=patch,
+                problem_statement=(
+                    f'[yield-only] Mutation in {bug_spec.file}:{bug_spec.function_name} '
+                    f'broke tests. Test output captured ({len(test_output or "")} chars). '
+                    f'Generated in yield-measurement mode without full enrichment.'
+                ),
+                instance_id='',
+                base_commit=buggy_commit,
+                test_output=test_output or '',
+            )
+            candidate = build_candidate(
+                repo_slug, buggy_commit, synthesis_result, test_patch='',
+            )
+            candidate.merge_commit = base_commit
+            synthesis_result.instance_id = candidate.instance_id
+            candidates.append(candidate)
+            logger.info('  Generated (yield-only): %s (%s)', candidate.instance_id, bug_spec.bug_category)
             continue
 
         # H2: Mine social artifacts and build social context

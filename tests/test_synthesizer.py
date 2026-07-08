@@ -35,11 +35,14 @@ from swebenchify.synthesizer import (
     _find_any_test_file_nearby,
     _find_existing_test_file,
     _find_file_commits,
+    _find_go_cross_package_test,
     _find_related_files,
     _find_test_file_importing,
     _format_new_test_patch,
     _generate_regression_test_patch,
+    _go_cross_pkg_cache,
     _humanize_traceback,
+    _is_ast_equivalent,
     _is_same_package,
     _is_stdlib_or_installed,
     _is_valid_test_output,
@@ -4660,6 +4663,65 @@ class TestTryTargetedMutation:
 
 
 # ---------------------------------------------------------------------------
+# H1: _is_ast_equivalent
+# ---------------------------------------------------------------------------
+
+class TestIsAstEquivalent:
+    def test_identical_python_is_equivalent(self) -> None:
+        code = "def foo():\n    return 1\n"
+        assert _is_ast_equivalent(code, code, "python") is True
+
+    def test_different_python_is_not_equivalent(self) -> None:
+        orig = "def foo():\n    return 1\n"
+        mutated = "def foo():\n    return 2\n"
+        assert _is_ast_equivalent(orig, mutated, "python") is False
+
+    def test_comment_only_python_is_equivalent(self) -> None:
+        orig = "def foo():\n    # comment\n    return 1\n"
+        mutated = "def foo():\n    # different comment\n    return 1\n"
+        assert _is_ast_equivalent(orig, mutated, "python") is True
+
+    def test_whitespace_only_python_is_equivalent(self) -> None:
+        orig = "def foo():\n    return 1\n"
+        mutated = "def foo():\n    return 1\n\n"
+        assert _is_ast_equivalent(orig, mutated, "python") is True
+
+    def test_syntax_error_python_returns_false(self) -> None:
+        orig = "def foo():\n    return 1\n"
+        mutated = "def foo(\n    return 1\n"
+        assert _is_ast_equivalent(orig, mutated, "python") is False
+
+    def test_identical_go_is_equivalent(self) -> None:
+        code = "func foo() int {\n    return 1\n}\n"
+        assert _is_ast_equivalent(code, code, "go") is True
+
+    def test_different_go_is_not_equivalent(self) -> None:
+        orig = "func foo() int {\n    return 1\n}\n"
+        mutated = "func foo() int {\n    return 2\n}\n"
+        assert _is_ast_equivalent(orig, mutated, "go") is False
+
+    def test_comment_only_go_is_equivalent(self) -> None:
+        orig = "func foo() int {\n    // original comment\n    return 1\n}\n"
+        mutated = "func foo() int {\n    // changed comment\n    return 1\n}\n"
+        assert _is_ast_equivalent(orig, mutated, "go") is True
+
+    def test_block_comment_go_is_equivalent(self) -> None:
+        orig = "func foo() int {\n    /* block */\n    return 1\n}\n"
+        mutated = "func foo() int {\n    /* different */\n    return 1\n}\n"
+        assert _is_ast_equivalent(orig, mutated, "go") is True
+
+    def test_rust_comment_only_equivalent(self) -> None:
+        orig = "fn foo() -> i32 {\n    // a\n    1\n}\n"
+        mutated = "fn foo() -> i32 {\n    // b\n    1\n}\n"
+        assert _is_ast_equivalent(orig, mutated, "rust") is True
+
+    def test_java_comment_only_equivalent(self) -> None:
+        orig = "int foo() {\n    // orig\n    return 1;\n}\n"
+        mutated = "int foo() {\n    // changed\n    return 1;\n}\n"
+        assert _is_ast_equivalent(orig, mutated, "java") is True
+
+
+# ---------------------------------------------------------------------------
 # _extract_go_error_message
 # ---------------------------------------------------------------------------
 
@@ -5133,6 +5195,42 @@ def test_generate_test_patch_fallback_creates_new_file(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# H1: Aggressive prompt for unmatched targets
+# ---------------------------------------------------------------------------
+
+def test_introduce_bug_aggressive_prompt_with_test_context() -> None:
+    """When test_context is non-empty, the prompt uses aggressive strategy."""
+    from unittest.mock import MagicMock, patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    target = {
+        "file": "mod.py",
+        "function_name": "foo",
+        "source": "def foo():\n    return 1",
+        "language": "python",
+    }
+
+    with patch("swebenchify.synthesizer.query", fake_query), \
+         patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+
+        from swebenchify.synthesizer import introduce_bug
+        asyncio.run(introduce_bug(target, test_context="\nExisting test:\ndef test_foo(): assert foo() == 1"))
+
+    assert len(captured_prompts) == 1
+    prompt = captured_prompts[0]
+    assert "MOST IMPACTFUL mutation" in prompt
+    assert "The mutation must compile/parse correctly" in prompt
+    assert "The bug must be subtle" not in prompt
+
+
+# ---------------------------------------------------------------------------
 # introduce_bug — assertion data in prompt
 # ---------------------------------------------------------------------------
 
@@ -5178,6 +5276,37 @@ def test_introduce_bug_formats_assertion_data_in_prompt() -> None:
     assert "Your mutation MUST change the function so at least one of these assertions fails" in prompt
 
 
+def test_introduce_bug_subtle_without_test_context() -> None:
+    """When test_context is empty, the prompt uses subtle strategy."""
+    from unittest.mock import MagicMock, patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    target = {
+        "file": "mod.py",
+        "function_name": "foo",
+        "source": "def foo():\n    return 1",
+        "language": "python",
+    }
+
+    with patch("swebenchify.synthesizer.query", fake_query), \
+         patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+
+        from swebenchify.synthesizer import introduce_bug
+        asyncio.run(introduce_bug(target, test_context=""))
+
+    assert len(captured_prompts) == 1
+    prompt = captured_prompts[0]
+    assert "The bug must be subtle" in prompt
+    assert "MOST IMPACTFUL mutation" not in prompt
+
+
 def test_introduce_bug_no_assertions_omits_block() -> None:
     """When no assertions are provided, the assertion block is absent."""
     from unittest.mock import MagicMock
@@ -5204,6 +5333,98 @@ def test_introduce_bug_no_assertions_omits_block() -> None:
 
     assert len(captured_prompts) == 1
     assert "ASSERTIONS TO BREAK" not in captured_prompts[0]
+
+
+# ---------------------------------------------------------------------------
+# H1: Differentiated retry strategies — mutation_strategy parameter
+# ---------------------------------------------------------------------------
+
+def test_introduce_bug_guard_removal_strategy() -> None:
+    """mutation_strategy='guard_removal' injects guard removal instruction."""
+    from unittest.mock import MagicMock, patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    target = {
+        "file": "mod.py",
+        "function_name": "foo",
+        "source": "def foo():\n    return 1",
+        "language": "python",
+    }
+
+    with patch("swebenchify.synthesizer.query", fake_query), \
+         patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+
+        from swebenchify.synthesizer import introduce_bug
+        asyncio.run(introduce_bug(target, mutation_strategy="guard_removal"))
+
+    assert len(captured_prompts) == 1
+    assert "Remove or bypass a guard clause, null check, or bounds validation" in captured_prompts[0]
+
+
+def test_introduce_bug_return_corruption_strategy() -> None:
+    """mutation_strategy='return_corruption' injects return corruption instruction."""
+    from unittest.mock import MagicMock, patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    target = {
+        "file": "mod.py",
+        "function_name": "foo",
+        "source": "def foo():\n    return 1",
+        "language": "python",
+    }
+
+    with patch("swebenchify.synthesizer.query", fake_query), \
+         patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+
+        from swebenchify.synthesizer import introduce_bug
+        asyncio.run(introduce_bug(target, mutation_strategy="return_corruption"))
+
+    assert len(captured_prompts) == 1
+    assert "Return a wrong value, wrong type, or wrong error" in captured_prompts[0]
+
+
+def test_introduce_bug_no_strategy_override() -> None:
+    """mutation_strategy='' does not inject any strategy override."""
+    from unittest.mock import MagicMock, patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    target = {
+        "file": "mod.py",
+        "function_name": "foo",
+        "source": "def foo():\n    return 1",
+        "language": "python",
+    }
+
+    with patch("swebenchify.synthesizer.query", fake_query), \
+         patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+
+        from swebenchify.synthesizer import introduce_bug
+        asyncio.run(introduce_bug(target, mutation_strategy=""))
+
+    assert len(captured_prompts) == 1
+    assert "FOCUS: Remove or bypass a guard clause" not in captured_prompts[0]
+    assert "FOCUS: Return a wrong value" not in captured_prompts[0]
 
 
 def test_introduce_bug_formats_all_assertion_types() -> None:
@@ -5245,6 +5466,132 @@ def test_introduce_bug_formats_all_assertion_types() -> None:
     assert "assertIsNone(check(None))  [line 15]" in prompt
     assert "assertIsNotNone(check(0))  [line 16]" in prompt
     assert "err != nil  [line 20]" in prompt
+
+
+# ---------------------------------------------------------------------------
+# H2: Cross-package test discovery for Go
+# ---------------------------------------------------------------------------
+
+def test_find_go_cross_package_test(tmp_path: Path) -> None:
+    """_find_go_cross_package_test finds test files referencing the function."""
+    _go_cross_pkg_cache.pop(str(tmp_path), None)
+
+    (tmp_path / "internal" / "transport").mkdir(parents=True)
+    (tmp_path / "internal" / "transport" / "handler.go").write_text(
+        "package transport\n\nfunc HandleStream() {}\n"
+    )
+    (tmp_path / "test" / "end2end").mkdir(parents=True)
+    (tmp_path / "test" / "end2end" / "end2end_test.go").write_text(
+        "package end2end\n\nfunc TestHandleStream(t *testing.T) {\n\tHandleStream()\n}\n"
+    )
+
+    result = _find_go_cross_package_test(str(tmp_path), "HandleStream")
+    assert result is not None
+    assert result.endswith("_test.go")
+    assert "HandleStream" in (tmp_path / result).read_text()
+
+
+def test_find_go_cross_package_test_caches(tmp_path: Path) -> None:
+    """Repeated calls use cached grep results."""
+    _go_cross_pkg_cache.pop(str(tmp_path), None)
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "util_test.go").write_text(
+        "package pkg\n\nfunc TestMyFunc(t *testing.T) { MyFunc() }\n"
+    )
+
+    result1 = _find_go_cross_package_test(str(tmp_path), "MyFunc")
+    assert result1 is not None
+
+    assert str(tmp_path) in _go_cross_pkg_cache
+    assert "MyFunc" in _go_cross_pkg_cache[str(tmp_path)]
+
+    result2 = _find_go_cross_package_test(str(tmp_path), "MyFunc")
+    assert result1 == result2
+
+
+def test_find_go_cross_package_test_no_match(tmp_path: Path) -> None:
+    """Returns None when no test file references the function."""
+    _go_cross_pkg_cache.pop(str(tmp_path), None)
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "other_test.go").write_text(
+        "package pkg\n\nfunc TestOther(t *testing.T) {}\n"
+    )
+
+    result = _find_go_cross_package_test(str(tmp_path), "NonExistentFunc")
+    assert result is None
+
+
+def test_find_existing_test_file_go_cross_package(tmp_path: Path) -> None:
+    """_find_existing_test_file falls back to cross-package discovery for Go."""
+    _go_cross_pkg_cache.pop(str(tmp_path), None)
+
+    (tmp_path / "internal").mkdir()
+    (tmp_path / "internal" / "server.go").write_text(
+        "package internal\n\nfunc Serve() {}\n"
+    )
+    (tmp_path / "test").mkdir()
+    (tmp_path / "test" / "integration_test.go").write_text(
+        "package test\n\nimport \"testing\"\n\nfunc TestServe(t *testing.T) { Serve() }\n"
+    )
+
+    result = _find_existing_test_file(
+        str(tmp_path), "internal/server.go", "go", function_name="Serve",
+    )
+    assert result is not None
+    assert result.endswith("_test.go")
+
+
+def test_find_existing_test_file_go_prefers_colocated(tmp_path: Path) -> None:
+    """Co-located test file takes priority over cross-package test."""
+    _go_cross_pkg_cache.pop(str(tmp_path), None)
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "handler.go").write_text("package pkg\nfunc Handle() {}\n")
+    (tmp_path / "pkg" / "handler_test.go").write_text("package pkg\nfunc TestHandle(t *testing.T) {}\n")
+    (tmp_path / "test").mkdir()
+    (tmp_path / "test" / "e2e_test.go").write_text("package test\nfunc TestHandle(t *testing.T) { Handle() }\n")
+
+    result = _find_existing_test_file(
+        str(tmp_path), "pkg/handler.go", "go", function_name="Handle",
+    )
+    assert result == "pkg/handler_test.go"
+
+
+def test_find_existing_test_file_go_no_function_name(tmp_path: Path) -> None:
+    """Without function_name, cross-package fallback is skipped."""
+    _go_cross_pkg_cache.pop(str(tmp_path), None)
+
+    (tmp_path / "internal").mkdir()
+    (tmp_path / "internal" / "server.go").write_text("package internal\nfunc Serve() {}\n")
+    (tmp_path / "test").mkdir()
+    (tmp_path / "test" / "integration_test.go").write_text(
+        "package test\nfunc TestServe(t *testing.T) { Serve() }\n"
+    )
+
+    result = _find_existing_test_file(str(tmp_path), "internal/server.go", "go")
+    assert result is None
+
+
+def test_find_existing_test_file_python_ignores_cross_package(tmp_path: Path) -> None:
+    """Cross-package discovery is Go-only; Python doesn't use it."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "foo.py").write_text("def foo(): pass\n")
+
+    result = _find_existing_test_file(
+        str(tmp_path), "src/foo.py", "python", function_name="foo",
+    )
+    assert result is None
+
+
+def test_synthesize_repo_accepts_yield_only():
+    import inspect
+
+    from swebenchify.synthesizer import synthesize_repo
+    sig = inspect.signature(synthesize_repo)
+    assert 'yield_only' in sig.parameters
+    assert sig.parameters['yield_only'].default is False
 
 
 # ---------------------------------------------------------------------------
