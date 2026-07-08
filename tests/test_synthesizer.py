@@ -56,6 +56,7 @@ from swebenchify.synthesizer import (
     _targeted_mutation,
     _truncate_issue,
     _try_targeted_mutation,
+    _is_ast_equivalent,
     _validate_mutation_parses,
     _validate_rst_references,
     _validate_test_code,
@@ -4379,3 +4380,216 @@ class TestTryTargetedMutation:
     def test_returns_none_for_non_python(self, tmp_path: Path) -> None:
         result = _try_targeted_mutation(str(tmp_path), {}, "test.go", "go")
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# H1: _is_ast_equivalent
+# ---------------------------------------------------------------------------
+
+class TestIsAstEquivalent:
+    def test_identical_python_is_equivalent(self) -> None:
+        code = "def foo():\n    return 1\n"
+        assert _is_ast_equivalent(code, code, "python") is True
+
+    def test_different_python_is_not_equivalent(self) -> None:
+        orig = "def foo():\n    return 1\n"
+        mutated = "def foo():\n    return 2\n"
+        assert _is_ast_equivalent(orig, mutated, "python") is False
+
+    def test_comment_only_python_is_equivalent(self) -> None:
+        orig = "def foo():\n    # comment\n    return 1\n"
+        mutated = "def foo():\n    # different comment\n    return 1\n"
+        assert _is_ast_equivalent(orig, mutated, "python") is True
+
+    def test_whitespace_only_python_is_equivalent(self) -> None:
+        orig = "def foo():\n    return 1\n"
+        mutated = "def foo():\n    return 1\n\n"
+        assert _is_ast_equivalent(orig, mutated, "python") is True
+
+    def test_syntax_error_python_returns_false(self) -> None:
+        orig = "def foo():\n    return 1\n"
+        mutated = "def foo(\n    return 1\n"
+        assert _is_ast_equivalent(orig, mutated, "python") is False
+
+    def test_identical_go_is_equivalent(self) -> None:
+        code = "func foo() int {\n    return 1\n}\n"
+        assert _is_ast_equivalent(code, code, "go") is True
+
+    def test_different_go_is_not_equivalent(self) -> None:
+        orig = "func foo() int {\n    return 1\n}\n"
+        mutated = "func foo() int {\n    return 2\n}\n"
+        assert _is_ast_equivalent(orig, mutated, "go") is False
+
+    def test_comment_only_go_is_equivalent(self) -> None:
+        orig = "func foo() int {\n    // original comment\n    return 1\n}\n"
+        mutated = "func foo() int {\n    // changed comment\n    return 1\n}\n"
+        assert _is_ast_equivalent(orig, mutated, "go") is True
+
+    def test_block_comment_go_is_equivalent(self) -> None:
+        orig = "func foo() int {\n    /* block */\n    return 1\n}\n"
+        mutated = "func foo() int {\n    /* different */\n    return 1\n}\n"
+        assert _is_ast_equivalent(orig, mutated, "go") is True
+
+    def test_rust_comment_only_equivalent(self) -> None:
+        orig = "fn foo() -> i32 {\n    // a\n    1\n}\n"
+        mutated = "fn foo() -> i32 {\n    // b\n    1\n}\n"
+        assert _is_ast_equivalent(orig, mutated, "rust") is True
+
+    def test_java_comment_only_equivalent(self) -> None:
+        orig = "int foo() {\n    // orig\n    return 1;\n}\n"
+        mutated = "int foo() {\n    // changed\n    return 1;\n}\n"
+        assert _is_ast_equivalent(orig, mutated, "java") is True
+
+
+# ---------------------------------------------------------------------------
+# H1: Aggressive prompt for unmatched targets
+# ---------------------------------------------------------------------------
+
+def test_introduce_bug_aggressive_prompt_with_test_context() -> None:
+    """When test_context is non-empty, the prompt uses aggressive strategy."""
+    from unittest.mock import MagicMock, patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    target = {
+        "file": "mod.py",
+        "function_name": "foo",
+        "source": "def foo():\n    return 1",
+        "language": "python",
+    }
+
+    with patch("swebenchify.synthesizer.query", fake_query), \
+         patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import introduce_bug
+        asyncio.run(introduce_bug(target, test_context="\nExisting test:\ndef test_foo(): assert foo() == 1"))
+
+    assert len(captured_prompts) == 1
+    prompt = captured_prompts[0]
+    assert "MOST IMPACTFUL mutation" in prompt
+    assert "The mutation must compile/parse correctly" in prompt
+    assert "The bug must be subtle" not in prompt
+
+
+def test_introduce_bug_subtle_without_test_context() -> None:
+    """When test_context is empty, the prompt uses subtle strategy."""
+    from unittest.mock import MagicMock, patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    target = {
+        "file": "mod.py",
+        "function_name": "foo",
+        "source": "def foo():\n    return 1",
+        "language": "python",
+    }
+
+    with patch("swebenchify.synthesizer.query", fake_query), \
+         patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import introduce_bug
+        asyncio.run(introduce_bug(target, test_context=""))
+
+    assert len(captured_prompts) == 1
+    prompt = captured_prompts[0]
+    assert "The bug must be subtle" in prompt
+    assert "MOST IMPACTFUL mutation" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# H1: Differentiated retry strategies — mutation_strategy parameter
+# ---------------------------------------------------------------------------
+
+def test_introduce_bug_guard_removal_strategy() -> None:
+    """mutation_strategy='guard_removal' injects guard removal instruction."""
+    from unittest.mock import MagicMock, patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    target = {
+        "file": "mod.py",
+        "function_name": "foo",
+        "source": "def foo():\n    return 1",
+        "language": "python",
+    }
+
+    with patch("swebenchify.synthesizer.query", fake_query), \
+         patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import introduce_bug
+        asyncio.run(introduce_bug(target, mutation_strategy="guard_removal"))
+
+    assert len(captured_prompts) == 1
+    assert "Remove or bypass a guard clause, null check, or bounds validation" in captured_prompts[0]
+
+
+def test_introduce_bug_return_corruption_strategy() -> None:
+    """mutation_strategy='return_corruption' injects return corruption instruction."""
+    from unittest.mock import MagicMock, patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    target = {
+        "file": "mod.py",
+        "function_name": "foo",
+        "source": "def foo():\n    return 1",
+        "language": "python",
+    }
+
+    with patch("swebenchify.synthesizer.query", fake_query), \
+         patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import introduce_bug
+        asyncio.run(introduce_bug(target, mutation_strategy="return_corruption"))
+
+    assert len(captured_prompts) == 1
+    assert "Return a wrong value, wrong type, or wrong error" in captured_prompts[0]
+
+
+def test_introduce_bug_no_strategy_override() -> None:
+    """mutation_strategy='' does not inject any strategy override."""
+    from unittest.mock import MagicMock, patch
+
+    captured_prompts: list[str] = []
+
+    async def fake_query(prompt: str, options: object = None):
+        captured_prompts.append(prompt)
+        return
+        yield
+
+    target = {
+        "file": "mod.py",
+        "function_name": "foo",
+        "source": "def foo():\n    return 1",
+        "language": "python",
+    }
+
+    with patch("swebenchify.synthesizer.query", fake_query), \
+         patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+        import asyncio
+        from swebenchify.synthesizer import introduce_bug
+        asyncio.run(introduce_bug(target, mutation_strategy=""))
+
+    assert len(captured_prompts) == 1
+    assert "FOCUS: Remove or bypass a guard clause" not in captured_prompts[0]
+    assert "FOCUS: Return a wrong value" not in captured_prompts[0]

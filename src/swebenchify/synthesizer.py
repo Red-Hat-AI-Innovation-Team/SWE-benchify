@@ -1311,6 +1311,31 @@ def _validate_mutation_parses(code: str, language: str) -> bool:
     return True
 
 
+_COMMENT_PATTERNS: dict[str, list[re.Pattern[str]]] = {
+    "go": [re.compile(r"//[^\n]*"), re.compile(r"/\*.*?\*/", re.DOTALL)],
+    "rust": [re.compile(r"//[^\n]*"), re.compile(r"/\*.*?\*/", re.DOTALL)],
+    "java": [re.compile(r"//[^\n]*"), re.compile(r"/\*.*?\*/", re.DOTALL)],
+}
+
+
+def _is_ast_equivalent(original: str, mutated: str, language: str) -> bool:
+    """Check if a mutation is semantically equivalent to the original."""
+    if language == "python":
+        try:
+            return ast.dump(ast.parse(original)) == ast.dump(ast.parse(mutated))
+        except SyntaxError:
+            return False
+    patterns = _COMMENT_PATTERNS.get(language, [])
+    orig_stripped = original
+    mut_stripped = mutated
+    for pat in patterns:
+        orig_stripped = pat.sub("", orig_stripped)
+        mut_stripped = pat.sub("", mut_stripped)
+    orig_tokens = orig_stripped.split()
+    mut_tokens = mut_stripped.split()
+    return orig_tokens == mut_tokens
+
+
 _TAUTOLOGY_PATTERNS = [
     re.compile(r"\bassert\s+True\b"),
     re.compile(r"\bassert\s+not\s+False\b"),
@@ -1674,6 +1699,7 @@ async def introduce_bug(
     related_files: list[dict[str, str]] | None = None,
     bug_plan: BugPlan | None = None,
     test_context: str = "",
+    mutation_strategy: str = "",
 ) -> BugSpec | None:
     """Use Claude to introduce a realistic bug into a function.
 
@@ -1683,6 +1709,8 @@ async def introduce_bug(
         model: Claude model shortname ('sonnet', 'haiku', 'opus').
         related_files: Optional list of dicts with 'file' and 'snippet'
             for files that reference this function.
+        mutation_strategy: Optional hint to guide the mutation type.
+            'guard_removal' or 'return_corruption' inject specific instructions.
 
     Returns:
         BugSpec if successful, None if the LLM fails to produce a valid
@@ -1710,7 +1738,20 @@ async def introduce_bug(
     avoid_override = ""
     if test_context:
         avoid_override = """
-Note: When EXISTING TESTS are shown below, the goal is to produce a mutation that the existing tests will CATCH. Prefer mutations that directly break the specific tests shown."""
+Note: When EXISTING TESTS are shown below, the goal is to produce a mutation that the existing tests will CATCH. Prefer mutations that directly break the specific tests shown.
+
+MUTATION STRATEGY: This function IS tested but no assertion directly calls it.
+Use the MOST IMPACTFUL mutation:
+1. Remove or bypass the most critical guard clause or validation
+2. Return the wrong value from the primary return path
+3. Remove a side-effect call (.flush()/.close()/cleanup)
+Do NOT make subtle operator swaps — a test-breaking mutation is needed."""
+
+    strategy_override = ""
+    if mutation_strategy == "guard_removal":
+        strategy_override = "\nFOCUS: Remove or bypass a guard clause, null check, or bounds validation."
+    elif mutation_strategy == "return_corruption":
+        strategy_override = "\nFOCUS: Return a wrong value, wrong type, or wrong error from the primary code path."
 
     language_guidance = ""
     if language == "rust":
@@ -1759,7 +1800,7 @@ PREFERRED mutation types:
 - Remove a guard clause (delete 'if len(x) == 0: return None' — edge case not handled)
 - Return wrong error variable (return None instead of raising, or vice versa)
 - Comparison operator changes, integer literal changes, argument swaps, and line reorderings are also acceptable
-{avoid_override}
+{avoid_override}{strategy_override}
 
 The bug must look like something that would happen during a real refactoring or API migration, not a deliberate sabotage.
 
@@ -1817,7 +1858,7 @@ If there is genuinely no way to apply the same mutation pattern to the related c
 IMPORTANT:
 - Do NOT change return type annotations, class hierarchy, or method decorators. Only modify the BODY of the function (inside the function, after the def line and docstring).
 - Return the COMPLETE function, not just the changed lines
-- The bug must be subtle — it should compile/parse correctly
+- {"The bug must be subtle — it should compile/parse correctly" if not test_context else "The mutation must compile/parse correctly"}
 - Do NOT add comments marking the bug
 - Do NOT explain the fix"""
 
@@ -4696,11 +4737,13 @@ async def synthesize_repo(
                         pass
 
         # H2: Fall back to LLM introduce_bug (retry up to 2 times if patch too simple)
+        _retry_strategies = ["", "guard_removal", "return_corruption"]
         for attempt in range(3):
             if bug_spec is None:
                 bug_spec = await introduce_bug(
                     target, model=model, related_files=related_files,
                     bug_plan=bug_plan, test_context=test_context,
+                    mutation_strategy=_retry_strategies[attempt],
                 )
             if bug_spec is None:
                 logger.warning("  Skipped — LLM did not produce a valid mutation")
@@ -4734,6 +4777,11 @@ async def synthesize_repo(
             mut_stripped = [ln.strip() for ln in mutated_content.splitlines() if ln.strip()]
             if orig_stripped == mut_stripped:
                 logger.warning('  Mutation is whitespace-only, retrying (%d/2)', attempt + 1)
+                bug_spec = None
+                continue
+
+            if _is_ast_equivalent(original_content, mutated_content, language):
+                logger.warning('  Mutation is semantically equivalent, retrying (%d/2)', attempt + 1)
                 bug_spec = None
                 continue
 
