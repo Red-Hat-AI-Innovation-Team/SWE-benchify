@@ -420,6 +420,8 @@ def main():
     parser.add_argument('--role', choices=['generator', 'discriminator'], default=None,
                         help='Adversarial role: generator outputs evasion score, '
                              'discriminator outputs detection recall')
+    parser.add_argument('--results-dir', default='/tmp',
+                        help='Directory for results JSON (default: /tmp)')
     args = parser.parse_args()
 
     if args.role == 'discriminator':
@@ -659,7 +661,7 @@ def main():
                 test_patch=inst.get("test_patch", ""),
                 gold_patch=inst.get("patch", ""),
                 env_spec=env_spec,
-                timeout=600,
+                timeout=1800,
                 repo_path=target["repo_path"],
                 repo_tarball_path=repo_tarball_path,
             )
@@ -778,7 +780,7 @@ def main():
             grade, recall * 100, far * 100,
         )
 
-        out_path = f"/tmp/synth-eval-results-r{round_num}.json"
+        out_path = os.path.join(args.results_dir, f"synth-eval-results-r{round_num}.json")
         with open(out_path, "w") as f:
             json.dump({
                 "round": round_num,
@@ -831,7 +833,7 @@ def main():
             ),
         }))
     else:
-        out_path = f'/tmp/synth-eval-results-r{round_num}-quick.json'
+        out_path = os.path.join(args.results_dir, f'synth-eval-results-r{round_num}-quick.json')
         with open(out_path, 'w') as f:
             json.dump({'synthetic_instances': all_synth_instances}, f, indent=2)
         log.info("quick mode — instances saved to %s", out_path)
@@ -856,6 +858,7 @@ def _write_round_doc(round_num, commit, n_s, n_r, targets, *,
                      structural_failures=None, f2p_failures=None):
     """Write round-N.md for paper trail."""
     md_path = os.path.join(EVAL_DOCS, f"round-{round_num}.md")
+    os.makedirs(os.path.dirname(md_path), exist_ok=True)
     repos_str = ", ".join(t["repo_slug"] for t in targets)
 
     with open(md_path, "w") as f:
