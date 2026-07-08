@@ -503,7 +503,7 @@ def find_mutation_targets(
 
             for func in functions[:max_functions]:
                 source_lines = str(func["source"]).strip().splitlines()
-                if len(source_lines) < 8:
+                if len(source_lines) < 5:
                     continue
                 if language == "rust" and cfg_test_line is not None:
                     if func["start_line"] + 1 >= cfg_test_line:
@@ -1937,6 +1937,7 @@ async def introduce_bug(
     related_files: list[dict[str, str]] | None = None,
     bug_plan: BugPlan | None = None,
     test_context: str = "",
+    assertions: list[dict] | None = None,
 ) -> BugSpec | None:
     """Use Claude to introduce a realistic bug into a function.
 
@@ -1969,6 +1970,31 @@ async def introduce_bug(
             plan_parts.append(f"Secondary change needed in {secondary['file']}: {secondary['plan']}")
         plan_parts.append("Your bug MUST include the secondary changes described above. Show ALL modified files in your response.")
         bug_plan_context = "\n".join(plan_parts)
+
+    assertion_context = ""
+    if assertions:
+        lines = []
+        for a in assertions:
+            expr = a.get('expression', '')
+            line_num = a.get('line', '?')
+            atype = a.get('type', '')
+            expected = a.get('expected', '')
+            if atype == 'equality':
+                lines.append(f"- assertEqual({expr}, {expected})  [line {line_num}]")
+            elif atype == 'raises':
+                lines.append(f"- assertRaises({expected}, {expr})  [line {line_num}]")
+            elif atype == 'in':
+                lines.append(f"- assertIn({expected}, {expr})  [line {line_num}]")
+            elif atype in ('truthy', 'falsy'):
+                method = 'assertTrue' if atype == 'truthy' else 'assertFalse'
+                lines.append(f"- {method}({expr})  [line {line_num}]")
+            elif atype in ('is_none', 'not_none'):
+                method = 'assertIsNone' if atype == 'is_none' else 'assertIsNotNone'
+                lines.append(f"- {method}({expr})  [line {line_num}]")
+            else:
+                lines.append(f"- {expr}  [line {line_num}]")
+        if lines:
+            assertion_context = "\n\nASSERTIONS TO BREAK (from the test file):\n" + "\n".join(lines) + "\n\nYour mutation MUST change the function so at least one of these assertions fails."
 
     avoid_override = ""
     if test_context:
@@ -2036,7 +2062,7 @@ Here is the function:
 ```{language}
 {source}
 ```
-{test_context}{language_guidance}{related_context}
+{test_context}{assertion_context}{language_guidance}{related_context}
 {bug_plan_context}
 
 Return your response in EXACTLY this format:
@@ -5314,6 +5340,7 @@ async def synthesize_repo(
                     or t['function_name'] in a.get('expression', ''))
             ]
             if relevant:
+                t['assertions'] = relevant
                 with_assertions.append(t)
                 continue
         with_tests_no_assertions.append(t)
@@ -5392,12 +5419,31 @@ async def synthesize_repo(
                     except OSError:
                         pass
 
+        # Resolve assertion data for the prompt
+        target_assertions = target.get('assertions')
+        if target_assertions is None:
+            _afile = _find_existing_test_file(repo_path, target["file"], language)
+            if _afile:
+                try:
+                    _asrc = Path(os.path.join(repo_path, _afile)).read_text(
+                        encoding="utf-8", errors="replace",
+                    )
+                    _all_assertions = _analyze_test_assertions(_asrc, language)
+                    target_assertions = [
+                        a for a in _all_assertions
+                        if (a.get('called_function') == target['function_name']
+                            or target['function_name'] in a.get('expression', ''))
+                    ] or None
+                except OSError:
+                    pass
+
         # H2: Fall back to LLM introduce_bug (retry up to 2 times if patch too simple)
         for attempt in range(3):
             if bug_spec is None:
                 bug_spec = await introduce_bug(
                     target, model=model, related_files=related_files,
                     bug_plan=bug_plan, test_context=test_context,
+                    assertions=target_assertions,
                 )
             if bug_spec is None:
                 logger.warning("  Skipped — LLM did not produce a valid mutation")
