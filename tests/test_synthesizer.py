@@ -4712,3 +4712,11 @@ def test_find_existing_test_file_python_ignores_cross_package(tmp_path: Path) ->
         str(tmp_path), "src/foo.py", "python", function_name="foo",
     )
     assert result is None
+
+
+def test_synthesize_repo_accepts_yield_only():
+    import inspect
+    from swebenchify.synthesizer import synthesize_repo
+    sig = inspect.signature(synthesize_repo)
+    assert 'yield_only' in sig.parameters
+    assert sig.parameters['yield_only'].default is False

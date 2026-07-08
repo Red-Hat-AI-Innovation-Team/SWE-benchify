@@ -4656,6 +4656,7 @@ async def synthesize_repo(
     operators: list[str] | None = None,
     model: str = "sonnet",
     screen_instances: bool = True,
+    yield_only: bool = False,
 ) -> RepoSynthesisResult:
     """Synthesize bug instances for a repository.
 
@@ -4752,12 +4753,15 @@ async def synthesize_repo(
             repo_path, target["file"], target["function_name"], language,
         )
 
-        bug_plan = await _plan_multi_file_mutation(
-            target["source"], related_files, model=model,
-            test_context=test_context,
-        )
-        if bug_plan:
-            logger.info("  Multi-file plan: %s", bug_plan.primary_description[:80])
+        if yield_only:
+            bug_plan = None
+        else:
+            bug_plan = await _plan_multi_file_mutation(
+                target["source"], related_files, model=model,
+                test_context=test_context,
+            )
+            if bug_plan:
+                logger.info("  Multi-file plan: %s", bug_plan.primary_description[:80])
 
         # H10: Try targeted mutation for Python (higher data-first pass rate)
         bug_spec = None
@@ -4907,7 +4911,7 @@ async def synthesize_repo(
                 buggy_files[sc.file] = sec_buggy
                 logger.info("  Secondary change in %s: %s", sc.file, sc.description)
 
-        if len(buggy_files) < 2 and related_files:
+        if not yield_only and len(buggy_files) < 2 and related_files:
             logger.info("  Only %d file changed, retrying with explicit multi-file instruction", len(buggy_files))
             retry_spec = await introduce_bug(
                 target, model=model, related_files=related_files,
@@ -4940,58 +4944,59 @@ async def synthesize_repo(
         ctx = _collect_repo_context(repo_path)
         real_issues = ctx.get("recent_issues", [])
 
-        incidentals = await _generate_incidental_changes(
-            repo_path, bug_spec, language, model=model,
-        )
-        for inc_path, inc_original, inc_modified in incidentals:
-            if inc_path in patched_files:
-                logger.info("  Skipping duplicate incidental for %s", inc_path)
-                continue
-            # Validate RST references in changelog files
-            if inc_path.lower().endswith((".rst", ".md")):
-                inc_modified = _validate_rst_references(inc_modified, real_issues)
-            try:
-                inc_file = Path(repo_path) / inc_path
-                inc_content = inc_file.read_text(encoding="utf-8", errors="replace")
-                if inc_original == "EMPTY":
-                    new_content = inc_content + "\n" + inc_modified
-                else:
-                    new_content = inc_content.replace(inc_original, inc_modified, 1)
-                if new_content != inc_content:
-                    # Reject CHANGES.rst edits that create duplicate version headers
-                    if Path(inc_path).name in (
-                        "CHANGES.rst", "CHANGELOG.rst", "CHANGELOG.md",
-                        "HISTORY.rst", "HISTORY.md",
-                    ):
-                        headers = re.findall(
-                            r"^(?:Version\s+\S+|#+\s+\S+)", new_content, re.MULTILINE,
-                        )
-                        if len(headers) != len(set(headers)):
-                            logger.debug(
-                                "Skipping %s — duplicate version header", inc_path,
+        if not yield_only:
+            incidentals = await _generate_incidental_changes(
+                repo_path, bug_spec, language, model=model,
+            )
+            for inc_path, inc_original, inc_modified in incidentals:
+                if inc_path in patched_files:
+                    logger.info("  Skipping duplicate incidental for %s", inc_path)
+                    continue
+                # Validate RST references in changelog files
+                if inc_path.lower().endswith((".rst", ".md")):
+                    inc_modified = _validate_rst_references(inc_modified, real_issues)
+                try:
+                    inc_file = Path(repo_path) / inc_path
+                    inc_content = inc_file.read_text(encoding="utf-8", errors="replace")
+                    if inc_original == "EMPTY":
+                        new_content = inc_content + "\n" + inc_modified
+                    else:
+                        new_content = inc_content.replace(inc_original, inc_modified, 1)
+                    if new_content != inc_content:
+                        # Reject CHANGES.rst edits that create duplicate version headers
+                        if Path(inc_path).name in (
+                            "CHANGES.rst", "CHANGELOG.rst", "CHANGELOG.md",
+                            "HISTORY.rst", "HISTORY.md",
+                        ):
+                            headers = re.findall(
+                                r"^(?:Version\s+\S+|#+\s+\S+)", new_content, re.MULTILINE,
                             )
-                            continue
-                        # Reject edits where underline is separated from header by blank lines
-                        _orphaned = False
-                        nc_lines = new_content.split("\n")
-                        for i, nc_line in enumerate(nc_lines):
-                            if re.match(r"^Version\s+\S+", nc_line):
-                                j = i + 1
-                                while j < len(nc_lines) and nc_lines[j].strip() == "":
-                                    j += 1
-                                if j < len(nc_lines) and re.match(r"^[-=~^]{3,}$", nc_lines[j].strip()):
-                                    if j != i + 1:
-                                        _orphaned = True
-                                        break
-                        if _orphaned:
-                            logger.debug(
-                                "Skipping %s — orphaned underline after header", inc_path,
-                            )
-                            continue
-                    patch += generate_patch(new_content, inc_content, inc_path)
-                    patched_files.add(inc_path)
-            except OSError:
-                continue
+                            if len(headers) != len(set(headers)):
+                                logger.debug(
+                                    "Skipping %s — duplicate version header", inc_path,
+                                )
+                                continue
+                            # Reject edits where underline is separated from header by blank lines
+                            _orphaned = False
+                            nc_lines = new_content.split("\n")
+                            for i, nc_line in enumerate(nc_lines):
+                                if re.match(r"^Version\s+\S+", nc_line):
+                                    j = i + 1
+                                    while j < len(nc_lines) and nc_lines[j].strip() == "":
+                                        j += 1
+                                    if j < len(nc_lines) and re.match(r"^[-=~^]{3,}$", nc_lines[j].strip()):
+                                        if j != i + 1:
+                                            _orphaned = True
+                                            break
+                            if _orphaned:
+                                logger.debug(
+                                    "Skipping %s — orphaned underline after header", inc_path,
+                                )
+                                continue
+                        patch += generate_patch(new_content, inc_content, inc_path)
+                        patched_files.add(inc_path)
+                except OSError:
+                    continue
 
         buggy_commit = _create_buggy_commit_multi(
             repo_path, buggy_files, bug_spec.bug_description,
@@ -5013,6 +5018,28 @@ async def synthesize_repo(
 
         if not test_output or not _is_valid_test_output(test_output):
             logger.warning("  Skipped — mutation did not cause test failures (data-first path required)")
+            continue
+
+        if yield_only:
+            synthesis_result = SynthesisResult(
+                bug_spec=bug_spec,
+                patch=patch,
+                problem_statement=(
+                    f'[yield-only] Mutation in {bug_spec.file}:{bug_spec.function_name} '
+                    f'broke tests. Test output captured ({len(test_output or "")} chars). '
+                    f'Generated in yield-measurement mode without full enrichment.'
+                ),
+                instance_id='',
+                base_commit=buggy_commit,
+                test_output=test_output or '',
+            )
+            candidate = build_candidate(
+                repo_slug, buggy_commit, synthesis_result, test_patch='',
+            )
+            candidate.merge_commit = base_commit
+            synthesis_result.instance_id = candidate.instance_id
+            candidates.append(candidate)
+            logger.info('  Generated (yield-only): %s (%s)', candidate.instance_id, bug_spec.bug_category)
             continue
 
         # H2: Mine social artifacts and build social context

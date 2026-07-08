@@ -422,6 +422,8 @@ def main():
                              'discriminator outputs detection recall')
     parser.add_argument('--results-dir', default='/tmp',
                         help='Directory for results JSON (default: /tmp)')
+    parser.add_argument('--yield-only', action='store_true',
+                        help='Measure yield rate only (~5 min). Skips issue generation, test patches, judge, F2P, diversity.')
     args = parser.parse_args()
 
     if args.role == 'discriminator':
@@ -430,7 +432,11 @@ def main():
     round_num = detect_round()
     commit = detect_commit()
 
-    if args.quick:
+    if args.yield_only:
+        targets = [EVAL_TARGETS[0].copy()]
+        targets[0]['n_synthetic'] = 2
+        targets[0]['n_real'] = 0
+    elif args.quick:
         targets = [t.copy() for t in EVAL_TARGETS]
         for t in targets:
             t['n_synthetic'] = 3
@@ -478,6 +484,7 @@ def main():
             language=target["language"],
             max_mutations=target["n_synthetic"] * 5,
             model="sonnet",
+            yield_only=getattr(args, 'yield_only', False),
         ))
         synth_instances = [asdict(c) for c in result.candidates]
         mutations_attempted = result.mutations_attempted
@@ -576,6 +583,19 @@ def main():
     yield_rate = n_s / total_mutations_attempted if total_mutations_attempted > 0 else 0
     n_r = len(all_real_samples)
     log.info("totals: synthetic=%d real=%d", n_s, n_r)
+
+    if args.yield_only:
+        log.info('phase=yield_only yield_rate=%.3f (%d/%d)', yield_rate, n_s, total_mutations_attempted)
+        print(json.dumps({
+            'score': round(yield_rate, 3),
+            'details': (
+                f'R{round_num} ({commit}): YIELD-ONLY. '
+                f'{n_s} mutations broke tests out of {total_mutations_attempted} attempted. '
+                f'Yield rate: {yield_rate:.2f}. '
+                f'Repo: {targets[0]["repo_slug"]}.'
+            ),
+        }))
+        return
 
     if not all_synth_instances:
         log.error("no synthetic instances generated across any repo")
