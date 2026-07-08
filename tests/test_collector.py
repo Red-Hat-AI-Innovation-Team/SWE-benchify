@@ -7,7 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from swebenchify.collector import compute_link_confidence, extract_jira_issues, extract_resolved_issues, load_prs, save_prs
+from swebenchify.collector import (
+    compute_link_confidence,
+    extract_jira_issues,
+    extract_resolved_issues,
+    load_prs,
+    save_prs,
+)
 from swebenchify.models import CandidatePR
 
 

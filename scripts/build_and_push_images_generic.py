@@ -32,7 +32,6 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-
 SOURCE_URL = "https://github.com/Red-Hat-AI-Innovation-Team/SWE-benchify"
 
 

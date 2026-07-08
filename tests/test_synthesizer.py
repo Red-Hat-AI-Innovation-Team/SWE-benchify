@@ -9,14 +9,13 @@ from pathlib import Path
 import pytest
 
 from swebenchify.synthesizer import (
-    _align_indentation,
-    _analyze_test_assertions,
-    _preserve_unchanged_lines,
-    _BraceCounter,
     BugPlan,
     BugSpec,
     RepoSynthesisResult,
     SynthesisResult,
+    _align_indentation,
+    _analyze_test_assertions,
+    _BraceCounter,
     _build_social_context,
     _collect_repo_context,
     _count_changed_lines,
@@ -25,6 +24,7 @@ from swebenchify.synthesizer import (
     _discover_repo_modules,
     _edge_case_score,
     _enforce_banned_openers,
+    _ensure_venv,
     _extract_brace_language_functions,
     _extract_called_func,
     _extract_failed_test_names,
@@ -40,19 +40,19 @@ from swebenchify.synthesizer import (
     _mine_issue_style_examples,
     _mine_social_artifacts,
     _mutate_remove_raise,
-    _mutate_return_none,
     _mutate_return_non_none,
+    _mutate_return_none,
     _mutate_swap_operator,
     _normalize_test_whitespace,
     _parse_bug_response,
     _parse_incidental_changes,
     _parse_secondary_changes,
-    _ensure_venv,
+    _preserve_unchanged_lines,
     _run_tests_on_buggy_code,
     _sanitize_test_output,
     _source_to_module_name,
-    _strip_strategy_labels,
     _strip_issue_shas,
+    _strip_strategy_labels,
     _targeted_mutation,
     _truncate_issue,
     _try_targeted_mutation,
@@ -64,7 +64,6 @@ from swebenchify.synthesizer import (
     find_mutation_targets,
     generate_patch,
 )
-
 
 # ---------------------------------------------------------------------------
 # find_mutation_targets — Python
@@ -1193,6 +1192,7 @@ def test_issue_description_no_file_leak() -> None:
     with patch("swebenchify.synthesizer.query", fake_query), \
          patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
+
         from swebenchify.synthesizer import generate_issue_description
         result = asyncio.run(generate_issue_description(bug_spec))
 
@@ -1210,6 +1210,7 @@ def test_issue_description_no_file_leak() -> None:
 def test_generate_issue_from_symptom_no_bugspec() -> None:
     """Without test_output, generate_issue_from_symptom returns symptom-based fallback."""
     import asyncio
+
     from swebenchify.synthesizer import generate_issue_from_symptom
     result = asyncio.run(generate_issue_from_symptom(
         symptom="time duration handling uses wrong units",
@@ -1221,6 +1222,7 @@ def test_generate_issue_from_symptom_no_bugspec() -> None:
 def test_generate_issue_from_symptom_with_style_examples() -> None:
     """Without test_output, style_examples are ignored and symptom fallback is returned."""
     import asyncio
+
     from swebenchify.synthesizer import generate_issue_from_symptom
     result = asyncio.run(generate_issue_from_symptom(
         symptom="parsing breaks on unicode input",
@@ -1271,7 +1273,8 @@ def test_find_existing_test_file_not_found(tmp_path: Path) -> None:
 
 def test_test_patch_modifies_existing_file(tmp_path: Path) -> None:
     """When an existing test file is found, the patch should modify it, not create a new file."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "calc.py").write_text("def add(a, b):\n    return a + b\n")
@@ -1300,6 +1303,7 @@ def test_test_patch_modifies_existing_file(tmp_path: Path) -> None:
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()), \
          mock_patch("swebenchify.synthesizer.ResultMessage", FakeResult):
         import asyncio
+
         from swebenchify.synthesizer import generate_test_patch
         result = asyncio.run(generate_test_patch(bug_spec, str(tmp_path), "python"))
 
@@ -1373,7 +1377,8 @@ def test_collect_repo_context_empty(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def test_issue_description_has_context(tmp_path: Path) -> None:
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text('[project]\nversion = "1.5.0"\n')
@@ -1397,6 +1402,7 @@ def test_issue_description_has_context(tmp_path: Path) -> None:
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
+
         from swebenchify.synthesizer import generate_issue_description
         asyncio.run(generate_issue_description(
             bug_spec, repo_path=str(tmp_path),
@@ -2100,7 +2106,8 @@ def test_validate_test_imports_rejects_completely_fake(tmp_path: Path) -> None:
 
 def test_generate_test_patch_returns_none_without_existing_test(tmp_path: Path) -> None:
     """When no existing test file exists, generate_test_patch returns None."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "orphan.py").write_text("def orphan(): pass\n")
@@ -2116,6 +2123,7 @@ def test_generate_test_patch_returns_none_without_existing_test(tmp_path: Path) 
 
     with mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
+
         from swebenchify.synthesizer import generate_test_patch
         result = asyncio.run(generate_test_patch(bug_spec, str(tmp_path), "python"))
 
@@ -2283,6 +2291,7 @@ def test_truncate_issue_keeps_title() -> None:
 def test_generate_issue_from_symptom_no_llm_without_test_output() -> None:
     """Without test_output, no LLM is called — symptom fallback is returned."""
     import asyncio
+
     from swebenchify.synthesizer import generate_issue_from_symptom
     result = asyncio.run(generate_issue_from_symptom(
         symptom="parsing breaks on unicode",
@@ -2365,7 +2374,8 @@ def test_find_related_files_finds_test_files(tmp_path: Path) -> None:
 
 def test_plan_multi_file_mutation_prompt() -> None:
     """Verify prompt is constructed correctly with target and related files."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     captured_prompts: list[str] = []
 
@@ -2377,6 +2387,7 @@ def test_plan_multi_file_mutation_prompt() -> None:
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
+
         from swebenchify.synthesizer import _plan_multi_file_mutation
         result = asyncio.run(_plan_multi_file_mutation(
             target_func_code="def process(x):\n    return x + 1",
@@ -2396,6 +2407,7 @@ def test_plan_multi_file_mutation_prompt() -> None:
 def test_plan_multi_file_mutation_returns_none_without_related() -> None:
     """Returns None when no related files are provided."""
     import asyncio
+
     from swebenchify.synthesizer import _plan_multi_file_mutation
     result = asyncio.run(_plan_multi_file_mutation(
         target_func_code="def foo(): pass",
@@ -2460,7 +2472,8 @@ def test_enforce_banned_openers_no_awkward_concatenation() -> None:
 
 def test_introduce_bug_receives_bug_plan() -> None:
     """When bug_plan is provided, its content appears in the LLM prompt."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     captured_prompts: list[str] = []
 
@@ -2485,6 +2498,7 @@ def test_introduce_bug_receives_bug_plan() -> None:
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
+
         from swebenchify.synthesizer import introduce_bug
         asyncio.run(introduce_bug(target, bug_plan=plan))
 
@@ -2611,7 +2625,9 @@ def test_build_social_context_empty_artifacts() -> None:
 
 def test_bug_to_symptom_includes_file_context() -> None:
     """When file_path is provided, the prompt anchors the symptom to that module."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
+
     import swebenchify.synthesizer as _synth
 
     captured_prompts: list[str] = []
@@ -2639,7 +2655,9 @@ def test_bug_to_symptom_includes_file_context() -> None:
 
 def test_bug_to_symptom_no_file_path() -> None:
     """Without file_path, no file context appears in the prompt."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
+
     import swebenchify.synthesizer as _synth
 
     captured_prompts: list[str] = []
@@ -2667,7 +2685,8 @@ def test_bug_to_symptom_no_file_path() -> None:
 
 def test_generate_issue_from_symptom_data_first() -> None:
     """When test_output is provided, the issue contains the traceback text."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     async def fake_query(prompt: str, options: object = None):
         class FakeResult:
@@ -2686,6 +2705,7 @@ def test_generate_issue_from_symptom_data_first() -> None:
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()), \
          mock_patch("swebenchify.synthesizer.ResultMessage", type("FR", (), {})):
         import asyncio
+
         from swebenchify.synthesizer import generate_issue_from_symptom
         result = asyncio.run(generate_issue_from_symptom(
             symptom="parsing fails on unicode",
@@ -2700,7 +2720,8 @@ def test_generate_issue_from_symptom_data_first() -> None:
 
 def test_generate_issue_from_symptom_data_first_fallback() -> None:
     """Data-first path produces reasonable output even when LLM fails."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     async def fake_query(prompt: str, options: object = None):
         return
@@ -2718,6 +2739,7 @@ def test_generate_issue_from_symptom_data_first_fallback() -> None:
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
+
         from swebenchify.synthesizer import generate_issue_from_symptom
         result = asyncio.run(generate_issue_from_symptom(
             symptom="broken feature",
@@ -2731,6 +2753,7 @@ def test_generate_issue_from_symptom_data_first_fallback() -> None:
 def test_generate_issue_from_symptom_with_social_context() -> None:
     """Social context is appended when test_output is provided."""
     import asyncio
+
     from swebenchify.synthesizer import generate_issue_from_symptom
     test_output = (
         "FAILED tests/test_foo.py::test_bar\n"
@@ -2750,6 +2773,7 @@ def test_generate_issue_from_symptom_with_social_context() -> None:
 def test_generate_issue_from_symptom_no_llm_for_symptom_only() -> None:
     """Without test_output, result contains symptom in a code block."""
     import asyncio
+
     from swebenchify.synthesizer import generate_issue_from_symptom
     result = asyncio.run(generate_issue_from_symptom(
         symptom="test symptom",
@@ -2764,8 +2788,9 @@ def test_generate_issue_from_symptom_no_llm_for_symptom_only() -> None:
 
 def test_patch_floor_accepts_5_lines_500_chars() -> None:
     """Verify new thresholds: 2 changed lines, 100 chars."""
-    import swebenchify.synthesizer as mod
     import inspect
+
+    import swebenchify.synthesizer as mod
     source = inspect.getsource(mod.synthesize_repo)
     assert "changed >= 2" in source
     assert 'len(patch) >= 100' in source
@@ -2773,8 +2798,9 @@ def test_patch_floor_accepts_5_lines_500_chars() -> None:
 
 def test_patch_floor_log_messages_updated() -> None:
     """Verify log messages reflect new thresholds."""
-    import swebenchify.synthesizer as mod
     import inspect
+
+    import swebenchify.synthesizer as mod
     source = inspect.getsource(mod.synthesize_repo)
     assert 'changed lines < 2' in source
     assert 'chars < 100' in source
@@ -2887,7 +2913,8 @@ def test_is_valid_test_output_all_pass() -> None:
 
 def test_generate_issue_from_symptom_module_not_found_fallback() -> None:
     """ModuleNotFoundError in test_output triggers LLM-only fallback."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     async def fake_query(prompt: str, options: object = None):
         return
@@ -2898,6 +2925,7 @@ def test_generate_issue_from_symptom_module_not_found_fallback() -> None:
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
+
         from swebenchify.synthesizer import generate_issue_from_symptom
         result = asyncio.run(generate_issue_from_symptom(
             symptom="debug warning inverted",
@@ -2910,7 +2938,8 @@ def test_generate_issue_from_symptom_module_not_found_fallback() -> None:
 
 def test_generate_issue_from_symptom_short_output_fallback() -> None:
     """Short test output (< 200 chars) triggers LLM-only fallback."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     async def fake_query(prompt: str, options: object = None):
         return
@@ -2919,6 +2948,7 @@ def test_generate_issue_from_symptom_short_output_fallback() -> None:
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
+
         from swebenchify.synthesizer import generate_issue_from_symptom
         result = asyncio.run(generate_issue_from_symptom(
             symptom="broken feature",
@@ -2930,7 +2960,8 @@ def test_generate_issue_from_symptom_short_output_fallback() -> None:
 
 def test_generate_issue_from_symptom_real_failure_uses_data_first() -> None:
     """Real test failure output uses the data-first path."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     async def fake_query(prompt: str, options: object = None):
         return
@@ -2948,6 +2979,7 @@ def test_generate_issue_from_symptom_real_failure_uses_data_first() -> None:
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
+
         from swebenchify.synthesizer import generate_issue_from_symptom
         result = asyncio.run(generate_issue_from_symptom(
             symptom="calculation returns wrong value",
@@ -3140,6 +3172,7 @@ def test_load_dataset_examples_handles_malformed_json(tmp_path: Path) -> None:
 def test_generate_issue_from_symptom_dataset_examples_ignored() -> None:
     """dataset_examples are ignored since LLM is no longer used for issues."""
     import asyncio
+
     from swebenchify.synthesizer import generate_issue_from_symptom
     result = asyncio.run(generate_issue_from_symptom(
         symptom="parsing breaks on unicode",
@@ -3150,7 +3183,8 @@ def test_generate_issue_from_symptom_dataset_examples_ignored() -> None:
 
 def test_generate_issue_from_symptom_few_shot_not_used_for_data_first() -> None:
     """The data-first path (with test_output) is unchanged by dataset_examples."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     captured_prompts: list[str] = []
 
@@ -3170,6 +3204,7 @@ def test_generate_issue_from_symptom_few_shot_not_used_for_data_first() -> None:
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
+
         from swebenchify.synthesizer import generate_issue_from_symptom
         result = asyncio.run(generate_issue_from_symptom(
             symptom="calculation fails",
@@ -3189,6 +3224,7 @@ def test_generate_issue_from_symptom_few_shot_not_used_for_data_first() -> None:
 def test_pip_install_uses_sys_executable() -> None:
     """Verify pip install commands use sys.executable, not bare 'pip'."""
     import inspect
+
     import swebenchify.synthesizer as mod
     source = inspect.getsource(mod._run_tests_on_buggy_code)
     assert "sys.executable" in source
@@ -3494,7 +3530,8 @@ def test_run_tests_no_deselect_when_baseline_clean(tmp_path: Path) -> None:
 
 def test_data_first_uses_narrative_rewrite_with_fallback() -> None:
     """Data-first path calls LLM for narrative rewrite, falls back to programmatic draft."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     captured_prompts: list[str] = []
 
@@ -3514,6 +3551,7 @@ def test_data_first_uses_narrative_rewrite_with_fallback() -> None:
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
+
         from swebenchify.synthesizer import generate_issue_from_symptom
         result = asyncio.run(generate_issue_from_symptom(
             symptom="calculation fails",
@@ -3562,7 +3600,8 @@ def test_count_test_functions_empty() -> None:
 
 def test_test_patch_rejects_missing_function_def(tmp_path: Path) -> None:
     """When the LLM response lacks the function definition, the patch is rejected."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "calc.py").write_text("def add(a, b):\n    return a + b\n")
@@ -3591,6 +3630,7 @@ def test_test_patch_rejects_missing_function_def(tmp_path: Path) -> None:
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()), \
          mock_patch("swebenchify.synthesizer.ResultMessage", FakeResult):
         import asyncio
+
         from swebenchify.synthesizer import _generate_test_patch_existing
         result = asyncio.run(_generate_test_patch_existing(
             bug_spec, str(tmp_path), "tests/test_calc.py", "python", "sonnet",
@@ -3601,7 +3641,8 @@ def test_test_patch_rejects_missing_function_def(tmp_path: Path) -> None:
 
 def test_test_patch_accepts_modified_existing_functions(tmp_path: Path) -> None:
     """When the LLM returns a modified function, the patch is accepted."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "calc.py").write_text("def add(a, b):\n    return a + b\n")
@@ -3630,6 +3671,7 @@ def test_test_patch_accepts_modified_existing_functions(tmp_path: Path) -> None:
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()), \
          mock_patch("swebenchify.synthesizer.ResultMessage", FakeResult):
         import asyncio
+
         from swebenchify.synthesizer import _generate_test_patch_existing
         result = asyncio.run(_generate_test_patch_existing(
             bug_spec, str(tmp_path), "tests/test_calc.py", "python", "sonnet",
@@ -3646,7 +3688,8 @@ def test_test_patch_accepts_modified_existing_functions(tmp_path: Path) -> None:
 
 def test_test_generation_prompt_function_level() -> None:
     """Verify the prompt sends only the target function and uses HARD CONSTRAINT."""
-    from unittest.mock import MagicMock, patch as mock_patch
+    from unittest.mock import MagicMock
+    from unittest.mock import patch as mock_patch
 
     captured_prompts: list[str] = []
 
@@ -3671,6 +3714,7 @@ def test_test_generation_prompt_function_level() -> None:
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
         import asyncio
+
         from swebenchify.synthesizer import _generate_test_patch_existing
         asyncio.run(_generate_test_patch_existing(
             bug_spec, str(tmp_dir), "test_calc.py", "python", "sonnet",
@@ -3717,8 +3761,8 @@ def test_align_indentation_normalizes_blank_lines() -> None:
 
 def test_synthesize_repo_skips_candidate_without_test_failures() -> None:
     """Candidates without valid test output are skipped (data-first path required)."""
-    from unittest.mock import AsyncMock, patch
     import asyncio
+    from unittest.mock import AsyncMock, patch
 
     target = {
         "file": "src/foo.py",

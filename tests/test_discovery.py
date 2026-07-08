@@ -183,12 +183,14 @@ class TestDiscoverGoEnvironmentSignature:
 
     def test_is_coroutine_function(self) -> None:
         import inspect
+
         from swebenchify.discovery import discover_go_environment
 
         assert inspect.iscoroutinefunction(discover_go_environment)
 
     def test_signature_parameters(self) -> None:
         import inspect
+
         from swebenchify.discovery import discover_go_environment
 
         sig = inspect.signature(discover_go_environment)
