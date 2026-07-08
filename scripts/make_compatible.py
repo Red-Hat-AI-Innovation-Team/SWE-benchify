@@ -16,10 +16,10 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("make_compatible")
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-from swebenchify.models import TaskInstance  # noqa: E402
+from swebenchify.compat import get_environment_setup_commit, snap_version  # noqa: E402
 from swebenchify.extractor import load_candidates  # noqa: E402
+from swebenchify.models import TaskInstance  # noqa: E402
 from swebenchify.versioning import detect_version  # noqa: E402
-from swebenchify.compat import snap_version, get_environment_setup_commit  # noqa: E402
 
 OUTPUT_DIR = Path("output")
 WORKSPACE_ROOT = Path("output/workspaces")

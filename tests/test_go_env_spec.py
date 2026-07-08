@@ -6,10 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-
 from swebenchify.go_registry import GoSpecRegistry
 from swebenchify.models import GoEnvironmentSpec, compute_env_spec_hash
-
 
 # ---------------------------------------------------------------------------
 # Helpers

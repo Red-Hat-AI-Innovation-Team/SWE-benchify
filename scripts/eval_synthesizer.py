@@ -100,7 +100,11 @@ class _FakeOptions:
 
 import swebenchify.synthesizer as synth_mod  # noqa: E402
 from swebenchify.grader import compute_f2p, create_repo_tarball  # noqa: E402
-from swebenchify.models import EnvironmentSpec, GoEnvironmentSpec, RustEnvironmentSpec  # noqa: E402
+from swebenchify.models import (  # noqa: E402
+    EnvironmentSpec,
+    GoEnvironmentSpec,
+    RustEnvironmentSpec,
+)
 
 synth_mod.query = _vertex_query  # type: ignore[assignment]
 synth_mod.ResultMessage = _FakeResultMessage  # type: ignore[assignment,misc]

@@ -110,8 +110,8 @@ def run_m0(known_good_path: str) -> M0Result:
 
     Returns M0Result with the agreement rate and per-instance breakdown.
     """
-    from swebenchify.parsers import GoJSONParser
     from swebenchify.grader import _compute_f2p_p2p
+    from swebenchify.parsers import GoJSONParser
 
     parser = GoJSONParser()
     instances = []
@@ -224,10 +224,11 @@ def run_m1(config_path: str, repo: str = "kubernetes/kubernetes", max_prs: int =
     Prerequisites: ANTHROPIC_API_KEY, GITHUB_TOKEN, Docker/Podman.
     """
     import asyncio
+
     from swebenchify.config import load_config
-    from swebenchify.pipeline import run_repo_pipeline
-    from swebenchify.models import Repository
     from swebenchify.dispatcher import CostTracker
+    from swebenchify.models import Repository
+    from swebenchify.pipeline import run_repo_pipeline
     from swebenchify.workspace import WorkspaceManager
 
     config = load_config(config_path)
@@ -306,10 +307,11 @@ def run_m2(
     Prerequisites: ANTHROPIC_API_KEY, GITHUB_TOKEN, Docker/Podman.
     """
     import asyncio
+
     from swebenchify.config import load_config
-    from swebenchify.pipeline import run_repo_pipeline
-    from swebenchify.models import Repository
     from swebenchify.dispatcher import CostTracker
+    from swebenchify.models import Repository
+    from swebenchify.pipeline import run_repo_pipeline
     from swebenchify.workspace import WorkspaceManager
 
     config = load_config(config_path)

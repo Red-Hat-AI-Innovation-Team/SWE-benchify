@@ -10,12 +10,12 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger("build_and_eval")
 
-from swebenchify.models import TaskInstance, Repository  # noqa: E402
-from swebenchify.extractor import load_candidates  # noqa: E402
-from swebenchify.dispatcher import CostTracker, run_agent_task  # noqa: E402
 from swebenchify.discovery import discover_environment  # noqa: E402
-from swebenchify.workspace import WorkspaceManager  # noqa: E402
+from swebenchify.dispatcher import CostTracker, run_agent_task  # noqa: E402
+from swebenchify.extractor import load_candidates  # noqa: E402
+from swebenchify.models import Repository, TaskInstance  # noqa: E402
 from swebenchify.versioning import detect_version  # noqa: E402
+from swebenchify.workspace import WorkspaceManager  # noqa: E402
 
 OUTPUT_DIR = "output"
 WORKSPACE_ROOT = "output/workspaces"

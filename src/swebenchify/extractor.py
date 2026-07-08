@@ -15,7 +15,8 @@ from io import StringIO
 import requests
 from unidiff import PatchSet
 
-from swebenchify.github import github_get as _shared_github_get, make_headers
+from swebenchify.github import github_get as _shared_github_get
+from swebenchify.github import make_headers
 from swebenchify.models import CandidateInstance, CandidatePR
 
 logger = logging.getLogger(__name__)

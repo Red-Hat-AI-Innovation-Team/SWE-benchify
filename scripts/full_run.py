@@ -21,12 +21,12 @@ logging.basicConfig(
 logger = logging.getLogger("full_run")
 
 from swebenchify.config import load_config  # noqa: E402
-from swebenchify.pipeline import run_pipeline  # noqa: E402
-from swebenchify.models import TaskInstance, Repository  # noqa: E402
 from swebenchify.discovery import discover_environment  # noqa: E402
 from swebenchify.dispatcher import CostTracker  # noqa: E402
-from swebenchify.workspace import WorkspaceManager  # noqa: E402
 from swebenchify.emitter import load_dataset  # noqa: E402
+from swebenchify.models import Repository, TaskInstance  # noqa: E402
+from swebenchify.pipeline import run_pipeline  # noqa: E402
+from swebenchify.workspace import WorkspaceManager  # noqa: E402
 
 CONFIG_PATH = "configs/swebenchify.yaml"
 OUTPUT_DIR = "output"

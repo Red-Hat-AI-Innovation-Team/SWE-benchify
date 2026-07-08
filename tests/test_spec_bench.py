@@ -2,6 +2,7 @@
 
 import pytest
 
+from swebenchify.models import EnvironmentSpec
 from swebenchify.spec_bench import (
     BenchmarkResult,
     FieldScore,
@@ -21,7 +22,6 @@ from swebenchify.spec_bench import (
     normalize_test_cmd,
     score_spec,
 )
-from swebenchify.models import EnvironmentSpec
 
 
 class TestNormalizePythonVersion:

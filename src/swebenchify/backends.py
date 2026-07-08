@@ -15,7 +15,12 @@ from typing import Any, Callable
 
 from unidiff import PatchSet
 
-from swebenchify.models import AnyEnvironmentSpec, EnvironmentSpec, GoEnvironmentSpec, RustEnvironmentSpec
+from swebenchify.models import (
+    AnyEnvironmentSpec,
+    EnvironmentSpec,
+    GoEnvironmentSpec,
+    RustEnvironmentSpec,
+)
 from swebenchify.parsers import (
     GoJSONParser,
     MavenSurefireParser,

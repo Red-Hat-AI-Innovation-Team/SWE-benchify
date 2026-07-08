@@ -12,7 +12,6 @@ import pytest
 
 from swebenchify.models import ValidationResult
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -45,8 +44,8 @@ class TestValidateWithQuarantine:
 
     async def _run(self, side_effects: list[ValidationResult]) -> ValidationResult:
         """Helper: run _validate_with_quarantine with mocked _run_once."""
-        from swebenchify.validator import _validate_with_quarantine
         from swebenchify.models import GoEnvironmentSpec
+        from swebenchify.validator import _validate_with_quarantine
 
         spec = GoEnvironmentSpec(go_version="1.22", test_cmd="go test ./...")
 

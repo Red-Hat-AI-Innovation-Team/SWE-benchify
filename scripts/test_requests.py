@@ -9,11 +9,11 @@ import sys
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("test_requests")
 
-from swebenchify.models import Repository, CandidateInstance  # noqa: E402
 from swebenchify.collector import collect_prs, save_prs  # noqa: E402
-from swebenchify.extractor import extract_all, save_candidates  # noqa: E402
-from swebenchify.dispatcher import CostTracker  # noqa: E402
 from swebenchify.discovery import discover_environment  # noqa: E402
+from swebenchify.dispatcher import CostTracker  # noqa: E402
+from swebenchify.extractor import extract_all, save_candidates  # noqa: E402
+from swebenchify.models import CandidateInstance, Repository  # noqa: E402
 from swebenchify.validator import validate_instance  # noqa: E402
 from swebenchify.workspace import WorkspaceManager  # noqa: E402
 

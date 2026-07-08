@@ -228,6 +228,7 @@ class TestTaskInstanceFreshnessFields:
 
     def _make(self, **overrides: object) -> "TaskInstance":
         from typing import Any
+
         from swebenchify.models import TaskInstance
         defaults: dict[str, Any] = dict(
             repo="pallets/flask",

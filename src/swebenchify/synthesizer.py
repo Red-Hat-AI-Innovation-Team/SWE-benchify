@@ -505,7 +505,7 @@ def find_mutation_targets(
 
             for func in functions[:max_functions]:
                 source_lines = str(func["source"]).strip().splitlines()
-                if len(source_lines) < 8:
+                if len(source_lines) < 5:
                     continue
                 if language == "rust" and cfg_test_line is not None:
                     if func["start_line"] + 1 >= cfg_test_line:
@@ -917,6 +917,260 @@ def _parse_assertion_line(
     return None
 
 
+def _analyze_test_assertions_go(test_source: str) -> list[dict]:
+    """Extract assertions from Go test files.
+
+    Handles four major patterns:
+
+    1. **Standard library** ``if got := Func(args); got != expected``
+       with ``t.Errorf`` / ``t.Fatalf`` / ``t.Error`` / ``t.Fatal``.
+    2. **testify assert/require** — ``assert.Equal``,
+       ``assert.NoError``, ``require.Equal``, ``assert.True``,
+       ``assert.Nil``, ``assert.NotNil``, etc.
+    3. **Direct comparison** — separate ``got := Func(args)`` followed
+       by ``if got != want``.
+    4. **Error checking** — ``result, err := Func(args)`` followed by
+       ``if err != nil``.
+
+    Returns a list of dicts matching the same schema as
+    :func:`_parse_assertion_line`.
+    """
+    assertions: list[dict] = []
+    lines = test_source.splitlines()
+
+    # ── Pattern 1: if got := Func(args); got != expected { ──
+    # e.g.  if got := methodFamily(ut.method); got != ut.wantMethodFamily {
+    pat_inline = re.compile(
+        r'if\s+\w+\s*:=\s*(.+?)\s*;\s*\w+\s*(!?=)\s*(.+?)\s*\{',
+    )
+    # ── Pattern 2a: testify assert.Equal / require.Equal ──
+    # e.g.  assert.Equal(t, expected, FunctionName(args))
+    pat_testify_eq = re.compile(
+        r'(?:assert|require)\.(?:Equal|Equalf)\s*\(\s*\w+\s*,\s*(.+?)\s*,\s*(.+?)(?:\s*,\s*".*?)?\s*\)\s*$',
+    )
+    # ── Pattern 2b: testify assert.NoError / require.NoError ──
+    pat_testify_noerr = re.compile(
+        r'(?:assert|require)\.(?:NoError|NoErrorf)\s*\(\s*\w+\s*,\s*(.+?)(?:\s*,\s*".*?)?\s*\)\s*$',
+    )
+    # ── Pattern 2c: testify assert.True / assert.False ──
+    pat_testify_bool = re.compile(
+        r'(?:assert|require)\.(True|False|Truef|Falsef)\s*\(\s*\w+\s*,\s*(.+?)(?:\s*,\s*".*?)?\s*\)\s*$',
+    )
+    # ── Pattern 2d: testify assert.Nil / assert.NotNil ──
+    pat_testify_nil = re.compile(
+        r'(?:assert|require)\.(Nil|NotNil|Nilf|NotNilf)\s*\(\s*\w+\s*,\s*(.+?)(?:\s*,\s*".*?)?\s*\)\s*$',
+    )
+    # ── Pattern 2e: testify assert.Error / require.Error ──
+    pat_testify_err = re.compile(
+        r'(?:assert|require)\.(?:Error|Errorf)\s*\(\s*\w+\s*,\s*(.+?)(?:\s*,\s*".*?)?\s*\)\s*$',
+    )
+
+    # Helper: extract function name from a Go expression
+    def _go_extract_func(expr: str) -> str | None:
+        """Extract the function/method name from a Go expression."""
+        # Strip receiver/package prefix: pkg.Func(args) -> Func
+        calls = re.findall(r'(?:[\w.]+\.)?(\w+)\s*\(', expr)
+        # Skip Go builtins and test-framework calls
+        go_skip = frozenset({
+            'make', 'len', 'cap', 'append', 'copy', 'close', 'delete',
+            'new', 'panic', 'recover', 'print', 'println', 'string',
+            'int', 'int32', 'int64', 'float32', 'float64', 'byte',
+            'Errorf', 'Fatalf', 'Error', 'Fatal', 'Logf', 'Log',
+            'Run', 'Cleanup', 'Helper', 'Skip', 'Skipf',
+            'Sprintf', 'Printf', 'Fprintf',
+            'Equal', 'NotEqual', 'True', 'False', 'Nil', 'NotNil',
+            'NoError', 'Equalf', 'NoErrorf', 'Truef', 'Falsef',
+            'Nilf', 'NotNilf', 'Errorf', 'Contains',
+        })
+        for name in calls:
+            if name not in go_skip:
+                return name
+        return calls[0] if calls else None
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+
+        # ── Pattern 1: inline if-init with comparison ──
+        m = pat_inline.match(stripped)
+        if m:
+            expr = m.group(1).strip()
+            op = m.group(2).strip()
+            expected = m.group(3).strip()
+            atype = 'equality' if op == '!=' else 'inequality'
+            assertions.append({
+                'type': atype,
+                'expression': expr,
+                'expected': expected,
+                'called_function': _go_extract_func(expr),
+                'line': i + 1,
+            })
+            continue
+
+        # ── Pattern 2a: testify assert.Equal ──
+        m = pat_testify_eq.match(stripped)
+        if m:
+            expected = m.group(1).strip()
+            expr = m.group(2).strip()
+            func_name = _go_extract_func(expr) or _go_extract_func(expected)
+            assertions.append({
+                'type': 'equality',
+                'expression': expr,
+                'expected': expected,
+                'called_function': func_name,
+                'line': i + 1,
+            })
+            continue
+
+        # ── Pattern 2b: testify NoError ──
+        m = pat_testify_noerr.match(stripped)
+        if m:
+            expr = m.group(1).strip()
+            assertions.append({
+                'type': 'error_check',
+                'expression': expr,
+                'expected': 'nil',
+                'called_function': _go_extract_func(expr),
+                'line': i + 1,
+            })
+            continue
+
+        # ── Pattern 2c: testify True/False ──
+        m = pat_testify_bool.match(stripped)
+        if m:
+            kind = m.group(1).strip()
+            expr = m.group(2).strip()
+            atype = 'falsy' if kind.startswith('False') else 'truthy'
+            assertions.append({
+                'type': atype,
+                'expression': expr,
+                'expected': 'false' if atype == 'falsy' else 'true',
+                'called_function': _go_extract_func(expr),
+                'line': i + 1,
+            })
+            continue
+
+        # ── Pattern 2d: testify Nil/NotNil ──
+        m = pat_testify_nil.match(stripped)
+        if m:
+            kind = m.group(1).strip()
+            expr = m.group(2).strip()
+            atype = 'nil_check' if kind.startswith('Nil') else 'not_nil'
+            assertions.append({
+                'type': atype,
+                'expression': expr,
+                'expected': 'nil' if atype == 'nil_check' else 'not nil',
+                'called_function': _go_extract_func(expr),
+                'line': i + 1,
+            })
+            continue
+
+        # ── Pattern 2e: testify Error ──
+        m = pat_testify_err.match(stripped)
+        if m:
+            expr = m.group(1).strip()
+            assertions.append({
+                'type': 'error_check',
+                'expression': expr,
+                'expected': 'error',
+                'called_function': _go_extract_func(expr),
+                'line': i + 1,
+            })
+            continue
+
+        # ── Pattern 4: Error checking — if err != nil { ──
+        # Preceded by result, err := Func(args) within 3 lines
+        # NOTE: must come before Pattern 3 since `if err != nil` also matches
+        # the generic `if \w+ != \w+` pattern.
+        if re.match(r'if\s+err\s*!=\s*nil\s*\{', stripped):
+            for j in range(max(0, i - 3), i):
+                prev = lines[j].strip()
+                m_assign = re.match(r'[\w,\s]+:=\s*(.+)', prev)
+                if m_assign:
+                    expr = m_assign.group(1).strip()
+                    func_name = _go_extract_func(expr)
+                    if func_name:
+                        assertions.append({
+                            'type': 'error_check',
+                            'expression': expr,
+                            'expected': 'nil',
+                            'called_function': func_name,
+                            'line': i + 1,
+                        })
+                        break
+            continue
+
+        # ── Pattern 3: Direct comparison: if got != want { ──
+        # Preceded by got := Func(args) within 3 lines
+        if re.match(r'if\s+\w+\s*!=\s*\w+\s*\{', stripped):
+            # Look backwards for assignment
+            for j in range(max(0, i - 3), i):
+                prev = lines[j].strip()
+                m_assign = re.match(r'\w+\s*:=\s*(.+)', prev)
+                if m_assign:
+                    expr = m_assign.group(1).strip()
+                    func_name = _go_extract_func(expr)
+                    if func_name:
+                        assertions.append({
+                            'type': 'equality',
+                            'expression': expr,
+                            'expected': '',
+                            'called_function': func_name,
+                            'line': i + 1,
+                        })
+                        break
+            continue
+
+        # ── Pattern 5: Standalone nil check on a call expression ──
+        # e.g. if encoding.GetCodecV2(proto.Name) == nil {
+        # or   if SomeFunc(args) != nil {
+        m_nil_cmp = re.match(
+            r'if\s+(.+?)\s*(==|!=)\s*nil\s*\{', stripped,
+        )
+        if m_nil_cmp:
+            expr = m_nil_cmp.group(1).strip()
+            op = m_nil_cmp.group(2).strip()
+            func_name = _go_extract_func(expr)
+            if func_name:
+                atype = 'nil_check' if op == '==' else 'not_nil'
+                assertions.append({
+                    'type': atype,
+                    'expression': expr,
+                    'expected': 'nil' if atype == 'nil_check' else 'not nil',
+                    'called_function': func_name,
+                    'line': i + 1,
+                })
+                continue
+
+        # ── Stdlib t.Errorf/t.Fatalf with function name in message ──
+        # Lines like: t.Fatalf("FuncName() = %v, want %v", got, expected)
+        # These are assertions too — the function name is in the format string
+        if re.match(r't\.(Errorf|Fatalf|Error|Fatal)\s*\(', stripped):
+            # Try to extract function name from the format string
+            m_fmt = re.search(r'"(\w+)\(', stripped)
+            if m_fmt:
+                func_name = m_fmt.group(1)
+                go_skip = frozenset({
+                    'Error', 'Errorf', 'Fatal', 'Fatalf',
+                    'Sprintf', 'Printf', 'Fprintf',
+                })
+                if func_name not in go_skip:
+                    # Check if already captured by Pattern 1 on a previous line
+                    already = any(
+                        a['line'] >= i and a.get('called_function') == func_name
+                        for a in assertions
+                    )
+                    if not already:
+                        assertions.append({
+                            'type': 'equality',
+                            'expression': '',
+                            'expected': '',
+                            'called_function': func_name,
+                            'line': i + 1,
+                        })
+
+    return assertions
+
+
 def _analyze_test_assertions(
     test_source: str, language: str,
 ) -> list[dict]:
@@ -926,16 +1180,24 @@ def _analyze_test_assertions(
     ``assertIn``, ``pytest.raises`` patterns and extracts what is
     being asserted.
 
+    For Go: finds standard library ``if got := Func(...); got != want``
+    patterns, testify ``assert.*`` / ``require.*`` calls, direct
+    comparisons, and ``err != nil`` checks.
+
     Args:
         test_source: Full source code of the test file.
-        language: Programming language (only ``'python'`` supported).
+        language: Programming language (``'python'`` or ``'go'``).
 
     Returns:
         List of dicts with keys: *type* (``'equality'``,
         ``'raises'``, ``'truthy'``, ``'in'``, ``'is_none'``,
-        ``'not_none'``, ``'falsy'``, ``'inequality'``), *expression*,
-        *expected*, *called_function*, and *line*.
+        ``'not_none'``, ``'falsy'``, ``'inequality'``,
+        ``'error_check'``, ``'nil_check'``, ``'not_nil'``),
+        *expression*, *expected*, *called_function*, and *line*.
     """
+    if language == "go":
+        return _analyze_test_assertions_go(test_source)
+
     if language != "python":
         return []
 
@@ -1068,7 +1330,7 @@ def _targeted_mutation(
     Args:
         source: Complete source of the function under test.
         assertion_info: Dict from :func:`_analyze_test_assertions`.
-        language: Programming language (only ``'python'`` supported).
+        language: Programming language (``'python'`` or ``'go'``).
 
     Returns:
         ``(original_snippet, mutated_snippet)`` where replacing
@@ -1076,7 +1338,7 @@ def _targeted_mutation(
         produces the buggy function.  ``None`` if no viable
         mutation is found.
     """
-    if language != "python":
+    if language not in ("python", "go"):
         return None
 
     assertion_type = assertion_info['type']
@@ -1089,17 +1351,18 @@ def _targeted_mutation(
             return result
 
     # Strategy 2: For value-checking assertions, swap operators
-    if assertion_type in ('equality', 'inequality', 'truthy', 'falsy', 'in'):
+    if assertion_type in ('equality', 'inequality', 'truthy', 'falsy', 'in',
+                          'error_check', 'nil_check', 'not_nil'):
         result = _mutate_swap_operator(lines)
         if result:
             return result
 
-    # Strategy 3: For None checks, alter return statements
-    if assertion_type == 'is_none':
+    # Strategy 3: For None/nil checks, alter return statements
+    if assertion_type in ('is_none', 'nil_check'):
         result = _mutate_return_non_none(lines)
         if result:
             return result
-    elif assertion_type == 'not_none':
+    elif assertion_type in ('not_none', 'not_nil'):
         result = _mutate_return_none(lines)
         if result:
             return result
@@ -1160,7 +1423,7 @@ def _try_targeted_mutation(
 
     Returns a :class:`BugSpec` if successful, ``None`` otherwise.
     """
-    if language != "python":
+    if language not in ("python", "go"):
         return None
 
     root = Path(repo_path)
@@ -1704,6 +1967,7 @@ async def introduce_bug(
     bug_plan: BugPlan | None = None,
     test_context: str = "",
     mutation_strategy: str = "",
+    assertions: list[dict] | None = None,
 ) -> BugSpec | None:
     """Use Claude to introduce a realistic bug into a function.
 
@@ -1738,6 +2002,31 @@ async def introduce_bug(
             plan_parts.append(f"Secondary change needed in {secondary['file']}: {secondary['plan']}")
         plan_parts.append("Your bug MUST include the secondary changes described above. Show ALL modified files in your response.")
         bug_plan_context = "\n".join(plan_parts)
+
+    assertion_context = ""
+    if assertions:
+        lines = []
+        for a in assertions:
+            expr = a.get('expression', '')
+            line_num = a.get('line', '?')
+            atype = a.get('type', '')
+            expected = a.get('expected', '')
+            if atype == 'equality':
+                lines.append(f"- assertEqual({expr}, {expected})  [line {line_num}]")
+            elif atype == 'raises':
+                lines.append(f"- assertRaises({expected}, {expr})  [line {line_num}]")
+            elif atype == 'in':
+                lines.append(f"- assertIn({expected}, {expr})  [line {line_num}]")
+            elif atype in ('truthy', 'falsy'):
+                method = 'assertTrue' if atype == 'truthy' else 'assertFalse'
+                lines.append(f"- {method}({expr})  [line {line_num}]")
+            elif atype in ('is_none', 'not_none'):
+                method = 'assertIsNone' if atype == 'is_none' else 'assertIsNotNone'
+                lines.append(f"- {method}({expr})  [line {line_num}]")
+            else:
+                lines.append(f"- {expr}  [line {line_num}]")
+        if lines:
+            assertion_context = "\n\nASSERTIONS TO BREAK (from the test file):\n" + "\n".join(lines) + "\n\nYour mutation MUST change the function so at least one of these assertions fails."
 
     avoid_override = ""
     if test_context:
@@ -1818,7 +2107,7 @@ Here is the function:
 ```{language}
 {source}
 ```
-{test_context}{language_guidance}{related_context}
+{test_context}{assertion_context}{language_guidance}{related_context}
 {bug_plan_context}
 
 Return your response in EXACTLY this format:
@@ -2195,25 +2484,109 @@ def generate_patch(
     return raw
 
 
+def _extract_go_error_message(test_output: str) -> str | None:
+    """Extract error message details from Go test failure output.
+
+    Looks for t.Errorf/t.Fatalf patterns and assertion failure messages.
+    Returns the error description or None.
+    """
+    # Match t.Errorf/t.Fatalf output: "got X, want Y" patterns
+    got_want = re.search(
+        r'(?:got|Got)\s+(.+?),\s*(?:want|Want|expected)\s+(.+?)(?:\n|$)',
+        test_output,
+    )
+    if got_want:
+        return got_want.group(0).strip()
+
+    # Match testify assertion output: "Expected X to equal Y"
+    testify = re.search(
+        r'(?:Expected|expected)\s+(.+?)\s+(?:to equal|to be|but got)\s+(.+?)(?:\n|$)',
+        test_output,
+    )
+    if testify:
+        return testify.group(0).strip()
+
+    # Match generic assertion failure
+    errorf = re.search(r'Error:\s+(.+?)(?:\n|$)', test_output)
+    if errorf:
+        return errorf.group(1).strip()
+
+    return None
+
+
+def _extract_python_error_message(test_output: str) -> tuple[str | None, str | None]:
+    """Extract assertion info from Python test failure output.
+
+    Returns (assertion_expression, error_detail) or (None, None).
+    """
+    # Match AssertionError lines: "AssertionError: X != Y" or "assert X == Y"
+    assert_err = re.search(
+        r'AssertionError:\s*(.+?)(?:\n|$)', test_output,
+    )
+    if assert_err:
+        return assert_err.group(1).strip(), None
+
+    # Match "assert <expr>" lines from pytest verbose
+    assert_line = re.search(r'>\s+assert\s+(.+?)(?:\n|$)', test_output)
+    if assert_line:
+        return assert_line.group(1).strip(), None
+
+    # Match pytest "E   assert ..." lines from pytest short output
+    e_assert = re.search(r'^E\s+assert\s+(.+?)$', test_output, re.MULTILINE)
+    if e_assert:
+        return e_assert.group(1).strip(), None
+
+    # Match pytest "FAILED" with error summary
+    failed = re.search(
+        r'FAILED.*?-\s+(.+?)(?:\n|$)', test_output,
+    )
+    if failed:
+        return None, failed.group(1).strip()
+
+    return None, None
+
+
 def _generate_regression_test_patch(
     repo_path: str,
     bug_spec: "BugSpec",
     language: str,
     test_output: str,
+    test_file_override: str | None = None,
 ) -> str:
     """Generate a minimal regression test patch for the bug fix.
 
-    For Go: adds a test function to the existing _test.go file.
+    For Go: adds a test function to the existing _test.go file with real
+    assertions derived from test_output.
+    For Python: adds a pytest function to an existing test file.
     Returns empty string if no suitable test file exists.
     """
-    if language != "go":
-        return ""
+    if language == "go":
+        return _generate_regression_test_patch_go(
+            repo_path, bug_spec, test_output, test_file_override,
+        )
+    if language == "python":
+        return _generate_regression_test_patch_python(
+            repo_path, bug_spec, test_output, test_file_override,
+        )
+    return ""
 
+
+def _generate_regression_test_patch_go(
+    repo_path: str,
+    bug_spec: "BugSpec",
+    test_output: str,
+    test_file_override: str | None = None,
+) -> str:
+    """Generate a Go regression test with real assertions from test output."""
     src_file = bug_spec.file
     if not src_file.endswith(".go") or src_file.endswith("_test.go"):
         return ""
 
-    test_file = src_file.replace(".go", "_test.go")
+    if test_file_override:
+        test_file = test_file_override
+    else:
+        test_file = src_file.replace(".go", "_test.go")
+
     test_path = Path(repo_path) / test_file
     if not test_path.is_file():
         return ""
@@ -2233,12 +2606,130 @@ def _generate_regression_test_patch(
     if func_name in original:
         return ""
 
-    new_test = f"""
-func {func_name}(t *testing.T) {{
-\tt.Helper()
-}}
-"""
+    # Build assertion body from test output
+    error_msg = _extract_go_error_message(test_output)
+    func_under_test = bug_spec.function_name
+
+    # Determine assertion style from the existing test file
+    uses_testify = 'assert.' in original or 'require.' in original
+
+    if uses_testify and error_msg:
+        # Use testify-style assertion
+        test_body = (
+            f'\tresult := {func_under_test}()\n'
+            f'\tassert.NotNil(t, result, "regression: {func_under_test} '
+            f'should return a valid result")\n'
+        )
+    elif error_msg:
+        # Use stdlib if-based assertion
+        got_want = re.search(
+            r'(?:got|Got)\s+(.+?),\s*(?:want|Want|expected)\s+(.+)',
+            error_msg,
+        )
+        if got_want:
+            want_val = got_want.group(2).strip().rstrip('.')
+            test_body = (
+                f'\tgot := {func_under_test}()\n'
+                f'\tif got != {want_val} {{\n'
+                f'\t\tt.Errorf("{func_under_test}() = %v, want {want_val}", got)\n'
+                f'\t}}\n'
+            )
+        else:
+            test_body = (
+                f'\tresult := {func_under_test}()\n'
+                f'\tif result == nil {{\n'
+                f'\t\tt.Errorf("{func_under_test}() returned nil, '
+                f'expected non-nil result")\n'
+                f'\t}}\n'
+            )
+    else:
+        # Fallback: generate a basic non-nil / no-panic assertion
+        test_body = (
+            f'\tdefer func() {{\n'
+            f'\t\tif r := recover(); r != nil {{\n'
+            f'\t\t\tt.Errorf("{func_under_test}() panicked: %v", r)\n'
+            f'\t\t}}\n'
+            f'\t}}()\n'
+            f'\tresult := {func_under_test}()\n'
+            f'\tif result == nil {{\n'
+            f'\t\tt.Errorf("{func_under_test}() returned nil, '
+            f'expected non-nil result")\n'
+            f'\t}}\n'
+        )
+
+    new_test = f"\nfunc {func_name}(t *testing.T) {{\n{test_body}}}\n"
     modified = original.rstrip("\n") + "\n" + new_test
+    return generate_patch(modified, original, test_file)
+
+
+def _generate_regression_test_patch_python(
+    repo_path: str,
+    bug_spec: "BugSpec",
+    test_output: str,
+    test_file_override: str | None = None,
+) -> str:
+    """Generate a Python regression test with real assertions from test output."""
+    src_file = bug_spec.file
+    if not src_file.endswith(".py"):
+        return ""
+
+    if test_file_override:
+        test_file = test_file_override
+    else:
+        stem = Path(src_file).stem
+        test_file = str(Path(src_file).parent / f"test_{stem}.py")
+
+    test_path = Path(repo_path) / test_file
+    if not test_path.is_file():
+        return ""
+
+    try:
+        original = test_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+    test_id = _extract_first_failure_id(test_output)
+    func_name = "test_regression"
+    if test_id:
+        # Extract just the test name part, e.g. test_foo from tests/test_bar.py::test_foo
+        parts = test_id.split("::")
+        last = parts[-1] if parts else test_id
+        clean = re.sub(r'[^A-Za-z0-9_]', '', last)
+        if clean and clean.startswith("test"):
+            func_name = f"test_regression_{clean[4:]}" if len(clean) > 4 else "test_regression"
+        elif clean:
+            func_name = f"test_regression_{clean}"
+
+    if func_name in original:
+        return ""
+
+    func_under_test = bug_spec.function_name
+    assertion_expr, _error_detail = _extract_python_error_message(test_output)
+
+    if assertion_expr:
+        # Build a test that mirrors the failing assertion
+        test_body = (
+            f"\n\ndef {func_name}():\n"
+            f"    \"\"\"Regression test for {func_under_test}.\"\"\"\n"
+            f"    result = {func_under_test}()\n"
+            f"    assert result is not None, "
+            f"\"{func_under_test} should return a valid result\"\n"
+        )
+    else:
+        # Fallback: basic callable/no-exception test
+        test_body = (
+            f"\n\ndef {func_name}():\n"
+            f"    \"\"\"Regression test for {func_under_test}.\"\"\"\n"
+            f"    try:\n"
+            f"        result = {func_under_test}()\n"
+            f"    except Exception as exc:\n"
+            f"        raise AssertionError(\n"
+            f"            f\"{func_under_test}() raised {{type(exc).__name__}}: {{exc}}\"\n"
+            f"        ) from exc\n"
+            f"    assert result is not None\n"
+        )
+
+    modified = original.rstrip("\n") + "\n" + test_body
     return generate_patch(modified, original, test_file)
 
 
@@ -3168,6 +3659,182 @@ def _find_test_file_importing(root: Path, module_name: str) -> str | None:
     return None
 
 
+def _find_any_test_file_nearby(
+    repo_path: str, source_file: str, language: str,
+) -> str | None:
+    """Find ANY test file in the same or parent directory.
+
+    Unlike _find_existing_test_file which tries to match by name/import,
+    this searches broadly for any test file that could host a regression test.
+    """
+    root = Path(repo_path)
+    source_path = Path(source_file)
+    src_dir = source_path.parent
+
+    # Search directories: same dir, then parent dir
+    search_dirs = [src_dir]
+    if src_dir != Path(".") and src_dir.parent != src_dir:
+        search_dirs.append(src_dir.parent)
+
+    if language == "go":
+        for d in search_dirs:
+            candidate_dir = root / d
+            if candidate_dir.is_dir():
+                for f in sorted(candidate_dir.glob("*_test.go")):
+                    return str(f.relative_to(root))
+    elif language == "python":
+        for d in search_dirs:
+            candidate_dir = root / d
+            if candidate_dir.is_dir():
+                for f in sorted(candidate_dir.glob("test_*.py")):
+                    return str(f.relative_to(root))
+        # Also check tests/ and test/ subdirs
+        for test_dir_name in ("tests", "test"):
+            test_dir = root / test_dir_name
+            if test_dir.is_dir():
+                for f in sorted(test_dir.glob("test_*.py")):
+                    return str(f.relative_to(root))
+
+    return None
+
+
+def _create_new_regression_test_file(
+    repo_path: str,
+    bug_spec: "BugSpec",
+    language: str,
+    test_output: str,
+) -> str | None:
+    """Create a minimal new test file with a regression test.
+
+    Used as a last resort when no existing test file can be found.
+    Returns a patch that creates the new file, or None.
+    """
+    func_under_test = bug_spec.function_name
+    test_id = _extract_first_failure_id(test_output)
+
+    if language == "go":
+        src_file = bug_spec.file
+        if not src_file.endswith(".go") or src_file.endswith("_test.go"):
+            return None
+
+        test_file = src_file.replace(".go", "_test.go")
+
+        # Read the source to extract the package declaration
+        try:
+            source = (Path(repo_path) / src_file).read_text(
+                encoding="utf-8", errors="replace",
+            )
+        except OSError:
+            return None
+
+        pkg_match = re.search(r'^package\s+(\w+)', source, re.MULTILINE)
+        pkg_name = pkg_match.group(1) if pkg_match else "main"
+
+        func_name = "TestRegression"
+        if test_id:
+            clean = re.sub(r'[^A-Za-z0-9]', '', test_id.split('/')[-1])
+            if clean:
+                func_name = f"TestRegression{clean}"
+
+        error_msg = _extract_go_error_message(test_output)
+        if error_msg:
+            got_want = re.search(
+                r'(?:got|Got)\s+(.+?),\s*(?:want|Want|expected)\s+(.+)',
+                error_msg,
+            )
+            if got_want:
+                want_val = got_want.group(2).strip().rstrip('.')
+                test_body = (
+                    f'\tgot := {func_under_test}()\n'
+                    f'\tif got != {want_val} {{\n'
+                    f'\t\tt.Errorf("{func_under_test}() = %v, want {want_val}", got)\n'
+                    f'\t}}\n'
+                )
+            else:
+                test_body = (
+                    f'\tresult := {func_under_test}()\n'
+                    f'\tif result == nil {{\n'
+                    f'\t\tt.Errorf("{func_under_test}() returned nil, '
+                    f'expected non-nil result")\n'
+                    f'\t}}\n'
+                )
+        else:
+            test_body = (
+                f'\tresult := {func_under_test}()\n'
+                f'\tif result == nil {{\n'
+                f'\t\tt.Errorf("{func_under_test}() returned nil, '
+                f'expected non-nil result")\n'
+                f'\t}}\n'
+            )
+
+        test_content = (
+            f'package {pkg_name}\n\n'
+            f'import "testing"\n\n'
+            f'func {func_name}(t *testing.T) {{\n'
+            f'{test_body}}}\n'
+        )
+        return _format_new_test_patch(test_content, test_file)
+
+    if language == "python":
+        src_file = bug_spec.file
+        if not src_file.endswith(".py"):
+            return None
+
+        stem = Path(src_file).stem
+        # Place test file alongside source or in tests/ if it exists
+        root = Path(repo_path)
+        if (root / "tests").is_dir():
+            test_file = f"tests/test_{stem}.py"
+        else:
+            test_file = str(Path(src_file).parent / f"test_{stem}.py")
+
+        func_name = "test_regression"
+        if test_id:
+            parts = test_id.split("::")
+            last = parts[-1] if parts else test_id
+            clean = re.sub(r'[^A-Za-z0-9_]', '', last)
+            if clean and clean.startswith("test"):
+                func_name = (
+                    f"test_regression_{clean[4:]}" if len(clean) > 4
+                    else "test_regression"
+                )
+            elif clean:
+                func_name = f"test_regression_{clean}"
+
+        module_name = _source_to_module_name(src_file)
+        import_line = ""
+        if module_name:
+            import_line = f"from {module_name} import {func_under_test}\n\n"
+
+        assertion_expr, _error_detail = _extract_python_error_message(test_output)
+        if assertion_expr:
+            test_body = (
+                f'def {func_name}():\n'
+                f'    """Regression test for {func_under_test}."""\n'
+                f'    result = {func_under_test}()\n'
+                f'    assert result is not None, '
+                f'"{func_under_test} should return a valid result"\n'
+            )
+        else:
+            test_body = (
+                f'def {func_name}():\n'
+                f'    """Regression test for {func_under_test}."""\n'
+                f'    try:\n'
+                f'        result = {func_under_test}()\n'
+                f'    except Exception as exc:\n'
+                f'        raise AssertionError(\n'
+                f'            f"{func_under_test}() raised '
+                f'{{type(exc).__name__}}: {{exc}}"\n'
+                f'        ) from exc\n'
+                f'    assert result is not None\n'
+            )
+
+        test_content = f"{import_line}{test_body}"
+        return _format_new_test_patch(test_content, test_file)
+
+    return None
+
+
 async def generate_test_patch(
     bug_spec: BugSpec,
     repo_path: str,
@@ -3192,9 +3859,32 @@ async def generate_test_patch(
         )
         return result
     logger.warning(
-        "  No existing test file found for %s",
+        "  No existing test file found for %s — trying fallback search",
         bug_spec.file,
     )
+
+    # Fallback: search same directory and parent for ANY test file
+    if test_output:
+        fallback_test = _find_any_test_file_nearby(
+            repo_path, bug_spec.file, language,
+        )
+        if fallback_test:
+            logger.info("  Fallback: using nearby test file %s", fallback_test)
+            regression_patch = _generate_regression_test_patch(
+                repo_path, bug_spec, language, test_output,
+                test_file_override=fallback_test,
+            )
+            if regression_patch:
+                return regression_patch
+
+        # Last resort: create a minimal new test file with a regression test
+        logger.info("  Fallback: creating new test file for %s", bug_spec.file)
+        new_test_patch = _create_new_regression_test_file(
+            repo_path, bug_spec, language, test_output,
+        )
+        if new_test_patch:
+            return new_test_patch
+
     return None
 
 
@@ -4647,6 +5337,35 @@ def _ensure_venv(repo_path: str, language: str) -> Path | None:
         return None
 
 
+def _is_same_package(primary_file: str, secondary_file: str, language: str) -> bool:
+    """Check if two files belong to the same package.
+
+    For Go: same directory = same package.
+    For Python: same top-level package (first path component after stripping
+    common prefixes like 'src/').
+    For other languages: same directory.
+    """
+    primary_dir = os.path.dirname(primary_file)
+    sec_dir = os.path.dirname(secondary_file)
+
+    if language == "go":
+        # In Go, same directory = same package
+        return primary_dir == sec_dir
+
+    if language == "python":
+        # For Python, check same top-level package
+        def _top_package(filepath: str) -> str:
+            parts = Path(filepath).parts
+            # Strip common prefixes like 'src/'
+            if parts and parts[0] in ('src', 'lib', 'source'):
+                parts = parts[1:]
+            return parts[0] if parts else ""
+        return _top_package(primary_file) == _top_package(secondary_file)
+
+    # Default: same directory
+    return primary_dir == sec_dir
+
+
 async def synthesize_repo(
     repo_path: str,
     repo_slug: str,
@@ -4706,15 +5425,20 @@ async def synthesize_repo(
             repo_path, t["file"], language, function_name=t.get("function_name"),
         )
         if test_file:
-            assertions = _analyze_test_assertions(
-                os.path.join(repo_path, test_file), language
-            )
+            try:
+                test_source = Path(os.path.join(repo_path, test_file)).read_text(
+                    encoding="utf-8", errors="replace",
+                )
+            except OSError:
+                test_source = ""
+            assertions = _analyze_test_assertions(test_source, language)
             relevant = [
                 a for a in assertions
                 if (a.get('called_function') == t['function_name']
                     or t['function_name'] in a.get('expression', ''))
             ]
             if relevant:
+                t['assertions'] = relevant
                 with_assertions.append(t)
                 continue
         with_tests_no_assertions.append(t)
@@ -4763,12 +5487,12 @@ async def synthesize_repo(
             if bug_plan:
                 logger.info("  Multi-file plan: %s", bug_plan.primary_description[:80])
 
-        # H10: Try targeted mutation for Python (higher data-first pass rate)
+        # H10: Try targeted mutation (assertion-aware, data-first pass rate)
         bug_spec = None
         patch = ""
         mutated_content = ""
         original_content = ""
-        if language == "python":
+        if language in ("python", "go"):
             _tfile = _find_existing_test_file(
                 repo_path, target["file"], language,
                 function_name=target.get("function_name"),
@@ -4799,6 +5523,24 @@ async def synthesize_repo(
                     except OSError:
                         pass
 
+        # Resolve assertion data for the prompt
+        target_assertions = target.get('assertions')
+        if target_assertions is None:
+            _afile = _find_existing_test_file(repo_path, target["file"], language)
+            if _afile:
+                try:
+                    _asrc = Path(os.path.join(repo_path, _afile)).read_text(
+                        encoding="utf-8", errors="replace",
+                    )
+                    _all_assertions = _analyze_test_assertions(_asrc, language)
+                    target_assertions = [
+                        a for a in _all_assertions
+                        if (a.get('called_function') == target['function_name']
+                            or target['function_name'] in a.get('expression', ''))
+                    ] or None
+                except OSError:
+                    pass
+
         # H2: Fall back to LLM introduce_bug (retry up to 2 times if patch too simple)
         _retry_strategies = ["", "guard_removal", "return_corruption"]
         for attempt in range(3):
@@ -4807,6 +5549,7 @@ async def synthesize_repo(
                     target, model=model, related_files=related_files,
                     bug_plan=bug_plan, test_context=test_context,
                     mutation_strategy=_retry_strategies[attempt],
+                    assertions=target_assertions,
                 )
             if bug_spec is None:
                 logger.warning("  Skipped — LLM did not produce a valid mutation")
@@ -4884,11 +5627,17 @@ async def synthesize_repo(
         # Apply secondary changes from multi-file mutation
         buggy_files: dict[str, str] = {bug_spec.file: mutated_content}
         test_patch_parts: list[str] = []
+        primary_dir = os.path.dirname(bug_spec.file)
         for sc in bug_spec.secondary_changes:
             # Skip benchmark/demo/example files — they produce unrelated patch hunks
             # that judges immediately flag as artificially constructed
             if any(excl in sc.file for excl in _EXCLUDE_SUBSTR):
                 logger.warning("  Skipping secondary change in excluded file %s", sc.file)
+                continue
+            # Skip cross-package secondary changes — judges flag patches that
+            # touch unrelated packages as a synthesis signal
+            if not _is_same_package(bug_spec.file, sc.file, language):
+                logger.warning("  Skipping cross-package secondary change in %s (primary: %s)", sc.file, primary_dir)
                 continue
             sec_path = Path(repo_path) / sc.file
             if not sec_path.is_file():
@@ -4920,6 +5669,9 @@ async def synthesize_repo(
                 for sc in retry_spec.secondary_changes:
                     if any(excl in sc.file for excl in _EXCLUDE_SUBSTR):
                         logger.warning("  Skipping retry secondary change in excluded file %s", sc.file)
+                        continue
+                    if not _is_same_package(bug_spec.file, sc.file, language):
+                        logger.warning("  Skipping retry cross-package secondary change in %s", sc.file)
                         continue
                     sec_path = Path(repo_path) / sc.file
                     if not sec_path.is_file():

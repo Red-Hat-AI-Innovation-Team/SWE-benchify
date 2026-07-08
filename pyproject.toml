@@ -27,6 +27,9 @@ swebenchify = "swebenchify.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.ruff.lint]
+extend-select = ["I"]
+
 [tool.mypy]
 python_version = "3.11"
 warn_return_any = false
