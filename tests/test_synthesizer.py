@@ -1426,7 +1426,7 @@ def test_issue_description_has_context(tmp_path: Path) -> None:
     # Only _bug_to_symptom is called — issue generation no longer uses LLM
     assert len(captured_prompts) >= 1
     symptom_prompt = captured_prompts[0]
-    assert "user-facing symptom" in symptom_prompt
+    assert "bug report" in symptom_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -2664,7 +2664,7 @@ def test_bug_to_symptom_includes_file_context() -> None:
 
     assert len(captured_prompts) == 1
     assert "logging" in captured_prompts[0]
-    assert "src/flask/logging.py" in captured_prompts[0]
+    assert 'Do NOT use the word "logging"' in captured_prompts[0]
     assert result == "logging breaks under heavy load"
 
 
@@ -2690,7 +2690,7 @@ def test_bug_to_symptom_no_file_path() -> None:
         result = asyncio.run(_synth._bug_to_symptom("wrong operator in parser"))
 
     assert len(captured_prompts) == 1
-    assert "module" not in captured_prompts[0].lower() or "module" in "wrong operator in parser"
+    assert "this affects the" not in captured_prompts[0]
     assert result == "broken parsing"
 
 
