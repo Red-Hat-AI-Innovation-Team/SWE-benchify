@@ -430,7 +430,113 @@ def main():
                         help='Measure yield rate only (~5 min). Skips issue generation, test patches, judge, F2P, diversity.')
     parser.add_argument('--repo', type=str, default=None,
                         help='Filter to a specific repo slug (e.g. grpc/grpc-go)')
+    parser.add_argument('--judge-only', type=str, default=None, metavar='INSTANCES_PATH',
+                        help='Path to saved instances JSONL. Skips synthesis, runs judge only.')
     args = parser.parse_args()
+
+    if args.judge_only:
+        instances_path = args.judge_only
+        if not os.path.isfile(instances_path):
+            print(f'File not found: {instances_path}', file=sys.stderr)
+            sys.exit(1)
+
+        all_synth_instances = []
+        with open(instances_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                all_synth_instances.append(json.loads(line))
+
+        log.info('loaded %d instances from %s', len(all_synth_instances), instances_path)
+
+        if not all_synth_instances:
+            print(json.dumps({'score': 0.0, 'details': 'No instances in file'}))
+            return
+
+        all_real = []
+        for ds_path in DATASET_PATHS:
+            if os.path.isfile(ds_path):
+                with open(ds_path) as f:
+                    all_real.extend(json.loads(line) for line in f)
+
+        repos_in_instances = list(set(inst.get('repo', '') for inst in all_synth_instances))
+        real_for_repos = [i for i in all_real if i['repo'] in repos_in_instances]
+        n_real_per_repo = 3
+        real_samples = []
+        for repo in repos_in_instances:
+            repo_real = [i for i in real_for_repos if i['repo'] == repo]
+            if repo_real:
+                real_samples.extend(random.sample(repo_real, min(n_real_per_repo, len(repo_real))))
+
+        n_s = len(all_synth_instances)
+        n_r = len(real_samples)
+
+        eval_set = []
+        for inst in all_synth_instances:
+            eval_set.append({'instance': inst, 'label': 'SYNTHETIC'})
+        for inst in real_samples:
+            eval_set.append({'instance': inst, 'label': 'REAL'})
+
+        random.shuffle(eval_set)
+        log.info('phase=judge eval_set=%d (synthetic=%d real=%d)', len(eval_set), n_s, n_r)
+
+        results = []
+        for i, item in enumerate(eval_set):
+            inst = item['instance']
+            true_label = item['label']
+            iid = inst.get('instance_id', 'unknown')
+
+            verdict = judge_instance(inst)
+            predicted = verdict['classification']
+            correct = predicted == true_label
+
+            results.append({
+                'instance_id': iid,
+                'true_label': true_label,
+                'predicted': predicted,
+                'confidence': verdict['confidence'],
+                'correct': correct,
+                'reasoning': verdict['reasoning'],
+            })
+
+            log.info(
+                'judge [%d/%d] instance=%s true=%s pred=%s conf=%s %s',
+                i + 1, len(eval_set), iid, true_label, predicted,
+                verdict['confidence'], 'CORRECT' if correct else 'WRONG',
+            )
+
+        m = compute_metrics(results)
+        recall = m['recall']
+        judge_evasion = 1.0 - recall
+
+        diversity = compute_diversity(all_synth_instances)
+
+        out_path = os.path.join(args.results_dir, 'synth-eval-results-judge-only.json')
+        with open(out_path, 'w') as f:
+            json.dump({
+                'source': instances_path,
+                'judge_model': JUDGE_MODEL,
+                'repos': repos_in_instances,
+                'metrics': m,
+                'diversity': diversity,
+                'results': results,
+                'synthetic_instances': all_synth_instances,
+            }, f, indent=2)
+        log.info('results saved to %s', out_path)
+
+        print(json.dumps({
+            'score': round(judge_evasion, 3),
+            'details': (
+                f'JUDGE-ONLY from {os.path.basename(instances_path)}. '
+                f'{n_s} synthetic, {n_r} real. '
+                f'{m["fn"]}/{m["tp"]+m["fn"]} fooled judge. '
+                f'Detection: {recall:.0%}. '
+                f'Judge evasion: {judge_evasion:.0%}. '
+                f'Diversity: {diversity["overall"]:.2f}.'
+            ),
+        }))
+        return
 
     if args.role == 'discriminator':
         args.quick = False
@@ -595,6 +701,28 @@ def main():
     yield_rate = n_s / total_mutations_attempted if total_mutations_attempted > 0 else 0
     n_r = len(all_real_samples)
     log.info("totals: synthetic=%d real=%d", n_s, n_r)
+
+    # Save instances for later judge-only runs
+    instances_dir = os.path.join(PROJECT_ROOT, 'output', 'instances')
+    os.makedirs(instances_dir, exist_ok=True)
+    instances_path = os.path.join(instances_dir, f'{commit}.jsonl')
+    with open(instances_path, 'w') as f:
+        for inst in all_synth_instances:
+            f.write(json.dumps(inst) + '\n')
+    log.info('saved %d instances to %s', len(all_synth_instances), instances_path)
+
+    meta_path = os.path.join(instances_dir, f'{commit}.meta.json')
+    with open(meta_path, 'w') as f:
+        json.dump({
+            'commit': commit,
+            'timestamp': __import__('datetime').datetime.utcnow().isoformat() + 'Z',
+            'mutations_attempted': total_mutations_attempted,
+            'instances_saved': len(all_synth_instances),
+            'yield_rate': yield_rate,
+            'repos': [t['repo_slug'] for t in targets],
+            'mode': 'yield-only' if args.yield_only else ('quick' if args.quick else 'full'),
+        }, f, indent=2)
+    log.info('saved metadata to %s', meta_path)
 
     if args.yield_only:
         log.info('phase=yield_only yield_rate=%.3f (%d/%d)', yield_rate, n_s, total_mutations_attempted)
