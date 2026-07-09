@@ -432,6 +432,8 @@ def main():
                         help='Filter to a specific repo slug (e.g. grpc/grpc-go)')
     parser.add_argument('--judge-only', type=str, default=None, metavar='INSTANCES_PATH',
                         help='Path to saved instances JSONL. Skips synthesis, runs judge only.')
+    parser.add_argument('--enrich', type=str, default=None, metavar='INSTANCES_PATH',
+                        help='Enrich yield-only instances with issue text + test patch.')
     args = parser.parse_args()
 
     if args.judge_only:
@@ -538,6 +540,92 @@ def main():
         }))
         return
 
+    if args.enrich:
+        from collections import defaultdict
+
+        instances_path = args.enrich
+        if not os.path.isfile(instances_path):
+            print(f'File not found: {instances_path}', file=sys.stderr)
+            sys.exit(1)
+
+        all_instances = []
+        with open(instances_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                all_instances.append(json.loads(line))
+
+        log.info('loaded %d instances from %s', len(all_instances), instances_path)
+
+        pipeline_instances = [i for i in all_instances if '_pipeline' in i]
+        if not pipeline_instances:
+            print(json.dumps({'score': 0.0, 'details': 'No instances with _pipeline metadata found'}))
+            return
+
+        by_repo = defaultdict(list)
+        for inst in pipeline_instances:
+            by_repo[inst['repo']].append(inst)
+
+        n_enriched = 0
+        for repo_slug, repo_instances in by_repo.items():
+            target = None
+            for t in EVAL_TARGETS:
+                if t['repo_slug'] == repo_slug:
+                    target = t.copy()
+                    break
+            if not target:
+                log.warning('no EVAL_TARGET for repo %s — skipping %d instances', repo_slug, len(repo_instances))
+                continue
+
+            ensure_repo(target)
+            repo_path = target['repo_path']
+
+            merge_commit = repo_instances[0].get('merge_commit', '')
+            if merge_commit:
+                subprocess.run(
+                    ['git', 'checkout', '--quiet', '--force', merge_commit],
+                    cwd=repo_path, check=True,
+                )
+
+            for i, inst in enumerate(repo_instances):
+                iid = inst.get('instance_id', 'unknown')
+                log.info('enriching [%d/%d] %s', i + 1, len(repo_instances), iid)
+                try:
+                    asyncio.run(synth_mod.enrich_instance(inst, repo_path, model=SYNTH_MODEL))
+                    n_enriched += 1
+                    log.info(
+                        '  problem_statement=%d chars, test_patch=%d chars',
+                        len(inst.get('problem_statement', '')),
+                        len(inst.get('test_patch', '')),
+                    )
+                except Exception:
+                    log.error('enrichment failed for %s', iid, exc_info=True)
+
+        basename = os.path.splitext(os.path.basename(instances_path))[0]
+        out_dir = os.path.dirname(instances_path) or '.'
+        out_path = os.path.join(out_dir, f'{basename}-enriched.jsonl')
+
+        with open(out_path, 'w') as f:
+            for inst in all_instances:
+                f.write(json.dumps(inst) + '\n')
+
+        meta_path = os.path.join(out_dir, f'{basename}-enriched.meta.json')
+        with open(meta_path, 'w') as f:
+            json.dump({
+                'source': instances_path,
+                'total_instances': len(all_instances),
+                'pipeline_instances': len(pipeline_instances),
+                'enriched': n_enriched,
+                'enrichment_rate': round(n_enriched / len(pipeline_instances), 3) if pipeline_instances else 0,
+            }, f, indent=2)
+
+        print(json.dumps({
+            'score': round(n_enriched / len(pipeline_instances), 3) if pipeline_instances else 0,
+            'details': f'Enriched {n_enriched}/{len(pipeline_instances)} instances. Output: {out_path}',
+        }))
+        return
+
     if args.role == 'discriminator':
         args.quick = False
 
@@ -605,6 +693,10 @@ def main():
             yield_only=getattr(args, 'yield_only', False),
         ))
         synth_instances = [asdict(c) for c in result.candidates]
+        for inst in synth_instances:
+            iid = inst.get('instance_id', '')
+            if iid in result.enrichment_data:
+                inst['_pipeline'] = {'phase': 'yield', **result.enrichment_data[iid]}
         mutations_attempted = result.mutations_attempted
         log.info("synthesized %d instances (%d mutations attempted)", len(synth_instances), mutations_attempted)
 
