@@ -3114,12 +3114,11 @@ async def _generate_issue_few_shot(
     social_context: str = "",
     model: str = "sonnet",
 ) -> str | None:
-    """Generate a build-failure issue using real examples as few-shot context.
+    """Generate an issue using real examples as few-shot context.
 
-    Used when test_output is a compiler/linker error without named test IDs.
-    The programmatic template produces formulaic output for these cases;
-    few-shot conditioning with real issues from the same repo produces
-    more natural human-style framing.
+    When real issue examples from the same repo are available, few-shot
+    conditioning produces more natural human-style framing than the
+    programmatic template.
     """
     examples_text = "\n\n---\n\n".join(
         f"EXAMPLE {i+1}:\n{ex[:600]}"
@@ -3128,20 +3127,29 @@ async def _generate_issue_few_shot(
     trimmed = _trim_test_output(test_output, max_lines=40)
     social_note = f"\n\nOptionally end with: {social_context.strip()}" if social_context else ""
 
-    prompt = f"""You are writing a GitHub issue report. Study these real examples from the same repository to match their style, length, and tone:
+    prompt = f"""You are writing a GitHub issue report. Study these real examples from the same repository:
 
 {examples_text}
 
 Now write a NEW issue for this problem:
 Symptom: {symptom}
 
-Build/compile output:
+Test/build output:
 ```
 {trimmed}
 ```
 {social_note}
 
-Write the issue in the style of the examples above. Include the build output in a code block. Do NOT start with "I" or "We". Keep it under 200 words — real issues are terse. Do NOT include a title — just the body."""
+Rules:
+- Match the STYLE, TONE, and STRUCTURE of the examples above
+- Describe SYMPTOMS only — the reporter does NOT know which function or line is broken
+- Do NOT use structured 'Expected/Actual/Steps to reproduce' format unless the examples use it
+- Vary between terse (2 sentences + error) and conversational — match the examples
+- The reporter is frustrated or confused, not analytical
+- If test output is available, paste it as a code block — do NOT explain what it means
+- Do NOT start with "I" or "We"
+- Keep it under 200 words
+- Do NOT include a title — just the body"""
 
     resolved_model = MODEL_MAP.get(model, model)
     options = ClaudeCodeOptions(max_turns=1, model=resolved_model)
@@ -3184,6 +3192,11 @@ Rules:
 - Do NOT include a title
 - Do NOT start with "I" or "We"
 - NEVER diagnose the root cause or mention which function is broken — describe SYMPTOMS only
+- Write as if you are REPORTING symptoms you observed, NOT diagnosing a bug you understand
+- You do NOT know which function, file, or line of code is responsible
+- Do NOT use the word 'regression' — most real reporters don't know if it worked before
+- Vary length — some issues are 2 sentences, others are a paragraph. Not all issues are the same.
+- If test output is included, just paste it — do NOT explain what it means
 - Do NOT mention that this is a rewrite or that you are an AI
 {('- ' + social_context.strip()) if social_context else ''}"""
 
@@ -3250,16 +3263,7 @@ async def generate_issue_from_symptom(
     if not test_output:
         return f'{general_area}\n\n```\n{symptom}\n```'
 
-    # For build/compiler failures (no named test IDs), use few-shot conditioning when
-    # real issue examples are available.  The programmatic template produces formulaic
-    # "just compiler errors" output that judges flag; real examples teach the right style.
-    _build_failure_signals = ('cannot use', 'undefined:', 'too many return values',
-                              'not enough return values', 'does not implement', 'undeclared name')
-    is_build_failure = (
-        not _extract_first_failure_id(test_output)
-        and any(sig in test_output for sig in _build_failure_signals)
-    )
-    if is_build_failure and dataset_examples:
+    if dataset_examples:
         llm_issue = await _generate_issue_few_shot(
             symptom=symptom,
             test_output=test_output,
