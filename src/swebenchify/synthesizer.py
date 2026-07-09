@@ -2551,6 +2551,88 @@ def _extract_python_error_message(test_output: str) -> tuple[str | None, str | N
     return None, None
 
 
+_BUG_KEYWORD_MAP: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r'nil\s+pointer|nil\s+deref|none\s+type', re.I), 'nil'),
+    (re.compile(r'index\s+out|bounds|overflow', re.I), 'bounds'),
+    (re.compile(r'wrong\s+return|incorrect\s+result|bad\s+result', re.I), 'result'),
+    (re.compile(r'empty|missing|blank', re.I), 'empty'),
+    (re.compile(r'timeout|deadline|hang', re.I), 'timeout'),
+    (re.compile(r'concurren|race|lock|mutex', re.I), 'concurrent'),
+    (re.compile(r'pars|format|serial|json|unmarshal', re.I), 'parse'),
+    (re.compile(r'auth|permission|credential|token', re.I), 'auth'),
+    (re.compile(r'connect|dial|socket|network', re.I), 'connection'),
+    (re.compile(r'type\s+error|cast|conver', re.I), 'type'),
+]
+
+_PYTHON_PATTERNS: list[str] = [
+    'test_{func}_edge_case',
+    'test_{func}_negative',
+    'test_{func}_boundary',
+    'test_{func}_handles_{kw}',
+    'test_{func}_validates_{kw}',
+    'test_{func}_with_{kw}_input',
+    'test_{func}_returns_correct_value',
+    'test_{func}_error_case',
+]
+
+_GO_PATTERNS: list[str] = [
+    'Test{Func}EdgeCase',
+    'Test{Func}Negative',
+    'Test{Func}Boundary',
+    'Test{Func}Handles{Kw}',
+    'Test{Func}Validates{Kw}',
+    'Test{Func}With{Kw}Input',
+    'Test{Func}ReturnsCorrectValue',
+    'Test{Func}ErrorCase',
+]
+
+
+def _test_name_for_bug(
+    func_name: str,
+    bug_description: str | None,
+    language: str,
+    test_id: str | None = None,
+) -> str:
+    """Pick a varied, descriptive test name based on the bug description."""
+    kw = ""
+    if bug_description:
+        for pattern, keyword in _BUG_KEYWORD_MAP:
+            if pattern.search(bug_description):
+                kw = keyword
+                break
+
+    seed = hash((func_name, bug_description or "", test_id or ""))
+
+    if language == "go":
+        camel = func_name[0].upper() + func_name[1:] if func_name else func_name
+        patterns = _GO_PATTERNS
+        kw_cap = kw.capitalize() if kw else ""
+        idx = seed % len(patterns)
+        name = patterns[idx].format(Func=camel, Kw=kw_cap)
+        if '{Kw}' in patterns[idx] and not kw_cap:
+            name = patterns[0].format(Func=camel, Kw='')
+        if test_id:
+            clean = re.sub(r'[^A-Za-z0-9]', '', test_id.split('/')[-1])
+            if clean:
+                name = name + clean
+    else:
+        patterns = _PYTHON_PATTERNS
+        idx = seed % len(patterns)
+        name = patterns[idx].format(func=func_name, kw=kw)
+        if '{kw}' in patterns[idx] and not kw:
+            name = patterns[0].format(func=func_name, kw='')
+        if test_id:
+            parts = test_id.split("::")
+            last = parts[-1] if parts else test_id
+            clean = re.sub(r'[^A-Za-z0-9_]', '', last)
+            if clean and clean.startswith("test") and len(clean) > 4:
+                name = name + "_" + clean[4:]
+            elif clean:
+                name = name + "_" + clean
+
+    return name
+
+
 def _generate_regression_test_patch(
     repo_path: str,
     bug_spec: "BugSpec",
@@ -2602,11 +2684,9 @@ def _generate_regression_test_patch_go(
         return ""
 
     test_id = _extract_first_failure_id(test_output)
-    func_name = "TestRegression"
-    if test_id:
-        clean = re.sub(r'[^A-Za-z0-9]', '', test_id.split('/')[-1])
-        if clean:
-            func_name = f"TestRegression{clean}"
+    func_name = _test_name_for_bug(
+        bug_spec.function_name, bug_spec.bug_description, "go", test_id,
+    )
 
     if func_name in original:
         return ""
@@ -2622,7 +2702,7 @@ def _generate_regression_test_patch_go(
         # Use testify-style assertion
         test_body = (
             f'\tresult := {func_under_test}()\n'
-            f'\tassert.NotNil(t, result, "regression: {func_under_test} '
+            f'\tassert.NotNil(t, result, "{func_under_test} '
             f'should return a valid result")\n'
         )
     elif error_msg:
@@ -2694,16 +2774,9 @@ def _generate_regression_test_patch_python(
         return ""
 
     test_id = _extract_first_failure_id(test_output)
-    func_name = "test_regression"
-    if test_id:
-        # Extract just the test name part, e.g. test_foo from tests/test_bar.py::test_foo
-        parts = test_id.split("::")
-        last = parts[-1] if parts else test_id
-        clean = re.sub(r'[^A-Za-z0-9_]', '', last)
-        if clean and clean.startswith("test"):
-            func_name = f"test_regression_{clean[4:]}" if len(clean) > 4 else "test_regression"
-        elif clean:
-            func_name = f"test_regression_{clean}"
+    func_name = _test_name_for_bug(
+        bug_spec.function_name, bug_spec.bug_description, "python", test_id,
+    )
 
     if func_name in original:
         return ""
@@ -2712,19 +2785,15 @@ def _generate_regression_test_patch_python(
     assertion_expr, _error_detail = _extract_python_error_message(test_output)
 
     if assertion_expr:
-        # Build a test that mirrors the failing assertion
         test_body = (
             f"\n\ndef {func_name}():\n"
-            f"    \"\"\"Regression test for {func_under_test}.\"\"\"\n"
             f"    result = {func_under_test}()\n"
             f"    assert result is not None, "
             f"\"{func_under_test} should return a valid result\"\n"
         )
     else:
-        # Fallback: basic callable/no-exception test
         test_body = (
             f"\n\ndef {func_name}():\n"
-            f"    \"\"\"Regression test for {func_under_test}.\"\"\"\n"
             f"    try:\n"
             f"        result = {func_under_test}()\n"
             f"    except Exception as exc:\n"
@@ -2878,7 +2947,7 @@ def _mine_issue_style_examples(
 def _mine_social_artifacts(repo_path: str) -> dict[str, list[str]]:
     """Extract real social artifacts from git history."""
     artifacts: dict[str, list[str]] = {
-        "contributors": [],
+        "github_handles": [],
         "shas": [],
         "issues": [],
         "branches": [],
@@ -2886,16 +2955,19 @@ def _mine_social_artifacts(repo_path: str) -> dict[str, list[str]]:
 
     try:
         result = subprocess.run(
-            ["git", "log", "--format=%aN", "-50"],
+            ["git", "log", "--format=%aE", "-50"],
             cwd=repo_path, capture_output=True, text=True, check=True,
         )
         seen: set[str] = set()
-        for name in result.stdout.strip().splitlines():
-            name = name.strip()
-            if name and name not in seen:
-                seen.add(name)
-                artifacts["contributors"].append(name)
-            if len(artifacts["contributors"]) >= 20:
+        for email in result.stdout.strip().splitlines():
+            email = email.strip()
+            m = re.match(r'\d+\+(.+)@users\.noreply\.github\.com', email)
+            if m:
+                handle = m.group(1)
+                if handle and handle not in seen:
+                    seen.add(handle)
+                    artifacts["github_handles"].append(handle)
+            if len(artifacts["github_handles"]) >= 20:
                 break
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
@@ -2935,28 +3007,36 @@ def _mine_social_artifacts(repo_path: str) -> dict[str, list[str]]:
 
 def _build_social_context(artifacts: dict[str, list[str]]) -> str:
     """Build social context string from mined artifacts."""
-    contributors = artifacts.get('contributors', [])
+    github_handles = artifacts.get('github_handles', [])
     branches = artifacts.get('branches', [])
 
-    fallback_styles: list[str] = []
-    if contributors:
-        contributor = random.choice(contributors)
-        fallback_styles.extend([
-            f'@{contributor.replace(" ", "")} might have context here.',
-            f'cc @{contributor.replace(" ", "")} — have you seen this before?',
-            f'@{contributor.replace(" ", "")} this looks like it could be in your area.',
+    if random.random() < 0.40:
+        return ""
+
+    styles: list[str] = []
+    if github_handles:
+        handle = random.choice(github_handles)
+        styles.extend([
+            f'cc @{handle}',
+            f'@{handle} might have context here.',
+            f'@{handle} — have you seen this before?',
+            f'@{handle} this looks like it could be in your area.',
+            f'@{handle} did you touch this recently?',
+            f'@{handle} worth a look',
         ])
     if branches:
         branch = random.choice(branches)
-        fallback_styles.extend([
+        styles.extend([
             f'I noticed this on the {branch} branch.',
             f'Reproduces on {branch}.',
             f'Seeing this on {branch}, not sure about main.',
+            f'Reproducible on {branch} at least.',
+            f'Not sure if this is {branch}-specific.',
         ])
 
-    if not fallback_styles:
+    if not styles:
         return ""
-    return "\n\n" + random.choice(fallback_styles)
+    return "\n\n" + random.choice(styles)
 
 
 def _find_file_commits(
@@ -3095,6 +3175,54 @@ def _is_valid_test_output(test_output: str) -> bool:
     return True
 
 
+_ISSUE_STYLES: list[dict[str, str]] = [
+    {
+        "directive": "Write a quick 1-2 sentence bug report, no formatting. Just state what broke.",
+        "word_range": "20-50",
+    },
+    {
+        "directive": "Write as if pasting into a Slack channel — casual, abbreviations OK, no structure.",
+        "word_range": "40-100",
+    },
+    {
+        "directive": "Start with the error output, then add one sentence of context. Error first, explanation second.",
+        "word_range": "30-80",
+    },
+    {
+        "directive": "Write a longer, meandering report — you're not sure what's going on and you're thinking out loud.",
+        "word_range": "100-250",
+    },
+    {
+        "directive": "Write a frustrated dev report — you've been debugging this for an hour and you're annoyed.",
+        "word_range": "60-150",
+    },
+]
+
+_FORMATTING_IMPERFECTIONS: list[str] = [
+    "\n\nEdit: actually not sure if this is related to the recent changes ",
+    "\n\nUpdate: might be flaky, saw it pass once",
+    "",  # trailing whitespace added separately
+]
+
+
+def _add_formatting_imperfection(text: str) -> str:
+    """30% chance of adding a minor formatting imperfection."""
+    if random.random() > 0.30:
+        return text
+    choice = random.randint(0, 3)
+    if choice == 0:
+        return text.rstrip('.') + ' '
+    elif choice == 1:
+        return text + random.choice(_FORMATTING_IMPERFECTIONS)
+    elif choice == 2:
+        lines = text.split('\n')
+        if lines:
+            lines[-1] = lines[-1].rstrip('.')
+        return '\n'.join(lines)
+    else:
+        return text + '  '
+
+
 async def _generate_issue_few_shot(
     symptom: str,
     test_output: str,
@@ -3113,7 +3241,14 @@ async def _generate_issue_few_shot(
         for i, ex in enumerate(dataset_examples[:3])
     )
     trimmed = _trim_test_output(test_output, max_lines=40)
-    social_note = f"\n\nOptionally end with: {social_context.strip()}" if social_context else ""
+    social_note = (
+        f"\n\nIf you reference a contributor, weave it naturally into a sentence mid-issue"
+        f" (not as the last sentence): {social_context.strip()}"
+    ) if social_context else ""
+
+    style = random.choice(_ISSUE_STYLES)
+    style_directive = style["directive"]
+    word_range = style["word_range"]
 
     prompt = f"""You are writing a GitHub issue report. Study these real examples from the same repository:
 
@@ -3128,15 +3263,19 @@ Test/build output:
 ```
 {social_note}
 
+STYLE: {style_directive}
+
+IMPORTANT: Do NOT produce a clean, well-structured report. Real issues are messy — some are one sentence, some ramble, some jump between topics.
+
 Rules:
-- Match the STYLE, TONE, and STRUCTURE of the examples above
+- {word_range} words — follow the style directive above
 - Describe SYMPTOMS only — the reporter does NOT know which function or line is broken
 - Do NOT use structured 'Expected/Actual/Steps to reproduce' format unless the examples use it
-- Vary between terse (2 sentences + error) and conversational — match the examples
-- The reporter is frustrated or confused, not analytical
+- Do NOT annotate code blocks with '# Expected:' or '# Got:' comments — paste raw output as-is
+- Include at least one uncertain or hedging phrase ('seems like', 'not sure if', 'looks like', 'might be', 'I think') — real reporters rarely state bugs with complete certainty
+- Use observational language: describe what you SAW, not what you think IS WRONG
 - If test output is available, paste it as a code block — do NOT explain what it means
 - Do NOT start with "I" or "We"
-- Keep it under 200 words
 - Do NOT include a title — just the body"""
 
     resolved_model = MODEL_MAP.get(model, model)
@@ -3146,7 +3285,7 @@ Rules:
             if isinstance(message, ResultMessage):
                 text = _extract_text_from_result(message)
                 if text:
-                    return text.strip()
+                    return _add_formatting_imperfection(text.strip())
     except Exception:
         logger.warning("few-shot issue generation failed")
     return None
@@ -3162,31 +3301,43 @@ async def _rewrite_issue_narrative(
     model: str,
 ) -> str | None:
     """Ask the LLM to rewrite a programmatically assembled draft into a natural issue."""
-    prompt = f"""Write a terse GitHub issue as a busy developer who just hit a bug.
+    social_rule = (
+        f"- If mentioning a contributor ({social_context.strip()}), integrate it into a"
+        f" mid-sentence naturally — NOT as the last line of the issue"
+    ) if social_context else ""
+
+    style = random.choice(_ISSUE_STYLES)
+    style_directive = style["directive"]
+    word_range = style["word_range"]
+
+    prompt = f"""Write a GitHub issue as a developer who just hit a bug.
 Symptom: {symptom}
 
 Draft for reference (rewrite, don't copy verbatim):
 {draft}
 
+STYLE: {style_directive}
+
+IMPORTANT: Do NOT produce a clean, well-structured report. Real issues are messy — some are one sentence, some ramble, some jump between topics.
+
 Rules:
-- 80-200 words MAXIMUM (hard limit — real issues average 112 words)
+- {word_range} words — follow the style directive above
 - NO markdown headers (no ##, no **bold sections**)
 - NO 'What did you do / What did you expect / What did you see' format
 - NO checklist items (no '- [x]')
 - NO 'Expected behavior' / 'Actual behavior' sections
-- Just 2-4 sentences describing what broke
 - You can include one short error snippet if relevant
-- Terse and direct — like a Slack message escalated to an issue
+- Include at least one uncertain or hedging phrase ('seems like', 'not sure if', 'looks like', 'might be', 'I think') — real reporters rarely state bugs with complete certainty
 - Do NOT include a title
 - Do NOT start with "I" or "We"
 - NEVER diagnose the root cause or mention which function is broken — describe SYMPTOMS only
-- Write as if you are REPORTING symptoms you observed, NOT diagnosing a bug you understand
+- Write as if you are REPORTING what you observed, NOT diagnosing a bug you understand
 - You do NOT know which function, file, or line of code is responsible
 - Do NOT use the word 'regression' — most real reporters don't know if it worked before
-- Vary length — some issues are 2 sentences, others are a paragraph. Not all issues are the same.
 - If test output is included, just paste it — do NOT explain what it means
+- Do NOT annotate code blocks with '# Expected:' or '# Got:' comments
 - Do NOT mention that this is a rewrite or that you are an AI
-{('- ' + social_context.strip()) if social_context else ''}"""
+{social_rule}"""
 
     resolved_model = MODEL_MAP.get(model, model)
     options = ClaudeCodeOptions(max_turns=1, model=resolved_model)
@@ -3195,7 +3346,7 @@ Rules:
             if isinstance(message, ResultMessage):
                 text = _extract_text_from_result(message)
                 if text:
-                    return text.strip()
+                    return _add_formatting_imperfection(text.strip())
     except Exception:
         logger.warning("LLM issue narrative rewrite failed, using programmatic draft")
     return None
@@ -3461,10 +3612,13 @@ async def generate_issue_description(
     )
 
 
-def _find_go_cross_package_test(repo_path: str, function_name: str) -> str | None:
+def _find_go_cross_package_test(
+    repo_path: str, function_name: str, source_file: str | None = None,
+) -> str | None:
     """Find a Go test file in a sibling package that references function_name.
 
     Caches grep results per repo to avoid repeated filesystem scans.
+    When source_file is given, returns the most relevant hit by path proximity.
     """
     cache = _go_cross_pkg_cache.get(repo_path)
     if cache is None:
@@ -3473,21 +3627,45 @@ def _find_go_cross_package_test(repo_path: str, function_name: str) -> str | Non
 
     if function_name in cache:
         hits = cache[function_name]
-        return hits[0] if hits else None
+    else:
+        try:
+            result = subprocess.run(
+                ["grep", "-rn", "--include=*_test.go", "-l", function_name, "."],
+                cwd=repo_path, capture_output=True, text=True, timeout=30,
+            )
+            hits = [
+                f.lstrip("./") for f in result.stdout.strip().splitlines() if f.strip()
+            ]
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            hits = []
+        cache[function_name] = hits
 
-    try:
-        result = subprocess.run(
-            ["grep", "-rn", "--include=*_test.go", "-l", function_name, "."],
-            cwd=repo_path, capture_output=True, text=True, timeout=30,
-        )
-        files = [
-            f.lstrip("./") for f in result.stdout.strip().splitlines() if f.strip()
-        ]
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        files = []
+    if not hits:
+        return None
 
-    cache[function_name] = files
-    return files[0] if files else None
+    if source_file:
+        scored = sorted(hits, key=lambda f: _score_test_file_relevance(source_file, f), reverse=True)
+        best = scored[0]
+        if _score_test_file_relevance(source_file, best) >= 2:
+            return best
+        return None
+
+    return hits[0]
+
+
+def _score_test_file_relevance(source_file: str, test_file: str) -> int:
+    """Score how relevant a test file is to a source file by path proximity."""
+    src_parts = Path(source_file).parent.parts
+    tst_parts = Path(test_file).parent.parts
+    if src_parts == tst_parts:
+        return 10
+    if src_parts and tst_parts:
+        if src_parts[:-1] == tst_parts or tst_parts[:-1] == src_parts:
+            return 5
+    shared = sum(1 for a, b in zip(src_parts, tst_parts) if a == b)
+    if shared > 0:
+        return 2 * shared
+    return 0
 
 
 def _find_existing_test_file(
@@ -3551,8 +3729,16 @@ def _find_existing_test_file(
         test_file = str(source_path.parent / f"{stem}_test.go")
         if (root / test_file).is_file():
             return test_file
+        same_dir = root / source_path.parent
+        if same_dir.is_dir():
+            same_dir_tests = sorted(same_dir.glob("*_test.go"))
+            if same_dir_tests:
+                return str(same_dir_tests[0].relative_to(root))
+        parent_test = source_path.parent.parent / f"{stem}_test.go" if source_path.parent.parts else None
+        if parent_test and (root / parent_test).is_file():
+            return str(parent_test)
         if function_name:
-            cross_pkg = _find_go_cross_package_test(repo_path, function_name)
+            cross_pkg = _find_go_cross_package_test(repo_path, function_name, source_file)
             if cross_pkg:
                 return cross_pkg
     elif language == "rust":
@@ -3723,11 +3909,9 @@ def _create_new_regression_test_file(
         pkg_match = re.search(r'^package\s+(\w+)', source, re.MULTILINE)
         pkg_name = pkg_match.group(1) if pkg_match else "main"
 
-        func_name = "TestRegression"
-        if test_id:
-            clean = re.sub(r'[^A-Za-z0-9]', '', test_id.split('/')[-1])
-            if clean:
-                func_name = f"TestRegression{clean}"
+        func_name = _test_name_for_bug(
+            func_under_test, bug_spec.bug_description, "go", test_id,
+        )
 
         error_msg = _extract_go_error_message(test_output)
         if error_msg:
@@ -3781,18 +3965,9 @@ def _create_new_regression_test_file(
         else:
             test_file = str(Path(src_file).parent / f"test_{stem}.py")
 
-        func_name = "test_regression"
-        if test_id:
-            parts = test_id.split("::")
-            last = parts[-1] if parts else test_id
-            clean = re.sub(r'[^A-Za-z0-9_]', '', last)
-            if clean and clean.startswith("test"):
-                func_name = (
-                    f"test_regression_{clean[4:]}" if len(clean) > 4
-                    else "test_regression"
-                )
-            elif clean:
-                func_name = f"test_regression_{clean}"
+        func_name = _test_name_for_bug(
+            func_under_test, bug_spec.bug_description, "python", test_id,
+        )
 
         module_name = _source_to_module_name(src_file)
         import_line = ""
@@ -3803,7 +3978,6 @@ def _create_new_regression_test_file(
         if assertion_expr:
             test_body = (
                 f'def {func_name}():\n'
-                f'    """Regression test for {func_under_test}."""\n'
                 f'    result = {func_under_test}()\n'
                 f'    assert result is not None, '
                 f'"{func_under_test} should return a valid result"\n'
@@ -3811,7 +3985,6 @@ def _create_new_regression_test_file(
         else:
             test_body = (
                 f'def {func_name}():\n'
-                f'    """Regression test for {func_under_test}."""\n'
                 f'    try:\n'
                 f'        result = {func_under_test}()\n'
                 f'    except Exception as exc:\n'
@@ -4212,6 +4385,7 @@ FORBIDDEN — these produce detectable synthetic patterns:
 - Do NOT use sequential mechanical names like cc2, cc3, obj2, val1. Use descriptive names matching the test subject.
 - Do NOT write an assertion that only verifies a function can be called. The assertion MUST check a specific expected value.
 - Do NOT write a test that only passes/fails based on a single operator or literal change — test the function's documented behavior with meaningful inputs.
+- Do NOT include the word 'regression' in the test name or any strings
 
 HARD CONSTRAINT: Return ONLY the new {func_keyword} definition. Do NOT return imports or file-level code.
 Keep the function short (3-8 lines of real code). Do NOT add any comments. Make assertions specific to the bug."""
@@ -4417,28 +4591,24 @@ async def _generate_test_patch_existing(
 
         uses_self = "self" in target_source.split("(", 1)[-1].split(")", 1)[0] if "(" in target_source else False
         func_name = bug_spec.function_name
+        test_name = _test_name_for_bug(
+            func_name, bug_spec.bug_description, language,
+        )
         if language == "python":
-            regression_name = f"test_{func_name}_regression"
             if uses_self:
-                regression_sig = f"def {regression_name}(self):"
+                test_sig = f"def {test_name}(self):"
             else:
-                regression_sig = f"def {regression_name}():"
+                test_sig = f"def {test_name}():"
         elif language == "go":
-            camel = func_name[0].upper() + func_name[1:] if func_name else func_name
-            regression_name = f"Test{camel}Regression"
-            regression_sig = f"func {regression_name}(t *testing.T) {{"
+            test_sig = f"func {test_name}(t *testing.T) {{"
         elif language == "rust":
-            regression_name = f"test_{func_name}_regression"
-            regression_sig = f"#[test] fn {regression_name}()"
+            test_sig = f"#[test] fn {test_name}()"
         elif language == "java":
-            camel = func_name[0].upper() + func_name[1:] if func_name else func_name
-            regression_name = f"test{camel}Regression"
-            regression_sig = f"@Test public void {regression_name}()"
+            test_sig = f"@Test public void {test_name}()"
         else:
-            regression_name = f"test_{func_name}_regression"
-            regression_sig = regression_name
+            test_sig = test_name
 
-        prompt = f"""You are writing a NEW standalone regression test function. Do NOT modify the existing test.
+        prompt = f"""You are writing a NEW standalone test function. Do NOT modify the existing test.
 
 Here is an existing test function for reference (to match naming/style conventions):
 ```{language}
@@ -4462,7 +4632,7 @@ Here is the buggy version of the function:
 
 The bug: {bug_spec.bug_description}
 {_test_output_section(test_output)}
-Write a NEW standalone test function named `{regression_name}` with signature: `{regression_sig}`
+Write a NEW standalone test function named `{test_name}` with signature: `{test_sig}`
 
 The test must PASS with the original code and FAIL with the buggy code.
 
@@ -4473,6 +4643,7 @@ FORBIDDEN — these produce synthetic detection signals:
 - Do NOT write an assertion that only verifies a function can be called without error (e.g., _ = f()). The assertion MUST check a specific return value or side effect that the bug breaks.
 - Do NOT write a test that only passes/fails based on a single operator or literal change — test the function's documented behavior with meaningful inputs.
 - Do NOT add comments
+- Do NOT include the word 'regression' in any names or strings
 
 Return ONLY the new test function, nothing else."""
 
@@ -4500,19 +4671,19 @@ Return ONLY the new test function, nothing else."""
 
         modified_func = _strip_strategy_labels(modified_func)
         if language == "go":
-            go_func_match = re.search(rf'^func\s+(?:\([^)]*\)\s+)?{re.escape(regression_name)}\s*\(', modified_func, re.MULTILINE)
+            go_func_match = re.search(rf'^func\s+(?:\([^)]*\)\s+)?{re.escape(test_name)}\s*\(', modified_func, re.MULTILINE)
             idx = go_func_match.start() if go_func_match else -1
         elif language in ("rust", "java"):
-            idx = modified_func.find(regression_name)
+            idx = modified_func.find(test_name)
         else:
-            func_prefix = f"def {regression_name}"
+            func_prefix = f"def {test_name}"
             idx = modified_func.find(func_prefix)
         if idx > 0:
             modified_func = modified_func[idx:]
         elif idx < 0:
             logger.warning(
                 "  LLM response missing function definition for %s (attempt %d/%d)",
-                regression_name, attempt + 1, len(ranked),
+                test_name, attempt + 1, len(ranked),
             )
             continue
 
@@ -4644,7 +4815,7 @@ def _template_test_fallback(bug_spec: BugSpec, language: str) -> str | None:
     if language == "python":
         return (
             f"import pytest\n\n\n"
-            f"def test_{bug_spec.function_name}_regression():\n"
+            f"def test_{bug_spec.function_name}_edge_case():\n"
             f"    assert True  # placeholder — replace with concrete assertion\n"
         )
     return None

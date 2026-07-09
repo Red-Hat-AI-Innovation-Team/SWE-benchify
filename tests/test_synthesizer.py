@@ -64,6 +64,7 @@ from swebenchify.synthesizer import (
     _strip_issue_shas,
     _strip_strategy_labels,
     _targeted_mutation,
+    _test_name_for_bug,
     _truncate_issue,
     _try_targeted_mutation,
     _validate_mutation_parses,
@@ -1293,14 +1294,6 @@ def test_test_patch_modifies_existing_file(tmp_path: Path) -> None:
     existing_test = "import pytest\n\ndef test_add_basic():\n    assert add(1, 2) == 3\n"
     (tmp_path / "tests" / "test_calc.py").write_text(existing_test)
 
-    regression_func = "def test_add_regression():\n    assert add(-1, -2) == -3\n"
-
-    class FakeResult:
-        content = [type("B", (), {"text": f"```python\n{regression_func}\n```"})()]
-
-    async def fake_query(prompt: str, options: object = None):
-        yield FakeResult()
-
     bug_spec = BugSpec(
         file="src/calc.py",
         function_name="add",
@@ -1309,6 +1302,15 @@ def test_test_patch_modifies_existing_file(tmp_path: Path) -> None:
         bug_description="Changed + to -",
         bug_category="incorrect-operator",
     )
+
+    expected_name = _test_name_for_bug("add", "Changed + to -", "python")
+    test_func = f"def {expected_name}():\n    assert add(-1, -2) == -3\n"
+
+    class FakeResult:
+        content = [type("B", (), {"text": f"```python\n{test_func}\n```"})()]
+
+    async def fake_query(prompt: str, options: object = None):
+        yield FakeResult()
 
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()), \
@@ -1321,8 +1323,9 @@ def test_test_patch_modifies_existing_file(tmp_path: Path) -> None:
     assert result is not None
     assert "new file mode" not in result
     assert "tests/test_calc.py" in result
-    assert "+def test_add_regression():" in result
+    assert f"+def {expected_name}():" in result
     assert "+    assert add(-1, -2) == -3" in result
+    assert "regression" not in result.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -2574,7 +2577,7 @@ def test_humanize_traceback_preserves_error_data(tmp_path: Path) -> None:
 def test_mine_social_artifacts(tmp_path: Path) -> None:
     import subprocess
     subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
-    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "12345678+alicedev@users.noreply.github.com"], cwd=tmp_path, capture_output=True, check=True)
     subprocess.run(["git", "config", "user.name", "Alice Dev"], cwd=tmp_path, capture_output=True, check=True)
 
     f = tmp_path / "a.py"
@@ -2587,7 +2590,7 @@ def test_mine_social_artifacts(tmp_path: Path) -> None:
     subprocess.run(["git", "commit", "-m", "Closes #99: second commit"], cwd=tmp_path, capture_output=True, check=True)
 
     artifacts = _mine_social_artifacts(str(tmp_path))
-    assert "Alice Dev" in artifacts["contributors"]
+    assert "alicedev" in artifacts["github_handles"]
     assert len(artifacts["shas"]) == 2
     assert "42" in artifacts["issues"]
     assert "99" in artifacts["issues"]
@@ -2595,7 +2598,7 @@ def test_mine_social_artifacts(tmp_path: Path) -> None:
 
 def test_mine_social_artifacts_no_repo(tmp_path: Path) -> None:
     artifacts = _mine_social_artifacts(str(tmp_path))
-    assert artifacts["contributors"] == []
+    assert artifacts["github_handles"] == []
     assert artifacts["shas"] == []
     assert artifacts["issues"] == []
     assert artifacts["branches"] == []
@@ -2608,7 +2611,7 @@ def test_mine_social_artifacts_no_repo(tmp_path: Path) -> None:
 def test_build_social_context_produces_output() -> None:
     """_build_social_context produces social references from artifacts."""
     artifacts = {
-        "contributors": ["Alice"],
+        "github_handles": ["alicedev"],
         "shas": ["abc1234"],
         "issues": ["42"],
         "branches": ["main", "develop"],
@@ -2617,12 +2620,12 @@ def test_build_social_context_produces_output() -> None:
     non_empty = [r for r in results if r]
     assert len(non_empty) > 0, "should produce non-empty output sometimes"
     for r in non_empty:
-        assert any(s in r for s in ['@Alice', 'main', 'develop'])
+        assert any(s in r for s in ['@alicedev', 'main', 'develop'])
 
 
 def test_build_social_context_empty_artifacts() -> None:
     artifacts: dict[str, list[str]] = {
-        "contributors": [],
+        "github_handles": [],
         "shas": [],
         "issues": [],
         "branches": [],
@@ -3571,7 +3574,7 @@ def test_data_first_uses_narrative_rewrite_with_fallback() -> None:
         ))
 
     assert len(captured_prompts) == 1
-    assert "terse GitHub issue" in captured_prompts[0]
+    assert "GitHub issue" in captured_prompts[0]
     assert "AssertionError" in result
     assert "```" in result
     assert "##" not in result
@@ -3652,7 +3655,7 @@ def test_test_patch_rejects_missing_function_def(tmp_path: Path) -> None:
 
 
 def test_test_patch_accepts_modified_existing_functions(tmp_path: Path) -> None:
-    """When the LLM returns a standalone regression function, the patch is accepted."""
+    """When the LLM returns a standalone test function, the patch is accepted."""
     from unittest.mock import MagicMock
     from unittest.mock import patch as mock_patch
 
@@ -3662,14 +3665,6 @@ def test_test_patch_accepts_modified_existing_functions(tmp_path: Path) -> None:
     existing_test = "import pytest\n\ndef test_add_basic():\n    assert add(1, 2) == 3\n"
     (tmp_path / "tests" / "test_calc.py").write_text(existing_test)
 
-    regression_func = "def test_add_regression():\n    assert add(0, 0) == 0\n"
-
-    class FakeResult:
-        content = [type("B", (), {"text": f"```python\n{regression_func}\n```"})()]
-
-    async def fake_query(prompt: str, options: object = None):
-        yield FakeResult()
-
     bug_spec = BugSpec(
         file="src/calc.py",
         function_name="add",
@@ -3678,6 +3673,15 @@ def test_test_patch_accepts_modified_existing_functions(tmp_path: Path) -> None:
         bug_description="Changed + to -",
         bug_category="incorrect-operator",
     )
+
+    expected_name = _test_name_for_bug("add", "Changed + to -", "python")
+    test_func = f"def {expected_name}():\n    assert add(0, 0) == 0\n"
+
+    class FakeResult:
+        content = [type("B", (), {"text": f"```python\n{test_func}\n```"})()]
+
+    async def fake_query(prompt: str, options: object = None):
+        yield FakeResult()
 
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
          mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()), \
@@ -3691,8 +3695,9 @@ def test_test_patch_accepts_modified_existing_functions(tmp_path: Path) -> None:
 
     assert result is not None
     assert "tests/test_calc.py" in result
-    assert "+def test_add_regression():" in result
+    assert f"+def {expected_name}():" in result
     assert "+    assert add(0, 0) == 0" in result
+    assert "regression" not in result.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -3700,7 +3705,7 @@ def test_test_patch_accepts_modified_existing_functions(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def test_test_generation_prompt_function_level() -> None:
-    """Verify the prompt generates a standalone regression test function."""
+    """Verify the prompt generates a standalone test function with descriptive name."""
     from unittest.mock import MagicMock
     from unittest.mock import patch as mock_patch
 
@@ -3735,10 +3740,12 @@ def test_test_generation_prompt_function_level() -> None:
 
     assert len(captured_prompts) == 1
     prompt = captured_prompts[0]
-    assert "standalone regression test" in prompt
-    assert "test_add_regression" in prompt
+    expected_name = _test_name_for_bug("add", "Changed + to -", "python")
+    assert "standalone test" in prompt
+    assert expected_name in prompt
     assert "Do NOT modify or include the existing test function" in prompt
     assert "def test_add" in prompt
+    assert "test_add_regression" not in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -4806,9 +4813,9 @@ class TestGenerateRegressionTestPatchGo:
         test_output = '--- FAIL: TestSolve (0.00s)\n    foo_test.go:5: got 41, want 42\nFAIL'
         result = _generate_regression_test_patch(str(tmp_path), bug_spec, "go", test_output)
         assert result != ""
-        assert "TestRegression" in result
+        assert "func Test" in result
+        assert "Regression" not in result
         assert "t.Errorf" in result or "assert." in result
-        # Must NOT contain empty t.Helper()-only body
         assert "t.Helper()\n}" not in result
 
     def test_generates_test_with_testify_style(self, tmp_path: Path) -> None:
@@ -4831,7 +4838,8 @@ class TestGenerateRegressionTestPatchGo:
         test_output = 'Expected "ok" to equal "fail"\n--- FAIL: TestBar (0.00s)\nFAIL'
         result = _generate_regression_test_patch(str(tmp_path), bug_spec, "go", test_output)
         assert result != ""
-        assert "TestRegression" in result
+        assert "func Test" in result
+        assert "Regression" not in result
         assert "assert.NotNil" in result
 
     def test_empty_for_non_go(self, tmp_path: Path) -> None:
@@ -4864,7 +4872,8 @@ class TestGenerateRegressionTestPatchGo:
         test_output = 'FAIL\nexit status 1'
         result = _generate_regression_test_patch(str(tmp_path), bug_spec, "go", test_output)
         assert result != ""
-        assert "TestRegression" in result
+        assert "func Test" in result
+        assert "Regression" not in result
         assert "panicked" in result  # defer/recover pattern
 
 
@@ -4889,7 +4898,8 @@ class TestGenerateRegressionTestPatchPython:
         test_output = 'FAILED tests/test_utils.py::test_compute\nAssertionError: 0 != 42'
         result = _generate_regression_test_patch(str(tmp_path), bug_spec, "python", test_output)
         assert result != ""
-        assert "test_regression" in result
+        assert "def test_compute" in result
+        assert "regression" not in result.lower()
         assert "assert" in result
 
     def test_generates_test_without_assertion_match(self, tmp_path: Path) -> None:
@@ -4908,7 +4918,8 @@ class TestGenerateRegressionTestPatchPython:
         test_output = 'FAILED test_foo.py::test_foo - ValueError'
         result = _generate_regression_test_patch(str(tmp_path), bug_spec, "python", test_output)
         assert result != ""
-        assert "test_regression" in result
+        assert "def test_foo" in result
+        assert "regression" not in result.lower()
         assert "except Exception" in result  # fallback pattern
 
     def test_empty_for_non_python(self) -> None:
@@ -5006,7 +5017,8 @@ class TestCreateNewRegressionTestFile:
         assert "pkg/foo_test.go" in result
         assert "package pkg" in result
         assert "import \"testing\"" in result
-        assert "TestRegression" in result
+        assert "func Test" in result
+        assert "Regression" not in result
         assert "t.Errorf" in result
 
     def test_creates_python_test_file(self, tmp_path: Path) -> None:
@@ -5026,7 +5038,8 @@ class TestCreateNewRegressionTestFile:
         )
         assert result is not None
         assert "test_utils.py" in result
-        assert "test_regression" in result
+        assert "def test_compute" in result
+        assert "regression" not in result.lower()
         assert "assert" in result
 
     def test_creates_python_test_file_in_tests_dir(self, tmp_path: Path) -> None:
@@ -5123,7 +5136,7 @@ class TestIsSamePackage:
 # ---------------------------------------------------------------------------
 
 def test_generate_test_patch_fallback_nearby(tmp_path: Path) -> None:
-    """When no exact test file exists, fallback finds a nearby test file."""
+    """When no exact test file exists, same-dir search finds a nearby test file."""
     import asyncio
     from unittest.mock import MagicMock
     from unittest.mock import patch as mock_patch
@@ -5148,7 +5161,18 @@ def test_generate_test_patch_fallback_nearby(tmp_path: Path) -> None:
         bug_category="wrong-return",
     )
 
-    with mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()):
+    expected_name = _test_name_for_bug("Wrap", "Wrong return", "go")
+    test_func = f"func {expected_name}(t *testing.T) {{\n\tgot := Wrap()\n\tif got == \"\" {{\n\t\tt.Errorf(\"Wrap() = empty\")\n\t}}\n}}"
+
+    class FakeResult:
+        content = [type("B", (), {"text": f"```go\n{test_func}\n```"})()]
+
+    async def fake_query(prompt: str, options: object = None):
+        yield FakeResult()
+
+    with mock_patch("swebenchify.synthesizer.query", fake_query), \
+         mock_patch("swebenchify.synthesizer.ClaudeCodeOptions", MagicMock()), \
+         mock_patch("swebenchify.synthesizer.ResultMessage", FakeResult):
         from swebenchify.synthesizer import generate_test_patch
         result = asyncio.run(generate_test_patch(
             bug_spec, str(tmp_path), "go",
@@ -5156,8 +5180,7 @@ def test_generate_test_patch_fallback_nearby(tmp_path: Path) -> None:
         ))
 
     assert result is not None
-    assert "TestRegression" in result
-    # Should use the nearby resolver_test.go file
+    assert "Regression" not in result
     assert "resolver_test.go" in result
 
 
@@ -5193,7 +5216,8 @@ def test_generate_test_patch_fallback_creates_new_file(tmp_path: Path) -> None:
     assert result is not None
     assert "orphan_test.go" in result
     assert "package orphan" in result
-    assert "TestRegression" in result
+    assert "func Test" in result
+    assert "Regression" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -5526,20 +5550,19 @@ def test_find_go_cross_package_test_no_match(tmp_path: Path) -> None:
 
 
 def test_find_existing_test_file_go_cross_package(tmp_path: Path) -> None:
-    """_find_existing_test_file falls back to cross-package discovery for Go."""
+    """_find_existing_test_file falls back to cross-package discovery for Go with relevant paths."""
     _go_cross_pkg_cache.pop(str(tmp_path), None)
 
-    (tmp_path / "internal").mkdir()
-    (tmp_path / "internal" / "server.go").write_text(
-        "package internal\n\nfunc Serve() {}\n"
+    (tmp_path / "internal" / "server").mkdir(parents=True)
+    (tmp_path / "internal" / "server" / "server.go").write_text(
+        "package server\n\nfunc Serve() {}\n"
     )
-    (tmp_path / "test").mkdir()
-    (tmp_path / "test" / "integration_test.go").write_text(
-        "package test\n\nimport \"testing\"\n\nfunc TestServe(t *testing.T) { Serve() }\n"
+    (tmp_path / "internal" / "server" / "server_integration_test.go").write_text(
+        "package server\n\nimport \"testing\"\n\nfunc TestServe(t *testing.T) { Serve() }\n"
     )
 
     result = _find_existing_test_file(
-        str(tmp_path), "internal/server.go", "go", function_name="Serve",
+        str(tmp_path), "internal/server/server.go", "go", function_name="Serve",
     )
     assert result is not None
     assert result.endswith("_test.go")
