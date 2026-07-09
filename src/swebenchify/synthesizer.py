@@ -5528,17 +5528,19 @@ async def synthesize_repo(
 
         mutations_attempted += 1
 
+        repo_short = repo_slug.split('/')[-1]
+        pfx = f'[{repo_short}] [{len(candidates)}/{max_mutations} yielded] [{mutations_attempted}/{min(len(targets), max_mutations * 8)}]'
+
         logger.info(
-            "[%d/%d] Mutating %s:%s",
-            i + 1,
-            min(len(targets), max_mutations * 8),
+            "%s Mutating %s:%s",
+            pfx,
             target["file"],
             target["function_name"],
         )
 
         related_files = _find_related_files(repo_path, target, language)
         if related_files:
-            logger.info("  Found %d related files", len(related_files))
+            logger.info("%s  Found %d related files", pfx, len(related_files))
 
         test_context = _extract_test_context(
             repo_path, target["file"], target["function_name"], language,
@@ -5552,7 +5554,7 @@ async def synthesize_repo(
                 test_context=test_context,
             )
             if bug_plan:
-                logger.info("  Multi-file plan: %s", bug_plan.primary_description[:80])
+                logger.info("%s  Multi-file plan: %s", pfx, bug_plan.primary_description[:80])
 
         # H10: Try targeted mutation (assertion-aware, data-first pass rate)
         bug_spec = None
@@ -5584,8 +5586,8 @@ async def synthesize_repo(
                                 mutated_content = _tmut
                                 original_content = _torig
                                 logger.info(
-                                    "  Targeted mutation: %s",
-                                    _tspec.bug_description[:80],
+                                    "%s  Targeted mutation: %s",
+                                    pfx, _tspec.bug_description[:80],
                                 )
                     except OSError:
                         pass
@@ -5619,7 +5621,7 @@ async def synthesize_repo(
                     assertions=target_assertions,
                 )
             if bug_spec is None:
-                logger.warning("  Skipped — LLM did not produce a valid mutation")
+                logger.warning("%s  Skipped — LLM did not produce a valid mutation", pfx)
                 break
 
             file_path = Path(repo_path) / bug_spec.file
@@ -5628,7 +5630,7 @@ async def synthesize_repo(
                     encoding="utf-8", errors="replace"
                 )
             except OSError:
-                logger.warning("  Skipped — could not read %s", bug_spec.file)
+                logger.warning("%s  Skipped — could not read %s", pfx, bug_spec.file)
                 bug_spec = None
                 break
 
@@ -5637,24 +5639,24 @@ async def synthesize_repo(
             )
 
             if mutated_content == original_content:
-                logger.warning('  Mutation could not be applied, retrying (%d/2)', attempt + 1)
+                logger.warning('%s  Mutation could not be applied, retrying (%d/2)', pfx, attempt + 1)
                 bug_spec = None
                 continue
 
             if not _validate_mutation_parses(mutated_content, language):
-                logger.warning('  Mutation does not parse (%s), retrying (%d/2)', language, attempt + 1)
+                logger.warning('%s  Mutation does not parse (%s), retrying (%d/2)', pfx, language, attempt + 1)
                 bug_spec = None
                 continue
 
             orig_stripped = [ln.strip() for ln in original_content.splitlines() if ln.strip()]
             mut_stripped = [ln.strip() for ln in mutated_content.splitlines() if ln.strip()]
             if orig_stripped == mut_stripped:
-                logger.warning('  Mutation is whitespace-only, retrying (%d/2)', attempt + 1)
+                logger.warning('%s  Mutation is whitespace-only, retrying (%d/2)', pfx, attempt + 1)
                 bug_spec = None
                 continue
 
             if _is_ast_equivalent(original_content, mutated_content, language):
-                logger.warning('  Mutation is semantically equivalent, retrying (%d/2)', attempt + 1)
+                logger.warning('%s  Mutation is semantically equivalent, retrying (%d/2)', pfx, attempt + 1)
                 bug_spec = None
                 continue
 
@@ -5662,7 +5664,7 @@ async def synthesize_repo(
 
             patch = generate_patch(original_content, mutated_content, bug_spec.file)
             if not patch.strip():
-                logger.warning("  Skipped — empty patch")
+                logger.warning("%s  Skipped — empty patch", pfx)
                 bug_spec = None
                 break
 
@@ -5676,14 +5678,14 @@ async def synthesize_repo(
                 if len(patch) < 100:
                     reason.append(f"{len(patch)} chars < 100")
                 logger.info(
-                    "  Patch too simple (%s), retrying (%d/2)",
-                    ", ".join(reason), attempt + 1,
+                    "%s  Patch too simple (%s), retrying (%d/2)",
+                    pfx, ", ".join(reason), attempt + 1,
                 )
                 bug_spec = None
             else:
                 logger.warning(
-                    "  Patch still below targets after retries (%d lines, %d chars), accepting",
-                    changed, len(patch),
+                    "%s  Patch still below targets after retries (%d lines, %d chars), accepting",
+                    pfx, changed, len(patch),
                 )
 
         if bug_spec is None:
@@ -5699,23 +5701,23 @@ async def synthesize_repo(
             # Skip benchmark/demo/example files — they produce unrelated patch hunks
             # that judges immediately flag as artificially constructed
             if any(excl in sc.file for excl in _EXCLUDE_SUBSTR):
-                logger.warning("  Skipping secondary change in excluded file %s", sc.file)
+                logger.warning("%s  Skipping secondary change in excluded file %s", pfx, sc.file)
                 continue
             # Skip cross-package secondary changes — judges flag patches that
             # touch unrelated packages as a synthesis signal
             if not _is_same_package(bug_spec.file, sc.file, language):
-                logger.warning("  Skipping cross-package secondary change in %s (primary: %s)", sc.file, primary_dir)
+                logger.warning("%s  Skipping cross-package secondary change in %s (primary: %s)", pfx, sc.file, primary_dir)
                 continue
             sec_path = Path(repo_path) / sc.file
             if not sec_path.is_file():
-                logger.warning("  Secondary file not found: %s", sc.file)
+                logger.warning("%s  Secondary file not found: %s", pfx, sc.file)
                 continue
             try:
                 sec_content = sec_path.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
             if sc.original_snippet not in sec_content:
-                logger.warning("  Secondary snippet not found in %s", sc.file)
+                logger.warning("%s  Secondary snippet not found in %s", pfx, sc.file)
                 continue
             sec_buggy = sec_content.replace(sc.original_snippet, sc.buggy_snippet, 1)
             if sec_buggy != sec_content:
@@ -5725,20 +5727,20 @@ async def synthesize_repo(
                 else:
                     patch += sec_diff
                 buggy_files[sc.file] = sec_buggy
-                logger.info("  Secondary change in %s: %s", sc.file, sc.description)
+                logger.info("%s  Secondary change in %s: %s", pfx, sc.file, sc.description)
 
         if not yield_only and len(buggy_files) < 2 and related_files:
-            logger.info("  Only %d file changed, retrying with explicit multi-file instruction", len(buggy_files))
+            logger.info("%s  Only %d file changed, retrying with explicit multi-file instruction", pfx, len(buggy_files))
             retry_spec = await introduce_bug(
                 target, model=model, related_files=related_files,
             )
             if retry_spec and retry_spec.secondary_changes:
                 for sc in retry_spec.secondary_changes:
                     if any(excl in sc.file for excl in _EXCLUDE_SUBSTR):
-                        logger.warning("  Skipping retry secondary change in excluded file %s", sc.file)
+                        logger.warning("%s  Skipping retry secondary change in excluded file %s", pfx, sc.file)
                         continue
                     if not _is_same_package(bug_spec.file, sc.file, language):
-                        logger.warning("  Skipping retry cross-package secondary change in %s", sc.file)
+                        logger.warning("%s  Skipping retry cross-package secondary change in %s", pfx, sc.file)
                         continue
                     sec_path = Path(repo_path) / sc.file
                     if not sec_path.is_file():
@@ -5757,7 +5759,7 @@ async def synthesize_repo(
                         else:
                             patch += sec_diff
                         buggy_files[sc.file] = sec_buggy
-                        logger.info("  Retry secondary change in %s", sc.file)
+                        logger.info("%s  Retry secondary change in %s", pfx, sc.file)
 
         patched_files: set[str] = {bug_spec.file} | set(buggy_files.keys())
         ctx = _collect_repo_context(repo_path)
@@ -5769,7 +5771,7 @@ async def synthesize_repo(
             )
             for inc_path, inc_original, inc_modified in incidentals:
                 if inc_path in patched_files:
-                    logger.info("  Skipping duplicate incidental for %s", inc_path)
+                    logger.info("%s  Skipping duplicate incidental for %s", pfx, inc_path)
                     continue
                 # Validate RST references in changelog files
                 if inc_path.lower().endswith((".rst", ".md")):
@@ -5821,7 +5823,7 @@ async def synthesize_repo(
             repo_path, buggy_files, bug_spec.bug_description,
         )
         if buggy_commit is None:
-            logger.warning("  Skipped — could not create buggy commit")
+            logger.warning("%s  Skipped — could not create buggy commit", pfx)
             continue
 
         # H3: Capture test failure output from buggy code
@@ -5831,12 +5833,12 @@ async def synthesize_repo(
             function_name=bug_spec.function_name,
         )
         if test_output:
-            logger.info("  Captured %d chars of test output", len(test_output))
+            logger.info("%s  Captured %d chars of test output", pfx, len(test_output))
             test_output = _sanitize_test_output(test_output, repo_path)
             test_output = _humanize_traceback(test_output, repo_path)
 
         if not test_output or not _is_valid_test_output(test_output):
-            logger.warning("  Skipped — mutation did not cause test failures (data-first path required)")
+            logger.warning("%s  Skipped — mutation did not cause test failures (data-first path required)", pfx)
             continue
 
         if yield_only:
@@ -5863,7 +5865,8 @@ async def synthesize_repo(
                 'test_output': test_output or '',
                 'language': language,
             }
-            logger.info('  Generated (yield-only): %s (%s)', candidate.instance_id, bug_spec.bug_category)
+            logger.info('%s  Generated (yield-only): %s (%s)', pfx, candidate.instance_id, bug_spec.bug_category)
+            logger.info('%s  === YIELD %d/%d (rate: %.0f%%) ===', pfx, len(candidates), max_mutations, 100 * len(candidates) / mutations_attempted)
             continue
 
         # H2: Mine social artifacts and build social context
@@ -5897,7 +5900,7 @@ async def synthesize_repo(
             if generated_tp:
                 test_patch = generated_tp
         except Exception:
-            logger.warning('  test_patch generation failed — using fallback', exc_info=True)
+            logger.warning('%s  test_patch generation failed — using fallback', pfx, exc_info=True)
 
         synthesis_result = SynthesisResult(
             bug_spec=bug_spec,
@@ -5915,7 +5918,7 @@ async def synthesize_repo(
         synthesis_result.instance_id = candidate.instance_id
 
         if screen_instances and not await _self_screen_instance(candidate):
-            logger.info("  Discarded %s — failed self-screening", candidate.instance_id)
+            logger.info("%s  Discarded %s — failed self-screening", pfx, candidate.instance_id)
             continue
 
         candidates.append(candidate)
@@ -5926,8 +5929,9 @@ async def synthesize_repo(
         }
 
         logger.info(
-            "  Generated: %s (%s)", candidate.instance_id, bug_spec.bug_category,
+            "%s  Generated: %s (%s)", pfx, candidate.instance_id, bug_spec.bug_category,
         )
+        logger.info('%s  === YIELD %d/%d (rate: %.0f%%) ===', pfx, len(candidates), max_mutations, 100 * len(candidates) / mutations_attempted)
 
     venv_cleanup = Path(repo_path) / '.synth-venv'
     if venv_cleanup.is_dir():
@@ -5941,6 +5945,12 @@ async def synthesize_repo(
         len(candidates),
         max_mutations,
         mutations_attempted,
+    )
+    logger.info(
+        '[%s] Final: %d/%d yielded in %d attempts (%.0f%% yield rate)',
+        repo_slug.split('/')[-1], len(candidates), max_mutations,
+        mutations_attempted,
+        100 * len(candidates) / mutations_attempted if mutations_attempted else 0,
     )
     return RepoSynthesisResult(
         candidates=candidates,
