@@ -2799,13 +2799,13 @@ def test_generate_issue_from_symptom_no_llm_for_symptom_only() -> None:
 # ---------------------------------------------------------------------------
 
 def test_patch_floor_accepts_5_lines_500_chars() -> None:
-    """Verify new thresholds: 2 changed lines, 100 chars."""
+    """Verify new thresholds: 4 changed lines, 200 chars."""
     import inspect
 
     import swebenchify.synthesizer as mod
     source = inspect.getsource(mod.synthesize_repo)
-    assert "changed >= 2" in source
-    assert 'len(patch) >= 100' in source
+    assert "changed >= 4" in source
+    assert 'len(patch) >= 200' in source
 
 
 def test_patch_floor_log_messages_updated() -> None:
@@ -2814,8 +2814,8 @@ def test_patch_floor_log_messages_updated() -> None:
 
     import swebenchify.synthesizer as mod
     source = inspect.getsource(mod.synthesize_repo)
-    assert 'changed lines < 2' in source
-    assert 'chars < 100' in source
+    assert 'changed lines < 4' in source
+    assert 'chars < 200' in source
 
 
 # ---------------------------------------------------------------------------

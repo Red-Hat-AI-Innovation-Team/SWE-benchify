@@ -2066,7 +2066,7 @@ GO-SPECIFIC MUTATION GUIDANCE:
 For Go code, ONLY generate logic errors that compile successfully.
 
 PREFERRED for Go:
-- Remove a side-effect call (delete a defer Close(), Flush(), or cleanup call — diff shows one deleted line)
+- Remove a side-effect call (delete a defer Close(), Flush(), or cleanup call along with its error handling — 3+ lines)
 - Use the wrong method with compatible signature (io.Copy vs io.CopyN, Flush() vs Close())
 - Use the wrong constant/field of the same type (codes.NotFound vs codes.Unavailable, both are uint32)
 - Remove a guard clause (delete 'if len(x) == 0 { return nil }' — edge case not handled)
@@ -2087,13 +2087,17 @@ PREFERRED for Java:
 
     prompt = f"""You are a code mutation expert. Given the following {language} function, introduce a subtle, realistic bug — the kind a developer might actually make during a refactoring or late-night coding session.
 
-PREFERRED mutation types:
-- Remove a side-effect call (delete a cleanup/reset/flush call — diff shows one deleted line)
-- Use the wrong method on a compatible interface (e.g., .read() vs .readline(), .items() vs .values() — same signature, wrong semantics)
-- Use the wrong constant/field of the same type (e.g., os.O_RDONLY vs os.O_WRONLY, both are int)
-- Remove a guard clause (delete 'if len(x) == 0: return None' — edge case not handled)
-- Return wrong error variable (return None instead of raising, or vice versa)
-- Comparison operator changes, integer literal changes, argument swaps, and line reorderings are also acceptable
+PREFERRED mutation types (ordered by realism — prefer earlier types):
+1. INCOMPLETE MIGRATION: Change a method call, constant, or API usage as if the developer updated one call site but forgot this one (e.g., .encode() → .encode('utf-8') was required after an upgrade, but this call was missed)
+2. MISSING EDGE CASE: Remove a guard clause or type check that handles a specific input variant (e.g., delete 'if isinstance(x, dict): x = [x]' so dict inputs silently break)
+3. WRONG CONTROL FLOW: Use 'return' where 'continue' was needed in a loop, or swap if/else branches, or remove a 'break' from a loop
+4. WRONG VARIABLE IN SCOPE: Use a similarly-named variable from the enclosing scope instead of the local one (e.g., use 'self.name' when the local 'name' parameter was intended)
+5. STALE CACHED VALUE: Return or use a value that was valid before a state change but is now stale (e.g., capture len(x) before appending to x, then use the old length)
+
+AVOID these — they are immediately recognizable as synthetic:
+- Single operator flips (== to !=, + to -, >= to >) — these are the #1 detection signal
+- Single-token changes that affect exactly one character
+- Changes that produce a patch with fewer than 3 changed lines
 {avoid_override}{strategy_override}
 
 The bug must look like something that would happen during a real refactoring or API migration, not a deliberate sabotage.
@@ -2118,7 +2122,7 @@ Return your response in EXACTLY this format:
 <bug_description>One sentence describing what the bug does, under what conditions it manifests, and why existing tests wouldn't catch it</bug_description>
 
 <buggy_code>
-The COMPLETE modified function with ONLY the bug introduced. Include ALL lines of the original function. The bug should affect 2-3 related lines, not just one. Do NOT add incidental improvements (docstring fixes, variable renames, type hints) — only the bug mutation.
+The COMPLETE modified function with ONLY the bug introduced. Include ALL lines of the original function. The bug should affect 4-8 lines of code — it should look like a real incomplete refactoring, not a surgical single-line edit. Add, remove, or modify multiple related lines to simulate a developer who changed something but didn't fully think through the consequences. Do NOT add incidental improvements (docstring fixes, variable renames, type hints) — only the bug mutation.
 </buggy_code>
 
 If RELATED CODE was shown above, you MUST provide a secondary change. Real bug fixes almost always touch multiple files. Think of it this way: you are simulating an incomplete refactoring where the developer updated the primary function but forgot to apply the same change consistently in related code.
@@ -5580,6 +5584,13 @@ async def synthesize_repo(
             if _tfile:
                 _tspec = _try_targeted_mutation(repo_path, target, _tfile, language)
                 if _tspec:
+                    desc_lower = _tspec.bug_description.lower()
+                    if any(op_sig in desc_lower for op_sig in (
+                        "changed '", 'swapped', 'flipped', 'inverted operator',
+                        "' to '", 'operator',
+                    )):
+                        _tspec = None
+                if _tspec:
                     try:
                         _torig = (Path(repo_path) / _tspec.file).read_text(
                             encoding="utf-8", errors="replace",
@@ -5680,14 +5691,14 @@ async def synthesize_repo(
                 break
 
             changed = _count_changed_lines(patch)
-            if changed >= 2 and len(patch) >= 100:
+            if changed >= 4 and len(patch) >= 200:
                 break
             if attempt < 2:
                 reason = []
-                if changed < 2:
-                    reason.append(f"{changed} changed lines < 2")
-                if len(patch) < 100:
-                    reason.append(f"{len(patch)} chars < 100")
+                if changed < 4:
+                    reason.append(f"{changed} changed lines < 4")
+                if len(patch) < 200:
+                    reason.append(f"{len(patch)} chars < 200")
                 logger.info(
                     "%s  Patch too simple (%s), retrying (%d/2)",
                     pfx, ", ".join(reason), attempt + 1,
