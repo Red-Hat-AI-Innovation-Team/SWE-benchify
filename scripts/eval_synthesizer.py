@@ -428,6 +428,8 @@ def main():
                         help='Directory for results JSON (default: /tmp)')
     parser.add_argument('--yield-only', action='store_true',
                         help='Measure yield rate only (~5 min). Skips issue generation, test patches, judge, F2P, diversity.')
+    parser.add_argument('--repo', type=str, default=None,
+                        help='Filter to a specific repo slug (e.g. grpc/grpc-go)')
     args = parser.parse_args()
 
     if args.role == 'discriminator':
@@ -437,9 +439,15 @@ def main():
     commit = detect_commit()
 
     if args.yield_only:
-        targets = [EVAL_TARGETS[0].copy()]
-        targets[0]['n_synthetic'] = 2
-        targets[0]['n_real'] = 0
+        targets = [t.copy() for t in EVAL_TARGETS]
+        if args.repo:
+            targets = [t for t in targets if args.repo in t['repo_slug']]
+            if not targets:
+                print(f'No target matching --repo {args.repo!r}', file=sys.stderr)
+                sys.exit(1)
+        for t in targets:
+            t['n_synthetic'] = 2
+            t['n_real'] = 0
     elif args.quick:
         targets = [t.copy() for t in EVAL_TARGETS]
         for t in targets:
@@ -596,7 +604,7 @@ def main():
                 f'R{round_num} ({commit}): YIELD-ONLY. '
                 f'{n_s} mutations broke tests out of {total_mutations_attempted} attempted. '
                 f'Yield rate: {yield_rate:.2f}. '
-                f'Repo: {targets[0]["repo_slug"]}.'
+                f'Repos: {", ".join(t["repo_slug"] for t in targets)}.'
             ),
         }))
         return
