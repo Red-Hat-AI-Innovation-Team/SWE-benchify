@@ -4427,13 +4427,32 @@ async def _generate_test_patch_existing(
     for attempt, target in enumerate(ranked):
         target_source = str(target["source"])
 
-        # Extract the actual function signature line from source
-        source_lines = target_source.strip().splitlines()
-        func_sig_line = source_lines[0].rstrip() if source_lines else str(target["name"])
+        uses_self = "self" in target_source.split("(", 1)[-1].split(")", 1)[0] if "(" in target_source else False
+        func_name = bug_spec.function_name
+        if language == "python":
+            regression_name = f"test_{func_name}_regression"
+            if uses_self:
+                regression_sig = f"def {regression_name}(self):"
+            else:
+                regression_sig = f"def {regression_name}():"
+        elif language == "go":
+            camel = func_name[0].upper() + func_name[1:] if func_name else func_name
+            regression_name = f"Test{camel}Regression"
+            regression_sig = f"func {regression_name}(t *testing.T) {{"
+        elif language == "rust":
+            regression_name = f"test_{func_name}_regression"
+            regression_sig = f"#[test] fn {regression_name}()"
+        elif language == "java":
+            camel = func_name[0].upper() + func_name[1:] if func_name else func_name
+            regression_name = f"test{camel}Regression"
+            regression_sig = f"@Test public void {regression_name}()"
+        else:
+            regression_name = f"test_{func_name}_regression"
+            regression_sig = regression_name
 
-        prompt = f"""You are modifying a single test function to add regression coverage for a bug.
+        prompt = f"""You are writing a NEW standalone regression test function. Do NOT modify the existing test.
 
-Here is the test function to modify:
+Here is an existing test function for reference (to match naming/style conventions):
 ```{language}
 {target_source}
 ```
@@ -4455,23 +4474,19 @@ Here is the buggy version of the function:
 
 The bug: {bug_spec.bug_description}
 {_test_output_section(test_output)}
-HARD CONSTRAINT: Return ONLY the modified test function. Do NOT return the complete file.
+Write a NEW standalone test function named `{regression_name}` with signature: `{regression_sig}`
 
-Add 1-3 NEW assertion statements at the END of the function body that exercise the described bug. At least one assertion must verify a value that will PASS with the original code and FAIL with the buggy code.
+The test must PASS with the original code and FAIL with the buggy code.
 
 FORBIDDEN — these produce synthetic detection signals:
+- Do NOT modify or include the existing test function
 - Do NOT access unexported/private fields (Go: lowercase-named struct fields, Python: _underscored attributes). Assert only on public return values and observable API effects.
 - Do NOT use sequential mechanical variable names like cc2, cc3, obj2, val1. Use names that describe what the value represents (e.g. conn, result, got, want).
 - Do NOT write an assertion that only verifies a function can be called without error (e.g., _ = f()). The assertion MUST check a specific return value or side effect that the bug breaks.
 - Do NOT write a test that only passes/fails based on a single operator or literal change — test the function's documented behavior with meaningful inputs.
-
-Requirements:
-- Keep the EXACT same function signature: `{func_sig_line}`
-- Preserve the EXACT same indentation level as the original
-- Do NOT change existing lines — only ADD new assertions at the end
 - Do NOT add comments
-- Do NOT add new functions
-- Return ONLY the complete function body, nothing else"""
+
+Return ONLY the new test function, nothing else."""
 
         modified_func: str | None = None
         try:
@@ -4497,17 +4512,19 @@ Requirements:
 
         modified_func = _strip_strategy_labels(modified_func)
         if language == "go":
-            go_func_match = re.search(rf'^func\s+(?:\([^)]*\)\s+)?{re.escape(str(target["name"]))}\s*\(', modified_func, re.MULTILINE)
+            go_func_match = re.search(rf'^func\s+(?:\([^)]*\)\s+)?{re.escape(regression_name)}\s*\(', modified_func, re.MULTILINE)
             idx = go_func_match.start() if go_func_match else -1
+        elif language in ("rust", "java"):
+            idx = modified_func.find(regression_name)
         else:
-            func_prefix = f"def {target['name']}"
+            func_prefix = f"def {regression_name}"
             idx = modified_func.find(func_prefix)
         if idx > 0:
             modified_func = modified_func[idx:]
         elif idx < 0:
             logger.warning(
                 "  LLM response missing function definition for %s (attempt %d/%d)",
-                target["name"], attempt + 1, len(ranked),
+                regression_name, attempt + 1, len(ranked),
             )
             continue
 
@@ -4528,14 +4545,20 @@ Requirements:
                     for line in mod_lines
                 )
 
-        modified_content = original_test_content.replace(target_source.rstrip(), modified_func.rstrip())
-
-        if modified_content == original_test_content:
+        insert_pos = original_test_content.find(target_source)
+        if insert_pos == -1:
             logger.warning(
-                "  Splice failed for %s (attempt %d/%d)",
+                "  Could not locate target function %s for insertion (attempt %d/%d)",
                 target["name"], attempt + 1, len(ranked),
             )
             continue
+        insert_pos += len(target_source.rstrip())
+        modified_content = (
+            original_test_content[:insert_pos]
+            + '\n\n'
+            + modified_func.rstrip()
+            + original_test_content[insert_pos:]
+        )
 
         modified_content = _normalize_test_whitespace(modified_content, original_test_content)
 

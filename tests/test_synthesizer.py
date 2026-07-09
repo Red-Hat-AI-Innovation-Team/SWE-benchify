@@ -1293,10 +1293,10 @@ def test_test_patch_modifies_existing_file(tmp_path: Path) -> None:
     existing_test = "import pytest\n\ndef test_add_basic():\n    assert add(1, 2) == 3\n"
     (tmp_path / "tests" / "test_calc.py").write_text(existing_test)
 
-    modified_test = "import pytest\n\ndef test_add_basic():\n    assert add(1, 2) == 3\n    assert add(-1, -2) == -3\n"
+    regression_func = "def test_add_regression():\n    assert add(-1, -2) == -3\n"
 
     class FakeResult:
-        content = [type("B", (), {"text": f"```python\n{modified_test}\n```"})()]
+        content = [type("B", (), {"text": f"```python\n{regression_func}\n```"})()]
 
     async def fake_query(prompt: str, options: object = None):
         yield FakeResult()
@@ -1321,6 +1321,7 @@ def test_test_patch_modifies_existing_file(tmp_path: Path) -> None:
     assert result is not None
     assert "new file mode" not in result
     assert "tests/test_calc.py" in result
+    assert "+def test_add_regression():" in result
     assert "+    assert add(-1, -2) == -3" in result
 
 
@@ -3651,7 +3652,7 @@ def test_test_patch_rejects_missing_function_def(tmp_path: Path) -> None:
 
 
 def test_test_patch_accepts_modified_existing_functions(tmp_path: Path) -> None:
-    """When the LLM returns a modified function, the patch is accepted."""
+    """When the LLM returns a standalone regression function, the patch is accepted."""
     from unittest.mock import MagicMock
     from unittest.mock import patch as mock_patch
 
@@ -3661,10 +3662,10 @@ def test_test_patch_accepts_modified_existing_functions(tmp_path: Path) -> None:
     existing_test = "import pytest\n\ndef test_add_basic():\n    assert add(1, 2) == 3\n"
     (tmp_path / "tests" / "test_calc.py").write_text(existing_test)
 
-    modified_func = "def test_add_basic():\n    assert add(1, 2) == 3\n    assert add(0, 0) == 0\n"
+    regression_func = "def test_add_regression():\n    assert add(0, 0) == 0\n"
 
     class FakeResult:
-        content = [type("B", (), {"text": f"```python\n{modified_func}\n```"})()]
+        content = [type("B", (), {"text": f"```python\n{regression_func}\n```"})()]
 
     async def fake_query(prompt: str, options: object = None):
         yield FakeResult()
@@ -3690,6 +3691,7 @@ def test_test_patch_accepts_modified_existing_functions(tmp_path: Path) -> None:
 
     assert result is not None
     assert "tests/test_calc.py" in result
+    assert "+def test_add_regression():" in result
     assert "+    assert add(0, 0) == 0" in result
 
 
@@ -3698,7 +3700,7 @@ def test_test_patch_accepts_modified_existing_functions(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def test_test_generation_prompt_function_level() -> None:
-    """Verify the prompt sends only the target function and uses HARD CONSTRAINT."""
+    """Verify the prompt generates a standalone regression test function."""
     from unittest.mock import MagicMock
     from unittest.mock import patch as mock_patch
 
@@ -3733,9 +3735,9 @@ def test_test_generation_prompt_function_level() -> None:
 
     assert len(captured_prompts) == 1
     prompt = captured_prompts[0]
-    assert "HARD CONSTRAINT" in prompt
-    assert "Return ONLY the modified test function" in prompt
-    assert "Do NOT return the complete file" in prompt
+    assert "standalone regression test" in prompt
+    assert "test_add_regression" in prompt
+    assert "Do NOT modify or include the existing test function" in prompt
     assert "def test_add" in prompt
 
 
