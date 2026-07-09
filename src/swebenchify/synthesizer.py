@@ -2931,22 +2931,6 @@ def _mine_social_artifacts(repo_path: str) -> dict[str, list[str]]:
 
 def _build_social_context(artifacts: dict[str, list[str]]) -> str:
     """Build social context string from mined artifacts."""
-    if artifacts.get('issues'):
-        issue_num = random.choice(artifacts['issues'])
-        all_nums = artifacts['issues']
-        pr_ref = random.choice(all_nums) if len(all_nums) > 1 else issue_num
-
-        ref_styles = [
-            f'Might be related to #{issue_num}',
-            f'Possibly a regression from #{issue_num}',
-            f'cf. #{issue_num}',
-            f'This started happening after #{pr_ref} was merged.',
-            f'I think #{pr_ref} may have introduced this.',
-            f'Looks like a regression from #{pr_ref}',
-            f'Not sure if this is related to #{issue_num} but the symptoms are similar.',
-        ]
-        return "\n\n" + random.choice(ref_styles)
-
     contributors = artifacts.get('contributors', [])
     branches = artifacts.get('branches', [])
 
