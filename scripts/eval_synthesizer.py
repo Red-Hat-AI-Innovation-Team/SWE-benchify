@@ -24,6 +24,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import asdict
 
 # ── Configuration ────────────────────────────────────────────────────────
@@ -482,6 +483,7 @@ def main():
 
         random.shuffle(eval_set)
         log.info('phase=judge eval_set=%d (synthetic=%d real=%d)', len(eval_set), n_s, n_r)
+        judge_start = time.time()
 
         results = []
         for i, item in enumerate(eval_set):
@@ -507,6 +509,13 @@ def main():
                 i + 1, len(eval_set), iid, true_label, predicted,
                 verdict['confidence'], 'CORRECT' if correct else 'WRONG',
             )
+            log.info('  reason: %s', verdict['reasoning'][:120].replace(chr(10), ' '))
+            synth_so_far = [r for r in results if r['true_label'] == 'SYNTHETIC']
+            if synth_so_far:
+                fooled = sum(1 for r in synth_so_far if not r['correct'])
+                elapsed = time.time() - judge_start
+                log.info('  tally: %d/%d synthetic fooled (%.0f%%), %.0fs elapsed',
+                         fooled, len(synth_so_far), 100 * fooled / len(synth_so_far), elapsed)
 
         m = compute_metrics(results)
         recall = m['recall']
@@ -526,6 +535,10 @@ def main():
                 'synthetic_instances': all_synth_instances,
             }, f, indent=2)
         log.info('results saved to %s', out_path)
+
+        judge_elapsed = time.time() - judge_start
+        log.info('--- Judge complete: %d/%d fooled in %.0fs (evasion: %.0f%%) ---',
+                 m['fn'], m['tp'] + m['fn'], judge_elapsed, judge_evasion * 100)
 
         print(json.dumps({
             'score': round(judge_evasion, 3),
@@ -557,6 +570,7 @@ def main():
                 all_instances.append(json.loads(line))
 
         log.info('loaded %d instances from %s', len(all_instances), instances_path)
+        enrich_start_total = time.time()
 
         pipeline_instances = [i for i in all_instances if '_pipeline' in i]
         if not pipeline_instances:
@@ -588,6 +602,7 @@ def main():
                     cwd=repo_path, check=True,
                 )
 
+            enrich_start = time.time()
             for i, inst in enumerate(repo_instances):
                 iid = inst.get('instance_id', 'unknown')
                 log.info('enriching [%d/%d] %s', i + 1, len(repo_instances), iid)
@@ -599,6 +614,15 @@ def main():
                         len(inst.get('problem_statement', '')),
                         len(inst.get('test_patch', '')),
                     )
+                    ps_preview = inst.get('problem_statement', '')[:150].replace(chr(10), ' ')
+                    log.info('  preview: %s', ps_preview)
+                    bug_file = inst.get('_pipeline', {}).get('bug_spec', {}).get('file', '?')
+                    bug_func = inst.get('_pipeline', {}).get('bug_spec', {}).get('function_name', '?')
+                    elapsed = time.time() - enrich_start
+                    avg_per = elapsed / (i + 1)
+                    remaining = avg_per * (len(repo_instances) - i - 1)
+                    log.info('  source: %s:%s | %.0fs elapsed, ~%.0fs remaining',
+                             bug_file, bug_func, elapsed, remaining)
                 except Exception:
                     log.error('enrichment failed for %s', iid, exc_info=True)
 
@@ -619,6 +643,9 @@ def main():
                 'enriched': n_enriched,
                 'enrichment_rate': round(n_enriched / len(pipeline_instances), 3) if pipeline_instances else 0,
             }, f, indent=2)
+
+        log.info('--- Enrichment complete: %d/%d in %.0fs ---',
+                 n_enriched, len(pipeline_instances), time.time() - enrich_start_total)
 
         print(json.dumps({
             'score': round(n_enriched / len(pipeline_instances), 3) if pipeline_instances else 0,
@@ -802,6 +829,12 @@ def main():
         for inst in all_synth_instances:
             f.write(json.dumps(inst) + '\n')
     log.info('saved %d instances to %s', len(all_synth_instances), instances_path)
+    for inst in all_synth_instances:
+        iid = inst.get('instance_id', 'unknown')
+        repo = inst.get('repo', '?')
+        bug_file = inst.get('_pipeline', {}).get('bug_spec', {}).get('file', '?')
+        bug_func = inst.get('_pipeline', {}).get('bug_spec', {}).get('function_name', '?')
+        log.info('  saved: %s [%s] %s:%s', iid, repo, bug_file, bug_func)
 
     meta_path = os.path.join(instances_dir, f'{commit}.meta.json')
     with open(meta_path, 'w') as f:
