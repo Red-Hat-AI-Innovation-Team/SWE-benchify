@@ -199,6 +199,7 @@ class RepoSynthesisResult:
 
     candidates: list[CandidateInstance]
     mutations_attempted: int
+    enrichment_data: dict[str, dict] = dataclasses.field(default_factory=dict)
 
 
 def _should_exclude(filepath: str, language: str) -> bool:
@@ -4861,6 +4862,71 @@ def build_candidate(
     )
 
 
+async def enrich_instance(
+    instance: dict,
+    repo_path: str,
+    model: str = 'sonnet',
+) -> dict:
+    pipeline = instance.get('_pipeline')
+    if not pipeline:
+        raise ValueError("Instance missing '_pipeline' metadata — was it produced with --yield-only?")
+
+    bug_spec_dict = pipeline['bug_spec']
+    secondary_changes = [
+        SecondaryChange(**sc) for sc in bug_spec_dict.get('secondary_changes', [])
+    ]
+    bug_spec = BugSpec(
+        file=bug_spec_dict['file'],
+        function_name=bug_spec_dict['function_name'],
+        original_code=bug_spec_dict['original_code'],
+        buggy_code=bug_spec_dict['buggy_code'],
+        bug_description=bug_spec_dict['bug_description'],
+        bug_category=bug_spec_dict['bug_category'],
+        secondary_changes=secondary_changes,
+    )
+
+    social_artifacts = _mine_social_artifacts(repo_path)
+    social_context = _build_social_context(social_artifacts)
+
+    symptom = await _bug_to_symptom(
+        bug_spec.bug_description, file_path=bug_spec.file, model=model,
+        patch_summary=_summarize_patch(instance.get('patch', '')),
+    )
+    style_examples = _mine_issue_style_examples(repo_path)
+    ctx = _collect_repo_context(repo_path)
+    dataset_examples = _load_dataset_examples(DATASET_PATH, instance['repo'])
+    problem_statement = await generate_issue_from_symptom(
+        symptom=symptom,
+        test_output=pipeline['test_output'],
+        repo_context=ctx,
+        style_examples=style_examples,
+        model=model,
+        social_context=social_context,
+        dataset_examples=dataset_examples,
+        repo_name=Path(repo_path).name,
+        language=pipeline['language'],
+    )
+
+    test_patch = ''
+    try:
+        generated_tp = await generate_test_patch(
+            bug_spec, repo_path, pipeline['language'], model=model,
+            test_output=pipeline['test_output'],
+        )
+        if generated_tp:
+            test_patch = generated_tp
+    except Exception:
+        logger.warning(
+            'test_patch generation failed for %s', instance.get('instance_id'),
+            exc_info=True,
+        )
+
+    instance['problem_statement'] = problem_statement
+    instance['test_patch'] = test_patch
+    instance['_pipeline']['phase'] = 'enriched'
+    return instance
+
+
 def _create_buggy_commit(
     repo_path: str,
     file_rel: str,
@@ -5453,6 +5519,7 @@ async def synthesize_repo(
     _ensure_venv(repo_path, language)
 
     candidates: list[CandidateInstance] = []
+    enrichment_data: dict[str, dict] = {}
     mutations_attempted = 0
 
     for i, target in enumerate(targets[:max_mutations * 8]):
@@ -5791,6 +5858,11 @@ async def synthesize_repo(
             candidate.merge_commit = base_commit
             synthesis_result.instance_id = candidate.instance_id
             candidates.append(candidate)
+            enrichment_data[candidate.instance_id] = {
+                'bug_spec': dataclasses.asdict(bug_spec),
+                'test_output': test_output or '',
+                'language': language,
+            }
             logger.info('  Generated (yield-only): %s (%s)', candidate.instance_id, bug_spec.bug_category)
             continue
 
@@ -5847,6 +5919,11 @@ async def synthesize_repo(
             continue
 
         candidates.append(candidate)
+        enrichment_data[candidate.instance_id] = {
+            'bug_spec': dataclasses.asdict(bug_spec),
+            'test_output': test_output or '',
+            'language': language,
+        }
 
         logger.info(
             "  Generated: %s (%s)", candidate.instance_id, bug_spec.bug_category,
@@ -5865,4 +5942,8 @@ async def synthesize_repo(
         max_mutations,
         mutations_attempted,
     )
-    return RepoSynthesisResult(candidates=candidates, mutations_attempted=mutations_attempted)
+    return RepoSynthesisResult(
+        candidates=candidates,
+        mutations_attempted=mutations_attempted,
+        enrichment_data=enrichment_data,
+    )

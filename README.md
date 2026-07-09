@@ -308,6 +308,52 @@ Current eval targets: Python (`pallets/click`) and Go (`grpc/grpc-go`).
 |----------|-------------|
 | `ANTHROPIC_API_KEY` | Required. Used by Claude to generate mutations and issue text. |
 
+## Synthesis Pipeline Phases
+
+The synthesizer can be run as a full pipeline or broken into independent phases.
+Each phase persists its artifacts to `output/instances/` as JSONL, enabling
+independent iteration on each stage.
+
+### Phase 1: Yield — Generate Mutations
+
+Mutates target functions and verifies that tests break. Saves raw instances
+with mutation metadata for later enrichment.
+
+```bash
+python3 scripts/eval_synthesizer.py --yield-only
+# Output: output/instances/{commit}.jsonl (~5-20 min)
+# Optional: --repo grpc/grpc-go  (filter to one repo)
+```
+
+### Phase 2: Enrich — Generate Issue Text & Test Patches
+
+Takes yield-phase artifacts and generates realistic GitHub issue descriptions
+and regression test patches. This is the phase to iterate on for judge evasion.
+
+```bash
+python3 scripts/eval_synthesizer.py --enrich output/instances/{commit}.jsonl
+# Output: output/instances/{commit}-enriched.jsonl (~2-5 min per instance)
+```
+
+### Phase 3: Judge — Evaluate Evasion
+
+Runs the LLM judge against saved instances (enriched or raw) to measure
+how often synthetic instances fool the judge.
+
+```bash
+python3 scripts/eval_synthesizer.py --judge-only output/instances/{commit}-enriched.jsonl
+# Output: /tmp/synth-eval-results-judge-only.json (~1 min)
+```
+
+### Full Pipeline
+
+Run all phases in one shot (original behavior):
+
+```bash
+python3 scripts/eval_synthesizer.py           # Full eval with F2P + judge
+python3 scripts/eval_synthesizer.py --quick   # Fast mode, no F2P/judge
+```
+
 ## Architecture
 
 SWE-benchify is a **harness**, not an agent framework. It uses the [Claude Code Agent SDK](https://pypi.org/project/claude-code-sdk/) to dispatch Claude Code sessions and collects structured JSON output from each session.
