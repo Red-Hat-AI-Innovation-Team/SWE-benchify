@@ -2616,7 +2616,7 @@ def test_build_social_context_produces_output() -> None:
     non_empty = [r for r in results if r]
     assert len(non_empty) > 0, "should produce non-empty output sometimes"
     for r in non_empty:
-        assert any(s in r for s in ['abc1234', '@Alice', '#42'])
+        assert any(s in r for s in ['@Alice', 'main', 'develop'])
 
 
 def test_build_social_context_empty_artifacts() -> None:
