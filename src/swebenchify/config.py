@@ -6,12 +6,15 @@ values. See docs/SPEC.md Section 6 for the configuration schema.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -279,6 +282,8 @@ def load_config(path: str) -> Config:
     with open(config_path) as f:
         raw = yaml.safe_load(f)
 
+    logger.debug("parsed YAML config from path=%s", path)
+
     if not isinstance(raw, dict):
         raise ValueError("Config file must contain a YAML mapping")
 
@@ -296,6 +301,8 @@ def load_config(path: str) -> Config:
         resolved = _resolve_env_var(token_val)
         if resolved is not None:
             github_tokens[repo_name] = str(resolved)
+        else:
+            logger.warning("token for repo=%s resolved to None, skipping", repo_name)
 
     cfg = Config(
         repos=repos,
@@ -324,4 +331,10 @@ def load_config(path: str) -> Config:
     if not os.access(str(output_path), os.W_OK):
         raise ValueError(f"Output directory is not writable: {cfg.output.dir}")
 
+    go_count = len(cfg.go_repos)
+    rust_count = len(cfg.rust_repos)
+    logger.info(
+        "config loaded: repos=%d, go_repos=%d, rust_repos=%d, output=%s",
+        len(cfg.repos), go_count, rust_count, cfg.output.dir,
+    )
     return cfg
