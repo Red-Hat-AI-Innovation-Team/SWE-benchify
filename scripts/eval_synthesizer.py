@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import concurrent.futures
+import datetime
 import glob
 import json
 import logging
@@ -25,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import defaultdict
 from dataclasses import asdict
 
 # ── Configuration ────────────────────────────────────────────────────────
@@ -431,6 +433,8 @@ def main():
                         help='Measure yield rate only (~5 min). Skips issue generation, test patches, judge, F2P, diversity.')
     parser.add_argument('--repo', type=str, default=None,
                         help='Filter to a specific repo slug (e.g. grpc/grpc-go)')
+    parser.add_argument('-n', '--num-instances', type=int, default=None,
+                        help='Number of instances per repo (default: 2 for yield-only, 5 for full)')
     parser.add_argument('--judge-only', type=str, default=None, metavar='INSTANCES_PATH',
                         help='Path to saved instances JSONL. Skips synthesis, runs judge only.')
     parser.add_argument('--enrich', type=str, default=None, metavar='INSTANCES_PATH',
@@ -554,8 +558,6 @@ def main():
         return
 
     if args.enrich:
-        from collections import defaultdict
-
         instances_path = args.enrich
         if not os.path.isfile(instances_path):
             print(f'File not found: {instances_path}', file=sys.stderr)
@@ -666,16 +668,21 @@ def main():
             if not targets:
                 print(f'No target matching --repo {args.repo!r}', file=sys.stderr)
                 sys.exit(1)
+        n_per_repo = args.num_instances if args.num_instances is not None else 2
         for t in targets:
-            t['n_synthetic'] = 2
+            t['n_synthetic'] = n_per_repo
             t['n_real'] = 0
     elif args.quick:
         targets = [t.copy() for t in EVAL_TARGETS]
+        n_per_repo = args.num_instances if args.num_instances is not None else 3
         for t in targets:
-            t['n_synthetic'] = 3
+            t['n_synthetic'] = n_per_repo
             t['n_real'] = 1
     else:
-        targets = EVAL_TARGETS
+        targets = [t.copy() for t in EVAL_TARGETS] if args.num_instances else EVAL_TARGETS
+        if args.num_instances:
+            for t in targets:
+                t['n_synthetic'] = args.num_instances
 
     log.info("round=%d commit=%s mode=%s", round_num, commit, 'quick' if args.quick else 'full')
     log.info("targets: %s", ', '.join(t['repo_slug'] for t in targets))
@@ -821,30 +828,49 @@ def main():
     n_r = len(all_real_samples)
     log.info("totals: synthetic=%d real=%d", n_s, n_r)
 
-    # Save instances for later judge-only runs
-    instances_dir = os.path.join(PROJECT_ROOT, 'output', 'instances')
-    os.makedirs(instances_dir, exist_ok=True)
-    instances_path = os.path.join(instances_dir, f'{commit}.jsonl')
-    with open(instances_path, 'w') as f:
+    # Save instances per repo for later enrich/judge runs
+    synth_dir = os.path.join(PROJECT_ROOT, 'output', 'synthetic', commit)
+    os.makedirs(synth_dir, exist_ok=True)
+
+    by_repo = defaultdict(list)
+    for inst in all_synth_instances:
+        by_repo[inst.get('repo', 'unknown')].append(inst)
+
+    saved_paths = []
+    for repo_slug, repo_insts in by_repo.items():
+        target = next((t for t in targets if t['repo_slug'] == repo_slug), None)
+        lang = target['language'] if target else 'unknown'
+        safe_slug = repo_slug.replace('/', '__')
+        repo_path = os.path.join(synth_dir, f'{safe_slug}-{lang}.jsonl')
+        with open(repo_path, 'w') as f:
+            for inst in repo_insts:
+                f.write(json.dumps(inst) + '\n')
+        saved_paths.append(repo_path)
+        log.info('saved %d instances to %s', len(repo_insts), repo_path)
+        for inst in repo_insts:
+            iid = inst.get('instance_id', 'unknown')
+            bug_file = inst.get('_pipeline', {}).get('bug_spec', {}).get('file', '?')
+            bug_func = inst.get('_pipeline', {}).get('bug_spec', {}).get('function_name', '?')
+            log.info('  saved: %s %s:%s', iid, bug_file, bug_func)
+
+    combined_path = os.path.join(synth_dir, 'all.jsonl')
+    with open(combined_path, 'w') as f:
         for inst in all_synth_instances:
             f.write(json.dumps(inst) + '\n')
-    log.info('saved %d instances to %s', len(all_synth_instances), instances_path)
-    for inst in all_synth_instances:
-        iid = inst.get('instance_id', 'unknown')
-        repo = inst.get('repo', '?')
-        bug_file = inst.get('_pipeline', {}).get('bug_spec', {}).get('file', '?')
-        bug_func = inst.get('_pipeline', {}).get('bug_spec', {}).get('function_name', '?')
-        log.info('  saved: %s [%s] %s:%s', iid, repo, bug_file, bug_func)
+    log.info('saved combined %d instances to %s', len(all_synth_instances), combined_path)
 
-    meta_path = os.path.join(instances_dir, f'{commit}.meta.json')
+    meta_path = os.path.join(synth_dir, 'meta.json')
     with open(meta_path, 'w') as f:
         json.dump({
             'commit': commit,
-            'timestamp': __import__('datetime').datetime.utcnow().isoformat() + 'Z',
+            'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(),
             'mutations_attempted': total_mutations_attempted,
             'instances_saved': len(all_synth_instances),
             'yield_rate': yield_rate,
-            'repos': [t['repo_slug'] for t in targets],
+            'repos': {
+                slug: len(insts) for slug, insts in by_repo.items()
+            },
+            'files': [os.path.basename(p) for p in saved_paths],
             'mode': 'yield-only' if args.yield_only else ('quick' if args.quick else 'full'),
         }, f, indent=2)
     log.info('saved metadata to %s', meta_path)

@@ -311,7 +311,7 @@ Current eval targets: Python (`pallets/click`) and Go (`grpc/grpc-go`).
 ## Synthesis Pipeline Phases
 
 The synthesizer can be run as a full pipeline or broken into independent phases.
-Each phase persists its artifacts to `output/instances/` as JSONL, enabling
+Each phase persists its artifacts to `output/synthetic/{commit}/` as JSONL, enabling
 independent iteration on each stage.
 
 ### Phase 1: Yield — Generate Mutations
@@ -320,8 +320,11 @@ Mutates target functions and verifies that tests break. Saves raw instances
 with mutation metadata for later enrichment.
 
 ```bash
-python3 scripts/eval_synthesizer.py --yield-only
-# Output: output/instances/{commit}.jsonl (~5-20 min)
+python3 scripts/eval_synthesizer.py --yield-only -n 50
+# Output: output/synthetic/{commit}/ (~90 min for 50/repo)
+#   more-itertools__more-itertools-python.jsonl
+#   grpc__grpc-go-go.jsonl
+#   all.jsonl (combined)
 # Optional: --repo grpc/grpc-go  (filter to one repo)
 ```
 
@@ -331,8 +334,8 @@ Takes yield-phase artifacts and generates realistic GitHub issue descriptions
 and regression test patches. This is the phase to iterate on for judge evasion.
 
 ```bash
-python3 scripts/eval_synthesizer.py --enrich output/instances/{commit}.jsonl
-# Output: output/instances/{commit}-enriched.jsonl (~2-5 min per instance)
+python3 scripts/eval_synthesizer.py --enrich output/synthetic/{commit}/all.jsonl
+# Output: output/synthetic/{commit}/all-enriched.jsonl (~2-5 min per instance)
 ```
 
 ### Phase 3: Judge — Evaluate Evasion
@@ -341,7 +344,7 @@ Runs the LLM judge against saved instances (enriched or raw) to measure
 how often synthetic instances fool the judge.
 
 ```bash
-python3 scripts/eval_synthesizer.py --judge-only output/instances/{commit}-enriched.jsonl
+python3 scripts/eval_synthesizer.py --judge-only output/synthetic/{commit}/all-enriched.jsonl
 # Output: /tmp/synth-eval-results-judge-only.json (~1 min)
 ```
 
