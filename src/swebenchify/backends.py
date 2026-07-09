@@ -44,7 +44,7 @@ class LanguageBackend:
     make_test_cmd: Callable[[AnyEnvironmentSpec], str]
     test_scope: Callable[[str], str]
     normalize_f2p: Callable[[list[str]], list[str]]
-    is_test_hunk: Callable[..., bool] | None = field(default=None)
+    is_test_hunk: Callable[[Any, list[tuple[int, int]] | None], bool] | None = field(default=None)
 
 
 # ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ import json
 import logging
 from pathlib import Path
 
+from swebenchify.backends import get_backend, refine_patch_split
 from swebenchify.collector import collect_prs, load_prs, save_prs
 from swebenchify.config import Config
 from swebenchify.discovery import discover_environment, discover_go_environment, discover_rust_environment
@@ -112,6 +113,19 @@ async def run_repo_pipeline(
     else:
         logger.info("Stage 2: Extracting patches for %s", repo.full_name)
         candidates = extract_all(prs, github_token=repo.access_token)
+
+        # Refine hunk-level patch split for backends with is_test_hunk
+        # (currently Rust, where inline #[cfg(test)] modules live in source files).
+        is_rust_repo = repo.full_name in config.rust_repos
+        if is_rust_repo:
+            backend = get_backend("rust")
+            if backend and backend.is_test_hunk:
+                for c in candidates:
+                    if c.patch:
+                        c.patch, c.test_patch = refine_patch_split(
+                            c.patch, c.test_patch, backend,
+                        )
+
         save_candidates(candidates, str(candidates_file))
 
     # Filter to viable candidates (has patch + test_patch + problem_statement)
