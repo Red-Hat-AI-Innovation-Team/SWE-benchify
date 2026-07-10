@@ -5035,18 +5035,6 @@ async def enrich_instance(
         repo_name=Path(repo_path).name,
         language=pipeline['language'],
     )
-    problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
-
-    if not _verify_issue_independence(problem_statement, bug_spec):
-        for _retry in range(2):
-            problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
-            if _verify_issue_independence(problem_statement, bug_spec):
-                break
-        else:
-            logger.warning('issue leaks identifiers after retries, skipping %s',
-                           instance.get('instance_id'))
-            return None
-
     test_patch = ''
     try:
         generated_tp = await generate_test_patch(
@@ -5060,6 +5048,38 @@ async def enrich_instance(
             'test_patch generation failed for %s', instance.get('instance_id'),
             exc_info=True,
         )
+
+    iid = instance.get('instance_id', 'unknown')
+    max_screen_attempts = 3
+    for screen_attempt in range(max_screen_attempts):
+        social_context = _build_social_context(social_artifacts)
+        _issue_gen_kwargs['social_context'] = social_context
+        problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
+
+        if not _verify_issue_independence(problem_statement, bug_spec):
+            for _retry in range(2):
+                problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
+                if _verify_issue_independence(problem_statement, bug_spec):
+                    break
+            else:
+                logger.warning('issue leaks identifiers after retries, skipping %s', iid)
+                return None
+
+        screen_candidate = CandidateInstance(
+            instance_id=iid, repo=instance.get('repo', ''),
+            pr_number=0, base_commit=instance.get('base_commit', ''),
+            merge_commit=instance.get('merge_commit', ''),
+            patch=instance.get('patch', ''),
+            problem_statement=problem_statement,
+            test_patch=test_patch,
+            hints_text='', created_at='',
+        )
+        if await _self_screen_instance(screen_candidate):
+            logger.info('  self-screen PASSED on attempt %d/%d', screen_attempt + 1, max_screen_attempts)
+            break
+        logger.info('  self-screen failed attempt %d/%d, re-rolling issue text', screen_attempt + 1, max_screen_attempts)
+    else:
+        logger.info('  self-screen failed all %d attempts, keeping last version', max_screen_attempts)
 
     instance['problem_statement'] = problem_statement
     instance['test_patch'] = test_patch
@@ -6016,39 +6036,8 @@ async def synthesize_repo(
             logger.info('%s  === YIELD %d/%d (rate: %.0f%%) ===', pfx, len(candidates), max_mutations, 100 * len(candidates) / mutations_attempted)
             continue
 
-        # H2: Mine social artifacts and build social context
-        social_artifacts = _mine_social_artifacts(repo_path)
-        social_context = _build_social_context(social_artifacts)
-
-        # H1: Information firewall — generate issue from symptom only
-        symptom = await _bug_to_symptom(
-            bug_spec.bug_description, file_path=bug_spec.file, model=model,
-        )
-        style_examples = _mine_issue_style_examples(repo_path)
-        _issue_gen_kwargs = dict(
-            symptom=symptom,
-            test_output=test_output,
-            repo_context=ctx,
-            style_examples=style_examples,
-            model=model,
-            social_context=social_context,
-            dataset_examples=dataset_examples,
-            repo_name=Path(repo_path).name,
-            language=language,
-        )
-        problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
-
-        if not _verify_issue_independence(problem_statement, bug_spec):
-            for _retry in range(2):
-                problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
-                if _verify_issue_independence(problem_statement, bug_spec):
-                    break
-            else:
-                logger.info('%s  Discarded — issue leaks identifiers after retries', pfx)
-                continue
-
+        # Generate test patch once (doesn't vary between screen retries)
         test_patch = ''.join(test_patch_parts)
-
         try:
             generated_tp = await generate_test_patch(
                 bug_spec, repo_path, language, model=model, test_output=test_output,
@@ -6058,23 +6047,69 @@ async def synthesize_repo(
         except Exception:
             logger.warning('%s  test_patch generation failed — using fallback', pfx, exc_info=True)
 
-        synthesis_result = SynthesisResult(
-            bug_spec=bug_spec,
-            patch=patch,
-            problem_statement=problem_statement,
-            instance_id="",
-            base_commit=buggy_commit,
-            test_output=test_output or "",
+        # H1: Information firewall — generate issue from symptom only
+        symptom = await _bug_to_symptom(
+            bug_spec.bug_description, file_path=bug_spec.file, model=model,
+        )
+        style_examples = _mine_issue_style_examples(repo_path)
+        social_artifacts = _mine_social_artifacts(repo_path)
+
+        _issue_gen_kwargs = dict(
+            symptom=symptom,
+            test_output=test_output,
+            repo_context=ctx,
+            style_examples=style_examples,
+            model=model,
+            social_context='',
+            dataset_examples=dataset_examples,
+            repo_name=Path(repo_path).name,
+            language=language,
         )
 
-        candidate = build_candidate(
-            repo_slug, buggy_commit, synthesis_result, test_patch=test_patch,
-        )
-        candidate.merge_commit = base_commit
-        synthesis_result.instance_id = candidate.instance_id
+        max_screen_attempts = 3 if screen_instances else 1
+        problem_statement = None
+        for screen_attempt in range(max_screen_attempts):
+            social_context = _build_social_context(social_artifacts)
+            _issue_gen_kwargs['social_context'] = social_context
+            problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
 
-        if screen_instances and not await _self_screen_instance(candidate):
-            logger.info("%s  Discarded %s — failed self-screening", pfx, candidate.instance_id)
+            if not _verify_issue_independence(problem_statement, bug_spec):
+                for _retry in range(2):
+                    problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
+                    if _verify_issue_independence(problem_statement, bug_spec):
+                        break
+                else:
+                    logger.info('%s  Discarded — issue leaks identifiers after retries', pfx)
+                    problem_statement = None
+                    break
+
+            synthesis_result = SynthesisResult(
+                bug_spec=bug_spec,
+                patch=patch,
+                problem_statement=problem_statement,
+                instance_id="",
+                base_commit=buggy_commit,
+                test_output=test_output or "",
+            )
+            candidate = build_candidate(
+                repo_slug, buggy_commit, synthesis_result, test_patch=test_patch,
+            )
+            candidate.merge_commit = base_commit
+            synthesis_result.instance_id = candidate.instance_id
+
+            if not screen_instances or await _self_screen_instance(candidate):
+                if screen_instances:
+                    logger.info('%s  self-screen PASSED on attempt %d/%d',
+                                pfx, screen_attempt + 1, max_screen_attempts)
+                break
+            logger.info('%s  self-screen failed attempt %d/%d, re-rolling issue text',
+                        pfx, screen_attempt + 1, max_screen_attempts)
+        else:
+            if problem_statement is not None:
+                logger.info('%s  self-screen failed all %d attempts, keeping last version',
+                            pfx, max_screen_attempts)
+
+        if problem_statement is None:
             continue
 
         candidates.append(candidate)
