@@ -609,7 +609,11 @@ def main():
                 iid = inst.get('instance_id', 'unknown')
                 log.info('enriching [%d/%d] %s', i + 1, len(repo_instances), iid)
                 try:
-                    asyncio.run(synth_mod.enrich_instance(inst, repo_path, model=SYNTH_MODEL))
+                    result = asyncio.run(synth_mod.enrich_instance(inst, repo_path, model=SYNTH_MODEL))
+                    if result is None:
+                        log.warning('  skipped %s — issue leaks identifiers', iid)
+                        inst['_pipeline']['phase'] = 'skipped'
+                        continue
                     n_enriched += 1
                     log.info(
                         '  problem_statement=%d chars, test_patch=%d chars',
@@ -632,8 +636,12 @@ def main():
         out_dir = os.path.dirname(instances_path) or '.'
         out_path = os.path.join(out_dir, f'{basename}-enriched.jsonl')
 
+        enriched_instances = [
+            inst for inst in all_instances
+            if inst.get('_pipeline', {}).get('phase') != 'skipped'
+        ]
         with open(out_path, 'w') as f:
-            for inst in all_instances:
+            for inst in enriched_instances:
                 f.write(json.dumps(inst) + '\n')
 
         meta_path = os.path.join(out_dir, f'{basename}-enriched.meta.json')
