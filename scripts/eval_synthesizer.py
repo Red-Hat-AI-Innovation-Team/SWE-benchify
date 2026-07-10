@@ -437,6 +437,8 @@ def main():
                         help='Number of instances per repo (default: 2 for yield-only, 5 for full)')
     parser.add_argument('--judge-only', type=str, default=None, metavar='INSTANCES_PATH',
                         help='Path to saved instances JSONL. Skips synthesis, runs judge only.')
+    parser.add_argument('--judge-runs', type=int, default=1, metavar='N',
+                        help='Number of judge runs to average over (reduces eval noise).')
     parser.add_argument('--enrich', type=str, default=None, metavar='INSTANCES_PATH',
                         help='Enrich yield-only instances with issue text + test patch.')
     args = parser.parse_args()
@@ -485,45 +487,74 @@ def main():
         for inst in real_samples:
             eval_set.append({'instance': inst, 'label': 'REAL'})
 
-        random.shuffle(eval_set)
-        log.info('phase=judge eval_set=%d (synthetic=%d real=%d)', len(eval_set), n_s, n_r)
+        n_judge_runs = max(1, args.judge_runs)
+        all_run_results = []
+        per_instance_fooled: dict[str, int] = defaultdict(int)
+        per_instance_total: dict[str, int] = defaultdict(int)
         judge_start = time.time()
 
-        results = []
-        for i, item in enumerate(eval_set):
-            inst = item['instance']
-            true_label = item['label']
-            iid = inst.get('instance_id', 'unknown')
+        for run_idx in range(n_judge_runs):
+            if n_judge_runs > 1:
+                log.info('=== Judge run %d/%d ===', run_idx + 1, n_judge_runs)
 
-            verdict = judge_instance(inst)
-            predicted = verdict['classification']
-            correct = predicted == true_label
+            random.shuffle(eval_set)
+            log.info('phase=judge eval_set=%d (synthetic=%d real=%d)', len(eval_set), n_s, n_r)
+            run_start = time.time()
 
-            results.append({
-                'instance_id': iid,
-                'true_label': true_label,
-                'predicted': predicted,
-                'confidence': verdict['confidence'],
-                'correct': correct,
-                'reasoning': verdict['reasoning'],
-            })
+            results = []
+            for i, item in enumerate(eval_set):
+                inst = item['instance']
+                true_label = item['label']
+                iid = inst.get('instance_id', 'unknown')
 
-            log.info(
-                'judge [%d/%d] instance=%s true=%s pred=%s conf=%s %s',
-                i + 1, len(eval_set), iid, true_label, predicted,
-                verdict['confidence'], 'CORRECT' if correct else 'WRONG',
-            )
-            log.info('  reason: %s', verdict['reasoning'][:120].replace(chr(10), ' '))
-            synth_so_far = [r for r in results if r['true_label'] == 'SYNTHETIC']
-            if synth_so_far:
-                fooled = sum(1 for r in synth_so_far if not r['correct'])
-                elapsed = time.time() - judge_start
-                log.info('  tally: %d/%d synthetic fooled (%.0f%%), %.0fs elapsed',
-                         fooled, len(synth_so_far), 100 * fooled / len(synth_so_far), elapsed)
+                verdict = judge_instance(inst)
+                predicted = verdict['classification']
+                correct = predicted == true_label
 
-        m = compute_metrics(results)
+                results.append({
+                    'instance_id': iid,
+                    'true_label': true_label,
+                    'predicted': predicted,
+                    'confidence': verdict['confidence'],
+                    'correct': correct,
+                    'reasoning': verdict['reasoning'],
+                    'run': run_idx,
+                })
+
+                if true_label == 'SYNTHETIC':
+                    per_instance_total[iid] += 1
+                    if not correct:
+                        per_instance_fooled[iid] += 1
+
+                log.info(
+                    'judge [%d/%d] instance=%s true=%s pred=%s conf=%s %s',
+                    i + 1, len(eval_set), iid, true_label, predicted,
+                    verdict['confidence'], 'CORRECT' if correct else 'WRONG',
+                )
+                log.info('  reason: %s', verdict['reasoning'][:120].replace(chr(10), ' '))
+                synth_so_far = [r for r in results if r['true_label'] == 'SYNTHETIC']
+                if synth_so_far:
+                    fooled = sum(1 for r in synth_so_far if not r['correct'])
+                    elapsed = time.time() - run_start
+                    log.info('  tally: %d/%d synthetic fooled (%.0f%%), %.0fs elapsed',
+                             fooled, len(synth_so_far), 100 * fooled / len(synth_so_far), elapsed)
+
+            all_run_results.append(results)
+            run_m = compute_metrics(results)
+            run_evasion = 1.0 - run_m['recall']
+            log.info('--- Run %d: %d/%d fooled (evasion: %.0f%%) ---',
+                     run_idx + 1, run_m['fn'], run_m['tp'] + run_m['fn'], run_evasion * 100)
+
+        # Aggregate across runs
+        all_results_flat = [r for run in all_run_results for r in run]
+        m = compute_metrics(all_results_flat)
         recall = m['recall']
         judge_evasion = 1.0 - recall
+
+        per_run_evasions = []
+        for results in all_run_results:
+            rm = compute_metrics(results)
+            per_run_evasions.append(1.0 - rm['recall'])
 
         diversity = compute_diversity(all_synth_instances)
 
@@ -532,26 +563,43 @@ def main():
             json.dump({
                 'source': instances_path,
                 'judge_model': JUDGE_MODEL,
+                'judge_runs': n_judge_runs,
                 'repos': repos_in_instances,
                 'metrics': m,
+                'per_run_evasion': per_run_evasions,
+                'per_instance_fooled': dict(per_instance_fooled),
+                'per_instance_total': dict(per_instance_total),
                 'diversity': diversity,
-                'results': results,
+                'results': all_results_flat,
                 'synthetic_instances': all_synth_instances,
             }, f, indent=2)
         log.info('results saved to %s', out_path)
 
         judge_elapsed = time.time() - judge_start
-        log.info('--- Judge complete: %d/%d fooled in %.0fs (evasion: %.0f%%) ---',
-                 m['fn'], m['tp'] + m['fn'], judge_elapsed, judge_evasion * 100)
+        if n_judge_runs > 1:
+            evasion_pcts = [f'{e:.0%}' for e in per_run_evasions]
+            log.info('=== %d runs complete in %.0fs ===', n_judge_runs, judge_elapsed)
+            log.info('  per-run evasion: %s', ', '.join(evasion_pcts))
+            log.info('  mean evasion: %.1f%%', 100 * sum(per_run_evasions) / len(per_run_evasions))
+            if per_instance_fooled:
+                log.info('  per-instance breakdown (fooled at least once):')
+                for iid in sorted(per_instance_fooled, key=lambda x: -per_instance_fooled[x]):
+                    f_count = per_instance_fooled[iid]
+                    t_count = per_instance_total[iid]
+                    log.info('    %s: %d/%d (%.0f%%)', iid, f_count, t_count, 100 * f_count / t_count)
+        else:
+            log.info('--- Judge complete: %d/%d fooled in %.0fs (evasion: %.0f%%) ---',
+                     m['fn'], m['tp'] + m['fn'], judge_elapsed, judge_evasion * 100)
 
+        mean_evasion = sum(per_run_evasions) / len(per_run_evasions)
+        run_detail = f' (runs: {", ".join(f"{e:.0%}" for e in per_run_evasions)})' if n_judge_runs > 1 else ''
         print(json.dumps({
-            'score': round(judge_evasion, 3),
+            'score': round(mean_evasion, 3),
             'details': (
                 f'JUDGE-ONLY from {os.path.basename(instances_path)}. '
                 f'{n_s} synthetic, {n_r} real. '
-                f'{m["fn"]}/{m["tp"]+m["fn"]} fooled judge. '
-                f'Detection: {recall:.0%}. '
-                f'Judge evasion: {judge_evasion:.0%}. '
+                f'{n_judge_runs} judge run{"s" if n_judge_runs > 1 else ""}. '
+                f'Mean evasion: {mean_evasion:.0%}{run_detail}. '
                 f'Diversity: {diversity["overall"]:.2f}.'
             ),
         }))
