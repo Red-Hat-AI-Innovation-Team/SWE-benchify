@@ -2507,6 +2507,84 @@ def generate_patch(
     return raw
 
 
+def _add_incidental_noise(
+    patch: str, repo_path: str, bug_spec: "BugSpec", language: str,
+) -> str:
+    """Add plausible cosmetic noise hunks to a gold patch ~50% of the time.
+
+    Produces secondary hunks (import reorder, trailing whitespace cleanup,
+    or blank-line normalisation) so the patch looks less minimal.
+    """
+    if random.random() >= 0.5:
+        return patch
+
+    target_file = bug_spec.file
+    target_path = Path(repo_path) / target_file
+    if not target_path.is_file():
+        return patch
+
+    try:
+        content = target_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return patch
+
+    lines = content.splitlines(keepends=True)
+    if not lines:
+        return patch
+
+    strategy = random.choice(["import_reorder", "trailing_ws", "blank_lines"])
+
+    if strategy == "import_reorder":
+        import_start = None
+        import_end = None
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith(("import ", "from ")) and not stripped.startswith("from __future__"):
+                if import_start is None:
+                    import_start = i
+                import_end = i
+            elif import_start is not None and stripped and not stripped.startswith("#"):
+                break
+        if import_start is not None and import_end is not None and import_end > import_start:
+            import_block = lines[import_start:import_end + 1]
+            sorted_block = sorted(import_block, key=lambda s: s.strip().lower())
+            if sorted_block != import_block:
+                new_lines = lines[:import_start] + sorted_block + lines[import_end + 1:]
+                new_content = "".join(new_lines)
+                noise_diff = generate_patch(content, new_content, target_file)
+                if noise_diff:
+                    return patch + noise_diff
+    elif strategy == "trailing_ws":
+        mutated_lines = list(lines)
+        changed = False
+        mut_line = None
+        for i, line in enumerate(lines):
+            if line.rstrip("\n") != line.rstrip():
+                mutated_lines[i] = line.rstrip() + "\n"
+                changed = True
+                if mut_line is None:
+                    mut_line = i
+                if mut_line is not None and i - mut_line >= 2:
+                    break
+        if changed:
+            new_content = "".join(mutated_lines)
+            noise_diff = generate_patch(content, new_content, target_file)
+            if noise_diff:
+                return patch + noise_diff
+    elif strategy == "blank_lines":
+        for i in range(len(lines) - 2):
+            if (lines[i].strip() == "" and
+                    i + 1 < len(lines) and lines[i + 1].strip() == "" and
+                    i + 2 < len(lines) and lines[i + 2].strip() == ""):
+                new_lines = lines[:i] + lines[i + 1:]
+                new_content = "".join(new_lines)
+                noise_diff = generate_patch(content, new_content, target_file)
+                if noise_diff:
+                    return patch + noise_diff
+
+    return patch
+
+
 def _extract_go_error_message(test_output: str) -> str | None:
     """Extract error message details from Go test failure output.
 
@@ -3120,6 +3198,7 @@ async def _generate_issue_few_shot(
     dataset_examples: list[str],
     social_context: str = "",
     model: str = "sonnet",
+    repo_context: dict | None = None,
 ) -> str | None:
     """Generate an issue using real examples as few-shot context.
 
@@ -3134,6 +3213,18 @@ async def _generate_issue_few_shot(
     trimmed = _trim_test_output(test_output, max_lines=40)
     social_note = f"\n\nOptionally end with: {social_context.strip()}" if social_context else ""
 
+    context_hints = ""
+    if repo_context:
+        parts = []
+        if repo_context.get("version"):
+            parts.append(f'v{repo_context["version"]}')
+        if repo_context.get("lang_version"):
+            parts.append(repo_context["lang_version"])
+        if repo_context.get("recent_issues"):
+            parts.append(f'related issues: {random.choice(repo_context["recent_issues"])}')
+        if parts:
+            context_hints = f"\n\nYou may naturally reference these project details (but don't force them): {', '.join(parts)}"
+
     prompt = f"""You are writing a GitHub issue report. Study these real examples from the same repository:
 
 {examples_text}
@@ -3145,7 +3236,7 @@ Test/build output:
 ```
 {trimmed}
 ```
-{social_note}
+{social_note}{context_hints}
 
 Rules:
 - Match the STYLE, TONE, and STRUCTURE of the examples above
@@ -3157,6 +3248,10 @@ Rules:
 - Vary between terse (2 sentences + error) and conversational — match the examples
 - The reporter is frustrated or confused, not analytical
 - If test output is available, paste it as a code block — do NOT explain what it means
+- Include signs of debugging effort: 'I tried X but that didn't help', 'bisected to commit abc', 'started after upgrading to vX.Y'
+- Include environment details naturally: OS, language version, package version — whatever a developer would paste
+- If test output is available, include raw error snippets — do NOT clean them up or format them nicely
+- Real issues are MESSY: partial thoughts, incomplete sentences, tangential details, typos are OK
 - Do NOT start with "I" or "We"
 - Keep it under 200 words
 - Do NOT include a title — just the body"""
@@ -3182,8 +3277,21 @@ async def _rewrite_issue_narrative(
     repo_name: str,
     language: str,
     model: str,
+    repo_context: dict | None = None,
 ) -> str | None:
     """Ask the LLM to rewrite a programmatically assembled draft into a natural issue."""
+    context_rule = ""
+    if repo_context:
+        ctx_parts = []
+        if repo_context.get("version"):
+            ctx_parts.append(f'v{repo_context["version"]}')
+        if repo_context.get("lang_version"):
+            ctx_parts.append(repo_context["lang_version"])
+        if repo_context.get("recent_issues"):
+            ctx_parts.append(f'a related issue ({random.choice(repo_context["recent_issues"])})')
+        if ctx_parts:
+            context_rule = f"\n- You may reference project version ({ctx_parts[0] if ctx_parts else ''}), language version, or mention a related issue if it flows naturally — but don't force it"
+
     prompt = f"""Write a terse GitHub issue as a busy developer who just hit a bug.
 Symptom: {symptom}
 
@@ -3211,6 +3319,9 @@ Rules:
 - Vary length — some issues are 2 sentences, others are a paragraph. Not all issues are the same.
 - If test output is included, just paste it — do NOT explain what it means
 - Do NOT mention that this is a rewrite or that you are an AI
+- Include signs of investigation: what you tried, what you bisected to, when it started
+- Mention environment: OS, language version, or package version if available
+- Real issues are messy — partial thoughts, frustration, tangential details are authentic{context_rule}
 {('- ' + social_context.strip()) if social_context else ''}"""
 
     resolved_model = MODEL_MAP.get(model, model)
@@ -3283,6 +3394,7 @@ async def generate_issue_from_symptom(
             dataset_examples=dataset_examples,
             social_context=social_context,
             model=model,
+            repo_context=repo_context,
         )
         if llm_issue:
             return llm_issue
@@ -3357,6 +3469,17 @@ async def generate_issue_from_symptom(
     if social_context:
         parts.append(social_context.strip())
 
+    if repo_context and random.random() < 0.3:
+        env_parts = []
+        if repo_context.get("lang_version"):
+            env_parts.append(repo_context["lang_version"])
+        if repo_context.get("version"):
+            env_parts.append(f'v{repo_context["version"]}')
+        if repo_context.get("os_info"):
+            env_parts.append(repo_context["os_info"])
+        if env_parts:
+            parts.append(f"\n{', '.join(env_parts)}")
+
     draft = '\n'.join(parts)
 
     rewritten = await _rewrite_issue_narrative(
@@ -3367,6 +3490,7 @@ async def generate_issue_from_symptom(
         repo_name=repo_name or "project",
         language=language or "unknown",
         model=model,
+        repo_context=repo_context,
     )
     return rewritten if rewritten else draft
 
@@ -5839,6 +5963,8 @@ async def synthesize_repo(
                         patched_files.add(inc_path)
                 except OSError:
                     continue
+
+        patch = _add_incidental_noise(patch, repo_path, bug_spec, language)
 
         buggy_commit = _create_buggy_commit_multi(
             repo_path, buggy_files, bug_spec.bug_description,
