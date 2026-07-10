@@ -2507,6 +2507,84 @@ def generate_patch(
     return raw
 
 
+def _add_incidental_noise(
+    patch: str, repo_path: str, bug_spec: "BugSpec", language: str,
+) -> str:
+    """Add plausible cosmetic noise hunks to a gold patch ~50% of the time.
+
+    Produces secondary hunks (import reorder, trailing whitespace cleanup,
+    or blank-line normalisation) so the patch looks less minimal.
+    """
+    if random.random() >= 0.5:
+        return patch
+
+    target_file = bug_spec.file
+    target_path = Path(repo_path) / target_file
+    if not target_path.is_file():
+        return patch
+
+    try:
+        content = target_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return patch
+
+    lines = content.splitlines(keepends=True)
+    if not lines:
+        return patch
+
+    strategy = random.choice(["import_reorder", "trailing_ws", "blank_lines"])
+
+    if strategy == "import_reorder":
+        import_start = None
+        import_end = None
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith(("import ", "from ")) and not stripped.startswith("from __future__"):
+                if import_start is None:
+                    import_start = i
+                import_end = i
+            elif import_start is not None and stripped and not stripped.startswith("#"):
+                break
+        if import_start is not None and import_end is not None and import_end > import_start:
+            import_block = lines[import_start:import_end + 1]
+            sorted_block = sorted(import_block, key=lambda s: s.strip().lower())
+            if sorted_block != import_block:
+                new_lines = lines[:import_start] + sorted_block + lines[import_end + 1:]
+                new_content = "".join(new_lines)
+                noise_diff = generate_patch(content, new_content, target_file)
+                if noise_diff:
+                    return patch + noise_diff
+    elif strategy == "trailing_ws":
+        mutated_lines = list(lines)
+        changed = False
+        mut_line = None
+        for i, line in enumerate(lines):
+            if line.rstrip("\n") != line.rstrip():
+                mutated_lines[i] = line.rstrip() + "\n"
+                changed = True
+                if mut_line is None:
+                    mut_line = i
+                if mut_line is not None and i - mut_line >= 2:
+                    break
+        if changed:
+            new_content = "".join(mutated_lines)
+            noise_diff = generate_patch(content, new_content, target_file)
+            if noise_diff:
+                return patch + noise_diff
+    elif strategy == "blank_lines":
+        for i in range(len(lines) - 2):
+            if (lines[i].strip() == "" and
+                    i + 1 < len(lines) and lines[i + 1].strip() == "" and
+                    i + 2 < len(lines) and lines[i + 2].strip() == ""):
+                new_lines = lines[:i] + lines[i + 1:]
+                new_content = "".join(new_lines)
+                noise_diff = generate_patch(content, new_content, target_file)
+                if noise_diff:
+                    return patch + noise_diff
+
+    return patch
+
+
 def _extract_go_error_message(test_output: str) -> str | None:
     """Extract error message details from Go test failure output.
 
@@ -5839,6 +5917,8 @@ async def synthesize_repo(
                         patched_files.add(inc_path)
                 except OSError:
                     continue
+
+        patch = _add_incidental_noise(patch, repo_path, bug_spec, language)
 
         buggy_commit = _create_buggy_commit_multi(
             repo_path, buggy_files, bug_spec.bug_description,
