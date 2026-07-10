@@ -437,8 +437,8 @@ def main():
                         help='Number of instances per repo (default: 2 for yield-only, 5 for full)')
     parser.add_argument('--judge-only', type=str, default=None, metavar='INSTANCES_PATH',
                         help='Path to saved instances JSONL. Skips synthesis, runs judge only.')
-    parser.add_argument('--judge-runs', type=int, default=1, metavar='N',
-                        help='Number of judge runs to average over (reduces eval noise).')
+    parser.add_argument('--judge-runs', type=int, default=3, metavar='N',
+                        help='Number of judge runs to average over (reduces eval noise). Default: 3.')
     parser.add_argument('--enrich', type=str, default=None, metavar='INSTANCES_PATH',
                         help='Enrich yield-only instances with issue text + test patch.')
     args = parser.parse_args()
