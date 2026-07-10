@@ -2288,23 +2288,41 @@ def _count_changed_lines(patch: str) -> int:
     return count
 
 
+def _last_xml_block(text: str, tag: str) -> str | None:
+    """Extract the content of the LAST occurrence of <tag>...</tag> in text.
+
+    Uses rfind so that when the LLM self-corrects and emits two blocks (the
+    first often closed with a misspelled tag), we always get the final block.
+    A regex approach with re.search would instead span from the first opening
+    to the last closing, swallowing the mid-stream reasoning text.
+    """
+    open_tag = f"<{tag}>"
+    close_tag = f"</{tag}>"
+    last_open = text.rfind(open_tag)
+    if last_open == -1:
+        return None
+    suffix = text[last_open + len(open_tag):]
+    close_pos = suffix.find(close_tag)
+    if close_pos == -1:
+        return None
+    return suffix[:close_pos].strip()
+
+
 def _parse_bug_response(text: str, target: dict) -> BugSpec | None:
     """Parse LLM response to extract bug specification."""
-    cat_match = re.search(
-        r"<bug_category>\s*(.*?)\s*</bug_category>", text, re.DOTALL
-    )
-    desc_match = re.search(
-        r"<bug_description>\s*(.*?)\s*</bug_description>", text, re.DOTALL
-    )
-    code_match = re.search(
-        r"<buggy_code>\s*(.*?)\s*</buggy_code>", text, re.DOTALL
-    )
+    category_raw = _last_xml_block(text, "bug_category")
+    description_raw = _last_xml_block(text, "bug_description")
+    buggy_code_raw = _last_xml_block(text, "buggy_code")
 
-    if not code_match:
+    if buggy_code_raw is None:
         logger.warning("Could not parse buggy_code from LLM response")
         return None
 
-    buggy_code = code_match.group(1).strip()
+    if re.search(r"</?bugg?y?_?code>", buggy_code_raw):
+        logger.warning("buggy_code contains leaked XML tags — LLM response malformed")
+        return None
+
+    buggy_code = buggy_code_raw
     if buggy_code.startswith("```"):
         lines = buggy_code.splitlines()
         lines = lines[1:]  # remove opening ```lang
@@ -2320,8 +2338,8 @@ def _parse_bug_response(text: str, target: dict) -> BugSpec | None:
         logger.warning("LLM returned identical code — no bug introduced")
         return None
 
-    category = cat_match.group(1).strip() if cat_match else "unknown"
-    description = desc_match.group(1).strip() if desc_match else "Bug introduced in function"
+    category = category_raw if category_raw else "unknown"
+    description = description_raw if description_raw else "Bug introduced in function"
 
     secondary_changes = _parse_secondary_changes(text)
 
@@ -2994,7 +3012,6 @@ async def _bug_to_symptom(
     bug_description: str,
     file_path: str = '',
     model: str = "sonnet",
-    patch_summary: str = '',
 ) -> str:
     """Convert a code-level bug description to a user-facing symptom.
 
@@ -3004,24 +3021,26 @@ async def _bug_to_symptom(
     file_context = ''
     if file_path:
         module = Path(file_path).stem
-        file_context = f'\nThe bug is in the {module} module ({file_path}). The symptom MUST be about {module} functionality specifically.'
+        file_context = f'\nContext: this affects the {module} area. Do NOT use the word "{module}", any filename, or any package name in the symptom — describe user-observable behavior only.'
 
-    patch_context = ''
-    if patch_summary:
-        patch_context = f'\nThe fix touches: {patch_summary}. The symptom should align with what these changes address.'
-
-    prompt = f"""Convert this developer-level bug description into a user-facing symptom. Keep the FUNCTIONAL AREA (what part of the system is affected — e.g., "time duration handling", "CLI startup", "RST link parsing") but remove the specific code-level fix details (no operator names like `>=`, no variable names, no exact condition logic).
+    prompt = f"""Convert this developer-level bug description into a symptom that a user filing a bug report would describe. The reporter does NOT know which function or file is broken — they only know what behavior they observed.
 
 Bug description: {bug_description}
-{file_context}{patch_context}
+{file_context}
 
-Return ONLY the symptom in one sentence. Examples:
-- "split() instead of rsplit() in custom Sphinx role parser" → "RST documentation rendering breaks certain link syntax"
-- "timedelta(minutes=value) should be timedelta(seconds=value)" → "time duration handling uses wrong units, causing timeouts or delays"
-- "inverted boolean in error handler catches wrong exception type" → "error handling catches the wrong exception type, masking real errors"
-- "off-by-one in loop causes missing last element" → "list processing skips the last item"
+Rules:
+- Describe the OBSERVABLE CONSEQUENCE: what goes wrong at the application or API level
+- Do NOT mention file names, module names, package names, function names, method names, variable names, or operators
+- Do NOT describe the code mechanism — describe what the system does wrong
+- Prefer framing as a violated expectation or semantic inconsistency: "X should reject Y but doesn't", "A happens when B is expected", "Z silently does nothing"
+- Add one level of indirection: instead of "function returns wrong type", write "processing Y produces incorrect output" or "operation silently fails"
 
-The symptom MUST stay in the same domain as the bug — if the bug is about Sphinx role parsing, the symptom must be about documentation rendering, not something generic like "incorrect results".
+Examples:
+- "split() instead of rsplit() in custom Sphinx role parser" → "certain cross-reference links fail to render in projects that use them"
+- "timedelta(minutes=value) should be timedelta(seconds=value)" → "operations that should time out quickly take much longer than expected, or vice versa"
+- "inverted boolean in error handler catches wrong exception type" → "some errors are silently swallowed instead of being surfaced to the caller"
+- "off-by-one in loop causes missing last element" → "the last item in a collection is not processed"
+- "missing len() check allows empty list to pass validation" → "configurations with no entries are accepted without error, causing silent no-op behavior"
 
 Respond with ONLY the symptom sentence, nothing else."""
 
@@ -3131,6 +3150,9 @@ Test/build output:
 Rules:
 - Match the STYLE, TONE, and STRUCTURE of the examples above
 - Describe SYMPTOMS only — the reporter does NOT know which function or line is broken
+- Do NOT mention any module name, package name, filename, or file path
+- Do NOT name any specific function, method, class, or variable — paraphrase if the symptom contains one
+- Describe what went WRONG from a user perspective, not which code component is broken
 - Do NOT use structured 'Expected/Actual/Steps to reproduce' format unless the examples use it
 - Vary between terse (2 sentences + error) and conversational — match the examples
 - The reporter is frustrated or confused, not analytical
@@ -3182,6 +3204,9 @@ Rules:
 - NEVER diagnose the root cause or mention which function is broken — describe SYMPTOMS only
 - Write as if you are REPORTING symptoms you observed, NOT diagnosing a bug you understand
 - You do NOT know which function, file, or line of code is responsible
+- Do NOT mention any module name, package name, filename, or file path
+- Do NOT name any specific function, method, class, or variable — paraphrase if the symptom contains one
+- Describe what went WRONG from a user perspective, not which code component is broken
 - Do NOT use the word 'regression' — most real reporters don't know if it worked before
 - Vary length — some issues are 2 sentences, others are a paragraph. Not all issues are the same.
 - If test output is included, just paste it — do NOT explain what it means
@@ -4905,7 +4930,6 @@ async def enrich_instance(
 
     symptom = await _bug_to_symptom(
         bug_spec.bug_description, file_path=bug_spec.file, model=model,
-        patch_summary=_summarize_patch(instance.get('patch', '')),
     )
     style_examples = _mine_issue_style_examples(repo_path)
     ctx = _collect_repo_context(repo_path)
@@ -5898,7 +5922,6 @@ async def synthesize_repo(
         # H1: Information firewall — generate issue from symptom only
         symptom = await _bug_to_symptom(
             bug_spec.bug_description, file_path=bug_spec.file, model=model,
-            patch_summary=_summarize_patch(patch),
         )
         style_examples = _mine_issue_style_examples(repo_path)
         problem_statement = await generate_issue_from_symptom(
