@@ -2900,6 +2900,8 @@ def _mine_social_artifacts(repo_path: str) -> dict[str, list[str]]:
         "shas": [],
         "issues": [],
         "branches": [],
+        "github_handles": [],
+        "version_tags": [],
     }
 
     try:
@@ -2915,6 +2917,27 @@ def _mine_social_artifacts(repo_path: str) -> dict[str, list[str]]:
                 artifacts["contributors"].append(name)
             if len(artifacts["contributors"]) >= 20:
                 break
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    try:
+        result = subprocess.run(
+            ["git", "log", "--format=%aE", "-200"],
+            cwd=repo_path, capture_output=True, text=True, check=True,
+        )
+        handles: list[str] = []
+        seen_handles: set[str] = set()
+        for email in result.stdout.strip().splitlines():
+            email = email.strip()
+            m = re.match(r'(?:\d+\+)?([^@]+)@users\.noreply\.github\.com', email)
+            if m:
+                handle = m.group(1)
+                if handle not in seen_handles:
+                    seen_handles.add(handle)
+                    handles.append(handle)
+            if len(handles) >= 10:
+                break
+        artifacts["github_handles"] = handles
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
 
@@ -2948,33 +2971,65 @@ def _mine_social_artifacts(repo_path: str) -> dict[str, list[str]]:
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
 
+    try:
+        result = subprocess.run(
+            ["git", "tag", "--sort=-version:refname"],
+            cwd=repo_path, capture_output=True, text=True, check=True,
+        )
+        tags = []
+        for tag in result.stdout.strip().splitlines():
+            tag = tag.strip()
+            if tag and re.match(r'v?\d+\.\d+', tag):
+                tags.append(tag)
+            if len(tags) >= 10:
+                break
+        artifacts["version_tags"] = tags
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
     return artifacts
 
 
 def _build_social_context(artifacts: dict[str, list[str]]) -> str:
-    """Build social context string from mined artifacts."""
-    contributors = artifacts.get('contributors', [])
-    branches = artifacts.get('branches', [])
+    """Build social context from real repo data."""
+    options: list[str] = []
 
-    fallback_styles: list[str] = []
-    if contributors:
-        contributor = random.choice(contributors)
-        fallback_styles.extend([
-            f'@{contributor.replace(" ", "")} might have context here.',
-            f'cc @{contributor.replace(" ", "")} — have you seen this before?',
-            f'@{contributor.replace(" ", "")} this looks like it could be in your area.',
+    github_handles = artifacts.get('github_handles', [])
+    if github_handles:
+        handle = random.choice(github_handles)
+        options.extend([
+            f'cc @{handle}',
+            f'@{handle} might have context here.',
+            f'@{handle} this looks like it could be in your area.',
         ])
+
+    branches = artifacts.get('branches', [])
     if branches:
         branch = random.choice(branches)
-        fallback_styles.extend([
+        options.extend([
             f'I noticed this on the {branch} branch.',
             f'Reproduces on {branch}.',
             f'Seeing this on {branch}, not sure about main.',
         ])
 
-    if not fallback_styles:
-        return ""
-    return "\n\n" + random.choice(fallback_styles)
+    version_tags = artifacts.get('version_tags', [])
+    issues = artifacts.get('issues', [])
+    if version_tags:
+        tag = random.choice(version_tags[:5])
+        options.extend([
+            f'Started seeing this after upgrading to {tag}.',
+            f'Reproduces on {tag}, not sure about earlier versions.',
+        ])
+    if issues:
+        issue = random.choice(issues)
+        options.extend([
+            f'Might be related to #{issue}.',
+            f'Similar to #{issue} but different symptom.',
+        ])
+
+    if not options:
+        return ''
+    return '\n\n' + random.choice(options)
 
 
 def _find_file_commits(
@@ -3133,6 +3188,7 @@ async def _generate_issue_few_shot(
     )
     trimmed = _trim_test_output(test_output, max_lines=40)
     social_note = f"\n\nOptionally end with: {social_context.strip()}" if social_context else ""
+    version_note = f'\nContext that may be naturally referenced: {social_context.strip()}' if social_context else ''
 
     prompt = f"""You are writing a GitHub issue report. Study these real examples from the same repository:
 
@@ -3145,7 +3201,7 @@ Test/build output:
 ```
 {trimmed}
 ```
-{social_note}
+{social_note}{version_note}
 
 Rules:
 - Match the STYLE, TONE, and STRUCTURE of the examples above
@@ -3484,6 +3540,67 @@ async def generate_issue_description(
         style_examples=style_examples,
         model=model,
     )
+
+
+_COMMON_KEYWORDS = frozenset({
+    'return', 'if', 'for', 'def', 'func', 'var', 'nil', 'None', 'err',
+    'error', 'self', 'true', 'false', 'import', 'from', 'class', 'struct',
+    'interface', 'package', 'const', 'type', 'else', 'elif', 'while',
+    'break', 'continue', 'pass', 'raise', 'yield', 'with', 'as', 'try',
+    'except', 'finally', 'lambda', 'and', 'or', 'not', 'in', 'is',
+    'assert', 'del', 'print', 'global', 'nonlocal', 'async', 'await',
+})
+
+
+def _verify_issue_independence(problem_statement: str, bug_spec: BugSpec) -> bool:
+    """Check whether the issue text leaks patch-specific identifiers."""
+    ps_lower = problem_statement.lower()
+
+    if bug_spec.function_name and bug_spec.function_name.lower() in ps_lower:
+        return False
+
+    basename = Path(bug_spec.file).name if bug_spec.file else ''
+    if basename and basename.lower() in ps_lower:
+        return False
+
+    identifiers: set[str] = set()
+    for token in re.findall(r'[A-Za-z_][A-Za-z0-9_]*', bug_spec.buggy_code):
+        if len(token) > 5 and token not in _COMMON_KEYWORDS:
+            identifiers.add(token.lower())
+
+    for ident in identifiers:
+        if ident in ps_lower:
+            return False
+
+    return True
+
+
+def _scrub_leaked_names(problem_statement: str, bug_spec: BugSpec) -> str:
+    """Strip leaked filenames, function names, and module names from the issue."""
+    terms: dict[str, str] = {}
+
+    if bug_spec.file:
+        p = Path(bug_spec.file)
+        terms[p.name] = 'the affected code'
+        terms[p.stem] = 'the relevant module'
+        if str(bug_spec.file) != p.name:
+            terms[str(bug_spec.file)] = 'the affected code'
+
+    if bug_spec.function_name:
+        terms[bug_spec.function_name] = 'the affected function'
+
+    for sc in bug_spec.secondary_changes:
+        sp = Path(sc.file)
+        terms[sp.name] = 'the affected code'
+        terms[sp.stem] = 'the relevant module'
+
+    result = problem_statement
+    for term in sorted(terms, key=len, reverse=True):
+        if term and len(term) > 2:
+            pattern = re.compile(re.escape(term), re.IGNORECASE)
+            result = pattern.sub(terms[term], result)
+
+    return result
 
 
 def _find_go_cross_package_test(repo_path: str, function_name: str) -> str | None:
@@ -4909,7 +5026,7 @@ async def enrich_instance(
     style_examples = _mine_issue_style_examples(repo_path)
     ctx = _collect_repo_context(repo_path)
     dataset_examples = _load_dataset_examples(DATASET_PATH, instance['repo'])
-    problem_statement = await generate_issue_from_symptom(
+    _issue_gen_kwargs = dict(
         symptom=symptom,
         test_output=pipeline['test_output'],
         repo_context=ctx,
@@ -4920,6 +5037,17 @@ async def enrich_instance(
         repo_name=Path(repo_path).name,
         language=pipeline['language'],
     )
+    problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
+
+    if not _verify_issue_independence(problem_statement, bug_spec):
+        for _retry in range(2):
+            problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
+            if _verify_issue_independence(problem_statement, bug_spec):
+                break
+        else:
+            problem_statement = _scrub_leaked_names(problem_statement, bug_spec)
+
+    problem_statement = _scrub_leaked_names(problem_statement, bug_spec)
 
     test_patch = ''
     try:
@@ -5899,7 +6027,7 @@ async def synthesize_repo(
             bug_spec.bug_description, file_path=bug_spec.file, model=model,
         )
         style_examples = _mine_issue_style_examples(repo_path)
-        problem_statement = await generate_issue_from_symptom(
+        _issue_gen_kwargs = dict(
             symptom=symptom,
             test_output=test_output,
             repo_context=ctx,
@@ -5910,6 +6038,17 @@ async def synthesize_repo(
             repo_name=Path(repo_path).name,
             language=language,
         )
+        problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
+
+        if not _verify_issue_independence(problem_statement, bug_spec):
+            for _retry in range(2):
+                problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
+                if _verify_issue_independence(problem_statement, bug_spec):
+                    break
+            else:
+                problem_statement = _scrub_leaked_names(problem_statement, bug_spec)
+
+        problem_statement = _scrub_leaked_names(problem_statement, bug_spec)
 
         test_patch = ''.join(test_patch_parts)
 
