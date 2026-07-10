@@ -3552,55 +3552,53 @@ _COMMON_KEYWORDS = frozenset({
 })
 
 
-def _verify_issue_independence(problem_statement: str, bug_spec: BugSpec) -> bool:
-    """Check whether the issue text leaks patch-specific identifiers."""
-    ps_lower = problem_statement.lower()
+def _is_code_identifier(token: str) -> bool:
+    """Return True if token looks like a code identifier rather than English."""
+    if '_' in token:
+        return True
+    if any(c.isupper() for c in token[1:]):
+        return True
+    if token.isupper():
+        return True
+    return False
 
-    if bug_spec.function_name and bug_spec.function_name.lower() in ps_lower:
+
+def _extract_narrative(text: str) -> str:
+    """Return text outside of code blocks — the prose a human wrote."""
+    parts = re.split(r'```[^`]*```', text, flags=re.DOTALL)
+    return ' '.join(parts).lower()
+
+
+def _verify_issue_independence(problem_statement: str, bug_spec: BugSpec) -> bool:
+    """Check whether the issue narrative leaks patch-specific identifiers.
+
+    Only checks prose text outside code blocks — identifiers appearing
+    inside pasted test output / stack traces are natural and expected.
+    Only flags tokens that look like code identifiers (camelCase,
+    snake_case, UPPER_CASE) rather than plain English words.
+    """
+    narrative = _extract_narrative(problem_statement)
+
+    fn = bug_spec.function_name
+    if fn and _is_code_identifier(fn) and fn.lower() in narrative:
         return False
 
     basename = Path(bug_spec.file).name if bug_spec.file else ''
-    if basename and basename.lower() in ps_lower:
+    if basename and basename.lower() in narrative:
         return False
 
     identifiers: set[str] = set()
     for token in re.findall(r'[A-Za-z_][A-Za-z0-9_]*', bug_spec.buggy_code):
-        if len(token) > 5 and token not in _COMMON_KEYWORDS:
+        if len(token) > 5 and token not in _COMMON_KEYWORDS and _is_code_identifier(token):
             identifiers.add(token.lower())
 
     for ident in identifiers:
-        if ident in ps_lower:
+        if ident in narrative:
             return False
 
     return True
 
 
-def _scrub_leaked_names(problem_statement: str, bug_spec: BugSpec) -> str:
-    """Strip leaked filenames, function names, and module names from the issue."""
-    terms: dict[str, str] = {}
-
-    if bug_spec.file:
-        p = Path(bug_spec.file)
-        terms[p.name] = 'the affected code'
-        terms[p.stem] = 'the relevant module'
-        if str(bug_spec.file) != p.name:
-            terms[str(bug_spec.file)] = 'the affected code'
-
-    if bug_spec.function_name:
-        terms[bug_spec.function_name] = 'the affected function'
-
-    for sc in bug_spec.secondary_changes:
-        sp = Path(sc.file)
-        terms[sp.name] = 'the affected code'
-        terms[sp.stem] = 'the relevant module'
-
-    result = problem_statement
-    for term in sorted(terms, key=len, reverse=True):
-        if term and len(term) > 2:
-            pattern = re.compile(re.escape(term), re.IGNORECASE)
-            result = pattern.sub(terms[term], result)
-
-    return result
 
 
 def _find_go_cross_package_test(repo_path: str, function_name: str) -> str | None:
@@ -4998,7 +4996,7 @@ async def enrich_instance(
     instance: dict,
     repo_path: str,
     model: str = 'sonnet',
-) -> dict:
+) -> dict | None:
     pipeline = instance.get('_pipeline')
     if not pipeline:
         raise ValueError("Instance missing '_pipeline' metadata — was it produced with --yield-only?")
@@ -5045,9 +5043,9 @@ async def enrich_instance(
             if _verify_issue_independence(problem_statement, bug_spec):
                 break
         else:
-            problem_statement = _scrub_leaked_names(problem_statement, bug_spec)
-
-    problem_statement = _scrub_leaked_names(problem_statement, bug_spec)
+            logger.warning('issue leaks identifiers after retries, skipping %s',
+                           instance.get('instance_id'))
+            return None
 
     test_patch = ''
     try:
@@ -6046,9 +6044,8 @@ async def synthesize_repo(
                 if _verify_issue_independence(problem_statement, bug_spec):
                     break
             else:
-                problem_statement = _scrub_leaked_names(problem_statement, bug_spec)
-
-        problem_statement = _scrub_leaked_names(problem_statement, bug_spec)
+                logger.info('%s  Discarded — issue leaks identifiers after retries', pfx)
+                continue
 
         test_patch = ''.join(test_patch_parts)
 
