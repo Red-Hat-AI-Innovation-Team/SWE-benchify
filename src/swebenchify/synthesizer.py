@@ -2900,6 +2900,8 @@ def _mine_social_artifacts(repo_path: str) -> dict[str, list[str]]:
         "shas": [],
         "issues": [],
         "branches": [],
+        "github_handles": [],
+        "version_tags": [],
     }
 
     try:
@@ -2915,6 +2917,27 @@ def _mine_social_artifacts(repo_path: str) -> dict[str, list[str]]:
                 artifacts["contributors"].append(name)
             if len(artifacts["contributors"]) >= 20:
                 break
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    try:
+        result = subprocess.run(
+            ["git", "log", "--format=%aE", "-200"],
+            cwd=repo_path, capture_output=True, text=True, check=True,
+        )
+        handles: list[str] = []
+        seen_handles: set[str] = set()
+        for email in result.stdout.strip().splitlines():
+            email = email.strip()
+            m = re.match(r'(?:\d+\+)?([^@]+)@users\.noreply\.github\.com', email)
+            if m:
+                handle = m.group(1)
+                if handle not in seen_handles:
+                    seen_handles.add(handle)
+                    handles.append(handle)
+            if len(handles) >= 10:
+                break
+        artifacts["github_handles"] = handles
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
 
@@ -2948,21 +2971,65 @@ def _mine_social_artifacts(repo_path: str) -> dict[str, list[str]]:
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
 
+    try:
+        result = subprocess.run(
+            ["git", "tag", "--sort=-version:refname"],
+            cwd=repo_path, capture_output=True, text=True, check=True,
+        )
+        tags = []
+        for tag in result.stdout.strip().splitlines():
+            tag = tag.strip()
+            if tag and re.match(r'v?\d+\.\d+', tag):
+                tags.append(tag)
+            if len(tags) >= 10:
+                break
+        artifacts["version_tags"] = tags
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
     return artifacts
 
 
 def _build_social_context(artifacts: dict[str, list[str]]) -> str:
-    """Build social context string from mined artifacts."""
+    """Build social context from real repo data."""
+    options: list[str] = []
+
+    github_handles = artifacts.get('github_handles', [])
+    if github_handles:
+        handle = random.choice(github_handles)
+        options.extend([
+            f'cc @{handle}',
+            f'@{handle} might have context here.',
+            f'@{handle} this looks like it could be in your area.',
+        ])
+
     branches = artifacts.get('branches', [])
-    if not branches:
+    if branches:
+        branch = random.choice(branches)
+        options.extend([
+            f'I noticed this on the {branch} branch.',
+            f'Reproduces on {branch}.',
+            f'Seeing this on {branch}, not sure about main.',
+        ])
+
+    version_tags = artifacts.get('version_tags', [])
+    issues = artifacts.get('issues', [])
+    if version_tags:
+        tag = random.choice(version_tags[:5])
+        options.extend([
+            f'Started seeing this after upgrading to {tag}.',
+            f'Reproduces on {tag}, not sure about earlier versions.',
+        ])
+    if issues:
+        issue = random.choice(issues)
+        options.extend([
+            f'Might be related to #{issue}.',
+            f'Similar to #{issue} but different symptom.',
+        ])
+
+    if not options:
         return ''
-    branch = random.choice(branches)
-    styles = [
-        f'I noticed this on the {branch} branch.',
-        f'Reproduces on {branch}.',
-        f'Seeing this on {branch}, not sure about main.',
-    ]
-    return '\n\n' + random.choice(styles)
+    return '\n\n' + random.choice(options)
 
 
 def _find_file_commits(
@@ -3121,6 +3188,7 @@ async def _generate_issue_few_shot(
     )
     trimmed = _trim_test_output(test_output, max_lines=40)
     social_note = f"\n\nOptionally end with: {social_context.strip()}" if social_context else ""
+    version_note = f'\nContext that may be naturally referenced: {social_context.strip()}' if social_context else ''
 
     prompt = f"""You are writing a GitHub issue report. Study these real examples from the same repository:
 
@@ -3133,7 +3201,7 @@ Test/build output:
 ```
 {trimmed}
 ```
-{social_note}
+{social_note}{version_note}
 
 Rules:
 - Match the STYLE, TONE, and STRUCTURE of the examples above

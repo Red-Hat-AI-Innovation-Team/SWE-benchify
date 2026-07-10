@@ -2611,12 +2611,14 @@ def test_build_social_context_produces_output() -> None:
         "shas": ["abc1234"],
         "issues": ["42"],
         "branches": ["main", "develop"],
+        "github_handles": ["alice-dev"],
+        "version_tags": ["v2.1.0"],
     }
     results = [_build_social_context(artifacts) for _ in range(100)]
     non_empty = [r for r in results if r]
     assert len(non_empty) > 0, "should produce non-empty output sometimes"
     for r in non_empty:
-        assert any(s in r for s in ['@Alice', 'main', 'develop'])
+        assert any(s in r for s in ['@alice-dev', 'main', 'develop', 'v2.1.0', '#42'])
 
 
 def test_build_social_context_empty_artifacts() -> None:
@@ -2625,6 +2627,8 @@ def test_build_social_context_empty_artifacts() -> None:
         "shas": [],
         "issues": [],
         "branches": [],
+        "github_handles": [],
+        "version_tags": [],
     }
     result = _build_social_context(artifacts)
     assert result == ""
