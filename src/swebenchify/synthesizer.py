@@ -5050,7 +5050,7 @@ async def enrich_instance(
         )
 
     iid = instance.get('instance_id', 'unknown')
-    max_screen_attempts = 3
+    max_screen_attempts = 5
     for screen_attempt in range(max_screen_attempts):
         social_context = _build_social_context(social_artifacts)
         _issue_gen_kwargs['social_context'] = social_context
@@ -5079,7 +5079,8 @@ async def enrich_instance(
             break
         logger.info('  self-screen failed attempt %d/%d, re-rolling issue text', screen_attempt + 1, max_screen_attempts)
     else:
-        logger.info('  self-screen failed all %d attempts, keeping last version', max_screen_attempts)
+        logger.info('  self-screen failed all %d attempts, discarding', max_screen_attempts)
+        return None
 
     instance['problem_statement'] = problem_statement
     instance['test_patch'] = test_patch
@@ -6066,7 +6067,7 @@ async def synthesize_repo(
             language=language,
         )
 
-        max_screen_attempts = 3 if screen_instances else 1
+        max_screen_attempts = 5 if screen_instances else 1
         problem_statement = None
         for screen_attempt in range(max_screen_attempts):
             social_context = _build_social_context(social_artifacts)
@@ -6106,8 +6107,9 @@ async def synthesize_repo(
                         pfx, screen_attempt + 1, max_screen_attempts)
         else:
             if problem_statement is not None:
-                logger.info('%s  self-screen failed all %d attempts, keeping last version',
+                logger.info('%s  self-screen failed all %d attempts, discarding',
                             pfx, max_screen_attempts)
+                continue
 
         if problem_statement is None:
             continue
