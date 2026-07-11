@@ -3572,10 +3572,13 @@ def _extract_narrative(text: str) -> str:
 def _verify_issue_independence(problem_statement: str, bug_spec: BugSpec) -> bool:
     """Check whether the issue narrative leaks patch-specific identifiers.
 
+    Only checks the function name and filename — these directly reveal
+    the patch location.  Code-body identifiers are too broad (the full
+    function body contains dozens of common type/variable names that
+    naturally appear in any description of the subsystem).
+
     Only checks prose text outside code blocks — identifiers appearing
     inside pasted test output / stack traces are natural and expected.
-    Only flags tokens that look like code identifiers (camelCase,
-    snake_case, UPPER_CASE) rather than plain English words.
     """
     narrative = _extract_narrative(problem_statement)
 
@@ -3586,15 +3589,6 @@ def _verify_issue_independence(problem_statement: str, bug_spec: BugSpec) -> boo
     basename = Path(bug_spec.file).name if bug_spec.file else ''
     if basename and basename.lower() in narrative:
         return False
-
-    identifiers: set[str] = set()
-    for token in re.findall(r'[A-Za-z_][A-Za-z0-9_]*', bug_spec.buggy_code):
-        if len(token) > 5 and token not in _COMMON_KEYWORDS and _is_code_identifier(token):
-            identifiers.add(token.lower())
-
-    for ident in identifiers:
-        if ident in narrative:
-            return False
 
     return True
 
@@ -5062,8 +5056,9 @@ async def enrich_instance(
                 if _verify_issue_independence(problem_statement, bug_spec):
                     break
             else:
-                logger.warning('issue leaks identifiers after retries, skipping %s', iid)
-                return None
+                logger.info('  issue leaks identifiers on attempt %d/%d, re-rolling',
+                            screen_attempt + 1, max_screen_attempts)
+                continue
 
         screen_candidate = CandidateInstance(
             instance_id=iid, repo=instance.get('repo', ''),
@@ -5079,7 +5074,7 @@ async def enrich_instance(
             break
         logger.info('  self-screen failed attempt %d/%d, re-rolling issue text', screen_attempt + 1, max_screen_attempts)
     else:
-        logger.info('  self-screen failed all %d attempts, discarding', max_screen_attempts)
+        logger.info('  screening failed all %d attempts (independence or self-screen), discarding', max_screen_attempts)
         return None
 
     instance['problem_statement'] = problem_statement
@@ -6080,9 +6075,9 @@ async def synthesize_repo(
                     if _verify_issue_independence(problem_statement, bug_spec):
                         break
                 else:
-                    logger.info('%s  Discarded — issue leaks identifiers after retries', pfx)
-                    problem_statement = None
-                    break
+                    logger.info('%s  issue leaks identifiers on attempt %d/%d, re-rolling',
+                                pfx, screen_attempt + 1, max_screen_attempts)
+                    continue
 
             synthesis_result = SynthesisResult(
                 bug_spec=bug_spec,
@@ -6106,12 +6101,8 @@ async def synthesize_repo(
             logger.info('%s  self-screen failed attempt %d/%d, re-rolling issue text',
                         pfx, screen_attempt + 1, max_screen_attempts)
         else:
-            if problem_statement is not None:
-                logger.info('%s  self-screen failed all %d attempts, discarding',
-                            pfx, max_screen_attempts)
-                continue
-
-        if problem_statement is None:
+            logger.info('%s  screening failed all %d attempts (independence or self-screen), discarding',
+                        pfx, max_screen_attempts)
             continue
 
         candidates.append(candidate)
