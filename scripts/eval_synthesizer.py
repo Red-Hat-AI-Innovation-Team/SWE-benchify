@@ -659,7 +659,7 @@ def main():
                 try:
                     result = asyncio.run(synth_mod.enrich_instance(inst, repo_path, model=SYNTH_MODEL))
                     if result is None:
-                        log.warning('  skipped %s — issue leaks identifiers', iid)
+                        log.warning('  skipped %s — failed screening', iid)
                         inst['_pipeline']['phase'] = 'skipped'
                         continue
                     n_enriched += 1
