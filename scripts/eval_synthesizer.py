@@ -17,6 +17,7 @@ import asyncio
 import concurrent.futures
 import datetime
 import glob
+import hashlib
 import json
 import logging
 import os
@@ -443,6 +444,22 @@ def main():
                         help='Enrich yield-only instances with issue text + test patch.')
     args = parser.parse_args()
 
+    def _dedup_by_patch(instances: list[dict]) -> list[dict]:
+        """Keep first instance per unique patch diff."""
+        seen: set[str] = set()
+        deduped: list[dict] = []
+        for inst in instances:
+            ph = hashlib.md5(inst.get('patch', '').encode()).hexdigest()
+            if ph in seen:
+                log.info('  dedup: dropping %s (duplicate patch)', inst.get('instance_id', '?'))
+                continue
+            seen.add(ph)
+            deduped.append(inst)
+        if len(deduped) < len(instances):
+            log.info('dedup: %d → %d instances (%d duplicates removed)',
+                     len(instances), len(deduped), len(instances) - len(deduped))
+        return deduped
+
     if args.judge_only:
         instances_path = args.judge_only
         if not os.path.isfile(instances_path):
@@ -458,6 +475,7 @@ def main():
                 all_synth_instances.append(json.loads(line))
 
         log.info('loaded %d instances from %s', len(all_synth_instances), instances_path)
+        all_synth_instances = _dedup_by_patch(all_synth_instances)
 
         if not all_synth_instances:
             print(json.dumps({'score': 0.0, 'details': 'No instances in file'}))
@@ -620,6 +638,7 @@ def main():
                 all_instances.append(json.loads(line))
 
         log.info('loaded %d instances from %s', len(all_instances), instances_path)
+        all_instances = _dedup_by_patch(all_instances)
         enrich_start_total = time.time()
 
         pipeline_instances = [i for i in all_instances if '_pipeline' in i]

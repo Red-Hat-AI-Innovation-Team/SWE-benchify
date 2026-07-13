@@ -5676,6 +5676,7 @@ async def synthesize_repo(
 
     candidates: list[CandidateInstance] = []
     enrichment_data: dict[str, dict] = {}
+    seen_patches: set[str] = set()
     mutations_attempted = 0
 
     for i, target in enumerate(targets[:max_mutations * 8]):
@@ -6003,6 +6004,12 @@ async def synthesize_repo(
         if not test_output or not _is_valid_test_output(test_output):
             logger.warning("%s  Skipped — mutation did not cause test failures (data-first path required)", pfx)
             continue
+
+        patch_hash = hashlib.md5(patch.encode()).hexdigest()
+        if patch_hash in seen_patches:
+            logger.info('%s  Skipped — duplicate patch (same diff already yielded)', pfx)
+            continue
+        seen_patches.add(patch_hash)
 
         if yield_only:
             synthesis_result = SynthesisResult(
