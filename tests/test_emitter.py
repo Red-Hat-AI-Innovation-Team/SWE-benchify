@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-
 from swebenchify.emitter import emit_dataset, load_dataset
 from swebenchify.models import TaskInstance
 
@@ -185,6 +184,7 @@ class TestLoadProductMap:
 
     def test_custom_path(self, tmp_path: Path) -> None:
         import json as _json
+
         from swebenchify.emitter import load_product_map
         p = tmp_path / "custom.json"
         p.write_text(_json.dumps({"my/repo": "MyProduct"}))

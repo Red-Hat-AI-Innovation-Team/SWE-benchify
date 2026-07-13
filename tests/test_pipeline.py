@@ -5,7 +5,6 @@ from __future__ import annotations
 import inspect
 
 
-
 class TestPipelineImports:
     """Verify the pipeline module imports correctly and exposes the right API."""
 

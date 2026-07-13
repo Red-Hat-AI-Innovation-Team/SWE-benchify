@@ -9,6 +9,7 @@ so adding a new language is configuration, not forked code.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from io import StringIO
 from pathlib import Path
@@ -48,7 +49,7 @@ class LanguageBackend:
     make_test_cmd: Callable[[AnyEnvironmentSpec], str]
     test_scope: Callable[[str], str]
     normalize_f2p: Callable[[list[str]], list[str]]
-    is_test_hunk: Callable[[Any], bool] | None = field(default=None)
+    is_test_hunk: Callable[[Any, list[tuple[int, int]] | None], bool] | None = field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +83,7 @@ def refine_patch_split(
     gold_patch: str | None,
     test_patch: str | None,
     backend: LanguageBackend,
+    source_callback: Callable[[str], str | None] | None = None,
 ) -> tuple[str | None, str | None]:
     """Re-split patches using a backend's ``is_test_hunk`` callback.
 
@@ -92,8 +94,17 @@ def refine_patch_split(
 
     If the backend has no ``is_test_hunk`` callback, returns the inputs
     unchanged.
+
+    When *source_callback* is provided, it is called for ``.rs`` files to
+    retrieve the base-commit source so that :func:`_rust_parse_test_regions`
+    can compute precise test-module boundaries.  The callback signature is
+    ``(file_path: str) -> str | None``.
     """
     if not backend.is_test_hunk or not gold_patch:
+        return gold_patch, test_patch
+
+    if not gold_patch.strip():
+        logger.warning("empty gold_patch input, skipping refinement")
         return gold_patch, test_patch
 
     try:
@@ -114,10 +125,29 @@ def refine_patch_split(
             new_gold.append(str(patched_file))
             continue
 
+        test_regions: list[tuple[int, int]] | None = None
+        if source_callback is not None:
+            source = source_callback(patched_file.path)
+            if source is not None:
+                test_regions = _rust_parse_test_regions(source)
+            else:
+                logger.warning(
+                    "source_callback returned None for path=%s, falling back to heuristic",
+                    patched_file.path,
+                )
+
         gold_hunks = []
         test_hunks = []
         for hunk in patched_file:
-            if backend.is_test_hunk(hunk):
+            is_test = backend.is_test_hunk(hunk, test_regions)
+            logger.debug(
+                "hunk file=%s lines=%d-%d classified=%s",
+                patched_file.path,
+                hunk.source_start,
+                hunk.source_start + hunk.source_length,
+                "test" if is_test else "gold",
+            )
+            if is_test:
                 test_hunks.append(hunk)
             else:
                 gold_hunks.append(hunk)
@@ -138,6 +168,9 @@ def refine_patch_split(
     else:
         refined_test = test_patch
 
+    moved = len(extra_test)
+    if moved:
+        logger.info("patch split refined: hunks_moved_to_test=%d", moved)
     return refined_gold, refined_test
 
 
@@ -462,8 +495,72 @@ def _rust_test_scope(test_patch: str) -> str:
     return ""
 
 
-def _rust_is_test_hunk(hunk: Any) -> bool:
-    """True if a diff hunk is inside a ``#[cfg(test)]`` / ``mod tests`` block."""
+_CFG_TEST_MOD_RE = re.compile(
+    r"#\[cfg\(test\)\]"
+    r"(?:\s*(?:#\[[^\]]*\])\s*)*"  # optional attributes between #[cfg(test)] and mod
+    r"\s+mod\s+(\w+)\s*\{",
+    re.DOTALL,
+)
+
+
+def _rust_parse_test_regions(source: str) -> list[tuple[int, int]]:
+    """Find ``#[cfg(test)] mod <name> { ... }`` regions in Rust source.
+
+    Returns a list of ``(start_line, end_line)`` tuples using 1-indexed
+    line numbers.  Uses regex to locate the opening pattern, then counts
+    braces to find the matching ``}``.
+    """
+    regions: list[tuple[int, int]] = []
+    for m in _CFG_TEST_MOD_RE.finditer(source):
+        cfg_start = source.count("\n", 0, m.start()) + 1
+        depth = 1
+        i = m.end()
+        while i < len(source) and depth > 0:
+            ch = source[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            i += 1
+        end_line = source.count("\n", 0, i) + 1
+        regions.append((cfg_start, end_line))
+    logger.debug(
+        "test regions found: count=%d ranges=%s",
+        len(regions),
+        [(s, e) for s, e in regions],
+    )
+    return regions
+
+
+def _rust_is_test_hunk(
+    hunk: Any,
+    test_regions: list[tuple[int, int]] | None = None,
+) -> bool:
+    """True if a diff hunk is inside a ``#[cfg(test)]`` / ``mod tests`` block.
+
+    When *test_regions* is provided (from :func:`_rust_parse_test_regions`),
+    classification is based on whether the hunk's source line numbers fall
+    within a test region.  When *test_regions* is ``None`` the original
+    content-based heuristic is used as a fallback.
+    """
+    if test_regions is not None:
+        source_lines = [
+            line.source_line_no
+            for line in hunk
+            if line.source_line_no is not None
+        ]
+        if not source_lines:
+            return False
+        in_test = sum(
+            1
+            for ln in source_lines
+            if any(start <= ln <= end for start, end in test_regions)
+        )
+        if in_test == len(source_lines):
+            return True
+        return False
+
+    # Fallback: content-based heuristic
     if hunk.section_header and "mod tests" in hunk.section_header:
         return True
     for line in hunk:

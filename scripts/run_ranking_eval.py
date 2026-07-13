@@ -24,8 +24,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from swebenchify.dispatcher import CostTracker
 from swebenchify.discovery import discover_environment
+from swebenchify.dispatcher import CostTracker
 from swebenchify.eval_harness import eval_instance
 from swebenchify.models import EnvironmentSpec, Repository, TaskInstance
 from swebenchify.workspace import WorkspaceManager

@@ -15,8 +15,8 @@ import json
 import logging
 from pathlib import Path
 
-from swebenchify.dispatcher import AgentResult, CostTracker, run_agent_with_retry
 from swebenchify.backends import get_backend
+from swebenchify.dispatcher import AgentResult, CostTracker, run_agent_with_retry
 from swebenchify.grader import compute_f2p
 from swebenchify.models import (
     AnyEnvironmentSpec,

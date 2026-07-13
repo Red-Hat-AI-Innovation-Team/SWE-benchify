@@ -8,9 +8,9 @@ import sys
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("test_agentic")
 
-from swebenchify.models import Repository, EnvironmentSpec  # noqa: E402
-from swebenchify.dispatcher import CostTracker  # noqa: E402
 from swebenchify.discovery import discover_environment  # noqa: E402
+from swebenchify.dispatcher import CostTracker  # noqa: E402
+from swebenchify.models import EnvironmentSpec, Repository  # noqa: E402
 from swebenchify.validator import validate_instance  # noqa: E402
 from swebenchify.workspace import WorkspaceManager  # noqa: E402
 

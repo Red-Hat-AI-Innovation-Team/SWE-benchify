@@ -1,15 +1,15 @@
 """Test mechanical stages (1-2) on pallets/flask and compare against SWE-bench fixture."""
 
 import json
+import logging
 import os
 import sys
-import logging
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-from swebenchify.models import Repository  # noqa: E402
 from swebenchify.collector import collect_prs, save_prs  # noqa: E402
 from swebenchify.extractor import extract_all, save_candidates  # noqa: E402
+from swebenchify.models import Repository  # noqa: E402
 
 token = os.environ.get("GITHUB_TOKEN")
 if not token:

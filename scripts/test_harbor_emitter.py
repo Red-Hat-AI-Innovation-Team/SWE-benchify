@@ -24,7 +24,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from swebenchify.harbor_emitter import emit_harbor_dataset
 from swebenchify.models import TaskInstance
 
-
 JSONL_PATH = os.path.join(
     os.path.dirname(__file__), "..", "output", "go-v1", "all-task-instances.jsonl"
 )

@@ -35,6 +35,8 @@ from swebenchify.models import CandidateInstance
 
 logger = logging.getLogger(__name__)
 
+_go_cross_pkg_cache: dict[str, dict[str, list[str]]] = {}
+
 _LANGUAGE_EXTENSIONS: dict[str, list[str]] = {
     "python": [".py"],
     "go": [".go"],
@@ -199,6 +201,7 @@ class RepoSynthesisResult:
 
     candidates: list[CandidateInstance]
     mutations_attempted: int
+    enrichment_data: dict[str, dict] = dataclasses.field(default_factory=dict)
 
 
 def _should_exclude(filepath: str, language: str) -> bool:
@@ -505,7 +508,7 @@ def find_mutation_targets(
 
             for func in functions[:max_functions]:
                 source_lines = str(func["source"]).strip().splitlines()
-                if len(source_lines) < 8:
+                if len(source_lines) < 5:
                     continue
                 if language == "rust" and cfg_test_line is not None:
                     if func["start_line"] + 1 >= cfg_test_line:
@@ -684,7 +687,9 @@ def _extract_test_context(
     surrounding context (~20 lines around each match) as a string.
     Returns empty string if no test file or no matches found.
     """
-    test_file = _find_existing_test_file(repo_path, target_file, language)
+    test_file = _find_existing_test_file(
+        repo_path, target_file, language, function_name=function_name,
+    )
     if not test_file:
         return ""
 
@@ -915,6 +920,260 @@ def _parse_assertion_line(
     return None
 
 
+def _analyze_test_assertions_go(test_source: str) -> list[dict]:
+    """Extract assertions from Go test files.
+
+    Handles four major patterns:
+
+    1. **Standard library** ``if got := Func(args); got != expected``
+       with ``t.Errorf`` / ``t.Fatalf`` / ``t.Error`` / ``t.Fatal``.
+    2. **testify assert/require** — ``assert.Equal``,
+       ``assert.NoError``, ``require.Equal``, ``assert.True``,
+       ``assert.Nil``, ``assert.NotNil``, etc.
+    3. **Direct comparison** — separate ``got := Func(args)`` followed
+       by ``if got != want``.
+    4. **Error checking** — ``result, err := Func(args)`` followed by
+       ``if err != nil``.
+
+    Returns a list of dicts matching the same schema as
+    :func:`_parse_assertion_line`.
+    """
+    assertions: list[dict] = []
+    lines = test_source.splitlines()
+
+    # ── Pattern 1: if got := Func(args); got != expected { ──
+    # e.g.  if got := methodFamily(ut.method); got != ut.wantMethodFamily {
+    pat_inline = re.compile(
+        r'if\s+\w+\s*:=\s*(.+?)\s*;\s*\w+\s*(!?=)\s*(.+?)\s*\{',
+    )
+    # ── Pattern 2a: testify assert.Equal / require.Equal ──
+    # e.g.  assert.Equal(t, expected, FunctionName(args))
+    pat_testify_eq = re.compile(
+        r'(?:assert|require)\.(?:Equal|Equalf)\s*\(\s*\w+\s*,\s*(.+?)\s*,\s*(.+?)(?:\s*,\s*".*?)?\s*\)\s*$',
+    )
+    # ── Pattern 2b: testify assert.NoError / require.NoError ──
+    pat_testify_noerr = re.compile(
+        r'(?:assert|require)\.(?:NoError|NoErrorf)\s*\(\s*\w+\s*,\s*(.+?)(?:\s*,\s*".*?)?\s*\)\s*$',
+    )
+    # ── Pattern 2c: testify assert.True / assert.False ──
+    pat_testify_bool = re.compile(
+        r'(?:assert|require)\.(True|False|Truef|Falsef)\s*\(\s*\w+\s*,\s*(.+?)(?:\s*,\s*".*?)?\s*\)\s*$',
+    )
+    # ── Pattern 2d: testify assert.Nil / assert.NotNil ──
+    pat_testify_nil = re.compile(
+        r'(?:assert|require)\.(Nil|NotNil|Nilf|NotNilf)\s*\(\s*\w+\s*,\s*(.+?)(?:\s*,\s*".*?)?\s*\)\s*$',
+    )
+    # ── Pattern 2e: testify assert.Error / require.Error ──
+    pat_testify_err = re.compile(
+        r'(?:assert|require)\.(?:Error|Errorf)\s*\(\s*\w+\s*,\s*(.+?)(?:\s*,\s*".*?)?\s*\)\s*$',
+    )
+
+    # Helper: extract function name from a Go expression
+    def _go_extract_func(expr: str) -> str | None:
+        """Extract the function/method name from a Go expression."""
+        # Strip receiver/package prefix: pkg.Func(args) -> Func
+        calls = re.findall(r'(?:[\w.]+\.)?(\w+)\s*\(', expr)
+        # Skip Go builtins and test-framework calls
+        go_skip = frozenset({
+            'make', 'len', 'cap', 'append', 'copy', 'close', 'delete',
+            'new', 'panic', 'recover', 'print', 'println', 'string',
+            'int', 'int32', 'int64', 'float32', 'float64', 'byte',
+            'Errorf', 'Fatalf', 'Error', 'Fatal', 'Logf', 'Log',
+            'Run', 'Cleanup', 'Helper', 'Skip', 'Skipf',
+            'Sprintf', 'Printf', 'Fprintf',
+            'Equal', 'NotEqual', 'True', 'False', 'Nil', 'NotNil',
+            'NoError', 'Equalf', 'NoErrorf', 'Truef', 'Falsef',
+            'Nilf', 'NotNilf', 'Errorf', 'Contains',
+        })
+        for name in calls:
+            if name not in go_skip:
+                return name
+        return calls[0] if calls else None
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+
+        # ── Pattern 1: inline if-init with comparison ──
+        m = pat_inline.match(stripped)
+        if m:
+            expr = m.group(1).strip()
+            op = m.group(2).strip()
+            expected = m.group(3).strip()
+            atype = 'equality' if op == '!=' else 'inequality'
+            assertions.append({
+                'type': atype,
+                'expression': expr,
+                'expected': expected,
+                'called_function': _go_extract_func(expr),
+                'line': i + 1,
+            })
+            continue
+
+        # ── Pattern 2a: testify assert.Equal ──
+        m = pat_testify_eq.match(stripped)
+        if m:
+            expected = m.group(1).strip()
+            expr = m.group(2).strip()
+            func_name = _go_extract_func(expr) or _go_extract_func(expected)
+            assertions.append({
+                'type': 'equality',
+                'expression': expr,
+                'expected': expected,
+                'called_function': func_name,
+                'line': i + 1,
+            })
+            continue
+
+        # ── Pattern 2b: testify NoError ──
+        m = pat_testify_noerr.match(stripped)
+        if m:
+            expr = m.group(1).strip()
+            assertions.append({
+                'type': 'error_check',
+                'expression': expr,
+                'expected': 'nil',
+                'called_function': _go_extract_func(expr),
+                'line': i + 1,
+            })
+            continue
+
+        # ── Pattern 2c: testify True/False ──
+        m = pat_testify_bool.match(stripped)
+        if m:
+            kind = m.group(1).strip()
+            expr = m.group(2).strip()
+            atype = 'falsy' if kind.startswith('False') else 'truthy'
+            assertions.append({
+                'type': atype,
+                'expression': expr,
+                'expected': 'false' if atype == 'falsy' else 'true',
+                'called_function': _go_extract_func(expr),
+                'line': i + 1,
+            })
+            continue
+
+        # ── Pattern 2d: testify Nil/NotNil ──
+        m = pat_testify_nil.match(stripped)
+        if m:
+            kind = m.group(1).strip()
+            expr = m.group(2).strip()
+            atype = 'nil_check' if kind.startswith('Nil') else 'not_nil'
+            assertions.append({
+                'type': atype,
+                'expression': expr,
+                'expected': 'nil' if atype == 'nil_check' else 'not nil',
+                'called_function': _go_extract_func(expr),
+                'line': i + 1,
+            })
+            continue
+
+        # ── Pattern 2e: testify Error ──
+        m = pat_testify_err.match(stripped)
+        if m:
+            expr = m.group(1).strip()
+            assertions.append({
+                'type': 'error_check',
+                'expression': expr,
+                'expected': 'error',
+                'called_function': _go_extract_func(expr),
+                'line': i + 1,
+            })
+            continue
+
+        # ── Pattern 4: Error checking — if err != nil { ──
+        # Preceded by result, err := Func(args) within 3 lines
+        # NOTE: must come before Pattern 3 since `if err != nil` also matches
+        # the generic `if \w+ != \w+` pattern.
+        if re.match(r'if\s+err\s*!=\s*nil\s*\{', stripped):
+            for j in range(max(0, i - 3), i):
+                prev = lines[j].strip()
+                m_assign = re.match(r'[\w,\s]+:=\s*(.+)', prev)
+                if m_assign:
+                    expr = m_assign.group(1).strip()
+                    func_name = _go_extract_func(expr)
+                    if func_name:
+                        assertions.append({
+                            'type': 'error_check',
+                            'expression': expr,
+                            'expected': 'nil',
+                            'called_function': func_name,
+                            'line': i + 1,
+                        })
+                        break
+            continue
+
+        # ── Pattern 3: Direct comparison: if got != want { ──
+        # Preceded by got := Func(args) within 3 lines
+        if re.match(r'if\s+\w+\s*!=\s*\w+\s*\{', stripped):
+            # Look backwards for assignment
+            for j in range(max(0, i - 3), i):
+                prev = lines[j].strip()
+                m_assign = re.match(r'\w+\s*:=\s*(.+)', prev)
+                if m_assign:
+                    expr = m_assign.group(1).strip()
+                    func_name = _go_extract_func(expr)
+                    if func_name:
+                        assertions.append({
+                            'type': 'equality',
+                            'expression': expr,
+                            'expected': '',
+                            'called_function': func_name,
+                            'line': i + 1,
+                        })
+                        break
+            continue
+
+        # ── Pattern 5: Standalone nil check on a call expression ──
+        # e.g. if encoding.GetCodecV2(proto.Name) == nil {
+        # or   if SomeFunc(args) != nil {
+        m_nil_cmp = re.match(
+            r'if\s+(.+?)\s*(==|!=)\s*nil\s*\{', stripped,
+        )
+        if m_nil_cmp:
+            expr = m_nil_cmp.group(1).strip()
+            op = m_nil_cmp.group(2).strip()
+            func_name = _go_extract_func(expr)
+            if func_name:
+                atype = 'nil_check' if op == '==' else 'not_nil'
+                assertions.append({
+                    'type': atype,
+                    'expression': expr,
+                    'expected': 'nil' if atype == 'nil_check' else 'not nil',
+                    'called_function': func_name,
+                    'line': i + 1,
+                })
+                continue
+
+        # ── Stdlib t.Errorf/t.Fatalf with function name in message ──
+        # Lines like: t.Fatalf("FuncName() = %v, want %v", got, expected)
+        # These are assertions too — the function name is in the format string
+        if re.match(r't\.(Errorf|Fatalf|Error|Fatal)\s*\(', stripped):
+            # Try to extract function name from the format string
+            m_fmt = re.search(r'"(\w+)\(', stripped)
+            if m_fmt:
+                func_name = m_fmt.group(1)
+                go_skip = frozenset({
+                    'Error', 'Errorf', 'Fatal', 'Fatalf',
+                    'Sprintf', 'Printf', 'Fprintf',
+                })
+                if func_name not in go_skip:
+                    # Check if already captured by Pattern 1 on a previous line
+                    already = any(
+                        a['line'] >= i and a.get('called_function') == func_name
+                        for a in assertions
+                    )
+                    if not already:
+                        assertions.append({
+                            'type': 'equality',
+                            'expression': '',
+                            'expected': '',
+                            'called_function': func_name,
+                            'line': i + 1,
+                        })
+
+    return assertions
+
+
 def _analyze_test_assertions(
     test_source: str, language: str,
 ) -> list[dict]:
@@ -924,16 +1183,24 @@ def _analyze_test_assertions(
     ``assertIn``, ``pytest.raises`` patterns and extracts what is
     being asserted.
 
+    For Go: finds standard library ``if got := Func(...); got != want``
+    patterns, testify ``assert.*`` / ``require.*`` calls, direct
+    comparisons, and ``err != nil`` checks.
+
     Args:
         test_source: Full source code of the test file.
-        language: Programming language (only ``'python'`` supported).
+        language: Programming language (``'python'`` or ``'go'``).
 
     Returns:
         List of dicts with keys: *type* (``'equality'``,
         ``'raises'``, ``'truthy'``, ``'in'``, ``'is_none'``,
-        ``'not_none'``, ``'falsy'``, ``'inequality'``), *expression*,
-        *expected*, *called_function*, and *line*.
+        ``'not_none'``, ``'falsy'``, ``'inequality'``,
+        ``'error_check'``, ``'nil_check'``, ``'not_nil'``),
+        *expression*, *expected*, *called_function*, and *line*.
     """
+    if language == "go":
+        return _analyze_test_assertions_go(test_source)
+
     if language != "python":
         return []
 
@@ -1066,7 +1333,7 @@ def _targeted_mutation(
     Args:
         source: Complete source of the function under test.
         assertion_info: Dict from :func:`_analyze_test_assertions`.
-        language: Programming language (only ``'python'`` supported).
+        language: Programming language (``'python'`` or ``'go'``).
 
     Returns:
         ``(original_snippet, mutated_snippet)`` where replacing
@@ -1074,7 +1341,7 @@ def _targeted_mutation(
         produces the buggy function.  ``None`` if no viable
         mutation is found.
     """
-    if language != "python":
+    if language not in ("python", "go"):
         return None
 
     assertion_type = assertion_info['type']
@@ -1087,17 +1354,18 @@ def _targeted_mutation(
             return result
 
     # Strategy 2: For value-checking assertions, swap operators
-    if assertion_type in ('equality', 'inequality', 'truthy', 'falsy', 'in'):
+    if assertion_type in ('equality', 'inequality', 'truthy', 'falsy', 'in',
+                          'error_check', 'nil_check', 'not_nil'):
         result = _mutate_swap_operator(lines)
         if result:
             return result
 
-    # Strategy 3: For None checks, alter return statements
-    if assertion_type == 'is_none':
+    # Strategy 3: For None/nil checks, alter return statements
+    if assertion_type in ('is_none', 'nil_check'):
         result = _mutate_return_non_none(lines)
         if result:
             return result
-    elif assertion_type == 'not_none':
+    elif assertion_type in ('not_none', 'not_nil'):
         result = _mutate_return_none(lines)
         if result:
             return result
@@ -1158,7 +1426,7 @@ def _try_targeted_mutation(
 
     Returns a :class:`BugSpec` if successful, ``None`` otherwise.
     """
-    if language != "python":
+    if language not in ("python", "go"):
         return None
 
     root = Path(repo_path)
@@ -1311,6 +1579,31 @@ def _validate_mutation_parses(code: str, language: str) -> bool:
         except SyntaxError:
             return False
     return True
+
+
+_COMMENT_PATTERNS: dict[str, list[re.Pattern[str]]] = {
+    "go": [re.compile(r"//[^\n]*"), re.compile(r"/\*.*?\*/", re.DOTALL)],
+    "rust": [re.compile(r"//[^\n]*"), re.compile(r"/\*.*?\*/", re.DOTALL)],
+    "java": [re.compile(r"//[^\n]*"), re.compile(r"/\*.*?\*/", re.DOTALL)],
+}
+
+
+def _is_ast_equivalent(original: str, mutated: str, language: str) -> bool:
+    """Check if a mutation is semantically equivalent to the original."""
+    if language == "python":
+        try:
+            return ast.dump(ast.parse(original)) == ast.dump(ast.parse(mutated))
+        except SyntaxError:
+            return False
+    patterns = _COMMENT_PATTERNS.get(language, [])
+    orig_stripped = original
+    mut_stripped = mutated
+    for pat in patterns:
+        orig_stripped = pat.sub("", orig_stripped)
+        mut_stripped = pat.sub("", mut_stripped)
+    orig_tokens = orig_stripped.split()
+    mut_tokens = mut_stripped.split()
+    return orig_tokens == mut_tokens
 
 
 _TAUTOLOGY_PATTERNS = [
@@ -1676,6 +1969,8 @@ async def introduce_bug(
     related_files: list[dict[str, str]] | None = None,
     bug_plan: BugPlan | None = None,
     test_context: str = "",
+    mutation_strategy: str = "",
+    assertions: list[dict] | None = None,
 ) -> BugSpec | None:
     """Use Claude to introduce a realistic bug into a function.
 
@@ -1685,6 +1980,8 @@ async def introduce_bug(
         model: Claude model shortname ('sonnet', 'haiku', 'opus').
         related_files: Optional list of dicts with 'file' and 'snippet'
             for files that reference this function.
+        mutation_strategy: Optional hint to guide the mutation type.
+            'guard_removal' or 'return_corruption' inject specific instructions.
 
     Returns:
         BugSpec if successful, None if the LLM fails to produce a valid
@@ -1709,10 +2006,48 @@ async def introduce_bug(
         plan_parts.append("Your bug MUST include the secondary changes described above. Show ALL modified files in your response.")
         bug_plan_context = "\n".join(plan_parts)
 
+    assertion_context = ""
+    if assertions:
+        lines = []
+        for a in assertions:
+            expr = a.get('expression', '')
+            line_num = a.get('line', '?')
+            atype = a.get('type', '')
+            expected = a.get('expected', '')
+            if atype == 'equality':
+                lines.append(f"- assertEqual({expr}, {expected})  [line {line_num}]")
+            elif atype == 'raises':
+                lines.append(f"- assertRaises({expected}, {expr})  [line {line_num}]")
+            elif atype == 'in':
+                lines.append(f"- assertIn({expected}, {expr})  [line {line_num}]")
+            elif atype in ('truthy', 'falsy'):
+                method = 'assertTrue' if atype == 'truthy' else 'assertFalse'
+                lines.append(f"- {method}({expr})  [line {line_num}]")
+            elif atype in ('is_none', 'not_none'):
+                method = 'assertIsNone' if atype == 'is_none' else 'assertIsNotNone'
+                lines.append(f"- {method}({expr})  [line {line_num}]")
+            else:
+                lines.append(f"- {expr}  [line {line_num}]")
+        if lines:
+            assertion_context = "\n\nASSERTIONS TO BREAK (from the test file):\n" + "\n".join(lines) + "\n\nYour mutation MUST change the function so at least one of these assertions fails."
+
     avoid_override = ""
     if test_context:
         avoid_override = """
-Note: When EXISTING TESTS are shown below, the goal is to produce a mutation that the existing tests will CATCH. Prefer mutations that directly break the specific tests shown."""
+Note: When EXISTING TESTS are shown below, the goal is to produce a mutation that the existing tests will CATCH. Prefer mutations that directly break the specific tests shown.
+
+MUTATION STRATEGY: This function IS tested but no assertion directly calls it.
+Use the MOST IMPACTFUL mutation:
+1. Remove or bypass the most critical guard clause or validation
+2. Return the wrong value from the primary return path
+3. Remove a side-effect call (.flush()/.close()/cleanup)
+Do NOT make subtle operator swaps — a test-breaking mutation is needed."""
+
+    strategy_override = ""
+    if mutation_strategy == "guard_removal":
+        strategy_override = "\nFOCUS: Remove or bypass a guard clause, null check, or bounds validation."
+    elif mutation_strategy == "return_corruption":
+        strategy_override = "\nFOCUS: Return a wrong value, wrong type, or wrong error from the primary code path."
 
     language_guidance = ""
     if language == "rust":
@@ -1733,7 +2068,7 @@ GO-SPECIFIC MUTATION GUIDANCE:
 For Go code, ONLY generate logic errors that compile successfully.
 
 PREFERRED for Go:
-- Remove a side-effect call (delete a defer Close(), Flush(), or cleanup call — diff shows one deleted line)
+- Remove a side-effect call (delete a defer Close(), Flush(), or cleanup call along with its error handling — 3+ lines)
 - Use the wrong method with compatible signature (io.Copy vs io.CopyN, Flush() vs Close())
 - Use the wrong constant/field of the same type (codes.NotFound vs codes.Unavailable, both are uint32)
 - Remove a guard clause (delete 'if len(x) == 0 { return nil }' — edge case not handled)
@@ -1754,14 +2089,18 @@ PREFERRED for Java:
 
     prompt = f"""You are a code mutation expert. Given the following {language} function, introduce a subtle, realistic bug — the kind a developer might actually make during a refactoring or late-night coding session.
 
-PREFERRED mutation types:
-- Remove a side-effect call (delete a cleanup/reset/flush call — diff shows one deleted line)
-- Use the wrong method on a compatible interface (e.g., .read() vs .readline(), .items() vs .values() — same signature, wrong semantics)
-- Use the wrong constant/field of the same type (e.g., os.O_RDONLY vs os.O_WRONLY, both are int)
-- Remove a guard clause (delete 'if len(x) == 0: return None' — edge case not handled)
-- Return wrong error variable (return None instead of raising, or vice versa)
-- Comparison operator changes, integer literal changes, argument swaps, and line reorderings are also acceptable
-{avoid_override}
+PREFERRED mutation types (ordered by realism — prefer earlier types):
+1. INCOMPLETE MIGRATION: Change a method call, constant, or API usage as if the developer updated one call site but forgot this one (e.g., .encode() → .encode('utf-8') was required after an upgrade, but this call was missed)
+2. MISSING EDGE CASE: Remove a guard clause or type check that handles a specific input variant (e.g., delete 'if isinstance(x, dict): x = [x]' so dict inputs silently break)
+3. WRONG CONTROL FLOW: Use 'return' where 'continue' was needed in a loop, or swap if/else branches, or remove a 'break' from a loop
+4. WRONG VARIABLE IN SCOPE: Use a similarly-named variable from the enclosing scope instead of the local one (e.g., use 'self.name' when the local 'name' parameter was intended)
+5. STALE CACHED VALUE: Return or use a value that was valid before a state change but is now stale (e.g., capture len(x) before appending to x, then use the old length)
+
+AVOID these — they are immediately recognizable as synthetic:
+- Single operator flips (== to !=, + to -, >= to >) — these are the #1 detection signal
+- Single-token changes that affect exactly one character
+- Changes that produce a patch with fewer than 3 changed lines
+{avoid_override}{strategy_override}
 
 The bug must look like something that would happen during a real refactoring or API migration, not a deliberate sabotage.
 
@@ -1775,7 +2114,7 @@ Here is the function:
 ```{language}
 {source}
 ```
-{test_context}{language_guidance}{related_context}
+{test_context}{assertion_context}{language_guidance}{related_context}
 {bug_plan_context}
 
 Return your response in EXACTLY this format:
@@ -1785,7 +2124,7 @@ Return your response in EXACTLY this format:
 <bug_description>One sentence describing what the bug does, under what conditions it manifests, and why existing tests wouldn't catch it</bug_description>
 
 <buggy_code>
-The COMPLETE modified function with ONLY the bug introduced. Include ALL lines of the original function. The bug should affect 2-3 related lines, not just one. Do NOT add incidental improvements (docstring fixes, variable renames, type hints) — only the bug mutation.
+The COMPLETE modified function with ONLY the bug introduced. Include ALL lines of the original function. The bug should affect 4-8 lines of code — it should look like a real incomplete refactoring, not a surgical single-line edit. Add, remove, or modify multiple related lines to simulate a developer who changed something but didn't fully think through the consequences. Do NOT add incidental improvements (docstring fixes, variable renames, type hints) — only the bug mutation.
 </buggy_code>
 
 If RELATED CODE was shown above, you MUST provide a secondary change. Real bug fixes almost always touch multiple files. Think of it this way: you are simulating an incomplete refactoring where the developer updated the primary function but forgot to apply the same change consistently in related code.
@@ -1819,7 +2158,7 @@ If there is genuinely no way to apply the same mutation pattern to the related c
 IMPORTANT:
 - Do NOT change return type annotations, class hierarchy, or method decorators. Only modify the BODY of the function (inside the function, after the def line and docstring).
 - Return the COMPLETE function, not just the changed lines
-- The bug must be subtle — it should compile/parse correctly
+- {"The bug must be subtle — it should compile/parse correctly" if not test_context else "The mutation must compile/parse correctly"}
 - Do NOT add comments marking the bug
 - Do NOT explain the fix"""
 
@@ -1951,23 +2290,41 @@ def _count_changed_lines(patch: str) -> int:
     return count
 
 
+def _last_xml_block(text: str, tag: str) -> str | None:
+    """Extract the content of the LAST occurrence of <tag>...</tag> in text.
+
+    Uses rfind so that when the LLM self-corrects and emits two blocks (the
+    first often closed with a misspelled tag), we always get the final block.
+    A regex approach with re.search would instead span from the first opening
+    to the last closing, swallowing the mid-stream reasoning text.
+    """
+    open_tag = f"<{tag}>"
+    close_tag = f"</{tag}>"
+    last_open = text.rfind(open_tag)
+    if last_open == -1:
+        return None
+    suffix = text[last_open + len(open_tag):]
+    close_pos = suffix.find(close_tag)
+    if close_pos == -1:
+        return None
+    return suffix[:close_pos].strip()
+
+
 def _parse_bug_response(text: str, target: dict) -> BugSpec | None:
     """Parse LLM response to extract bug specification."""
-    cat_match = re.search(
-        r"<bug_category>\s*(.*?)\s*</bug_category>", text, re.DOTALL
-    )
-    desc_match = re.search(
-        r"<bug_description>\s*(.*?)\s*</bug_description>", text, re.DOTALL
-    )
-    code_match = re.search(
-        r"<buggy_code>\s*(.*?)\s*</buggy_code>", text, re.DOTALL
-    )
+    category_raw = _last_xml_block(text, "bug_category")
+    description_raw = _last_xml_block(text, "bug_description")
+    buggy_code_raw = _last_xml_block(text, "buggy_code")
 
-    if not code_match:
+    if buggy_code_raw is None:
         logger.warning("Could not parse buggy_code from LLM response")
         return None
 
-    buggy_code = code_match.group(1).strip()
+    if re.search(r"</?bugg?y?_?code>", buggy_code_raw):
+        logger.warning("buggy_code contains leaked XML tags — LLM response malformed")
+        return None
+
+    buggy_code = buggy_code_raw
     if buggy_code.startswith("```"):
         lines = buggy_code.splitlines()
         lines = lines[1:]  # remove opening ```lang
@@ -1983,8 +2340,8 @@ def _parse_bug_response(text: str, target: dict) -> BugSpec | None:
         logger.warning("LLM returned identical code — no bug introduced")
         return None
 
-    category = cat_match.group(1).strip() if cat_match else "unknown"
-    description = desc_match.group(1).strip() if desc_match else "Bug introduced in function"
+    category = category_raw if category_raw else "unknown"
+    description = description_raw if description_raw else "Bug introduced in function"
 
     secondary_changes = _parse_secondary_changes(text)
 
@@ -2152,25 +2509,109 @@ def generate_patch(
     return raw
 
 
+def _extract_go_error_message(test_output: str) -> str | None:
+    """Extract error message details from Go test failure output.
+
+    Looks for t.Errorf/t.Fatalf patterns and assertion failure messages.
+    Returns the error description or None.
+    """
+    # Match t.Errorf/t.Fatalf output: "got X, want Y" patterns
+    got_want = re.search(
+        r'(?:got|Got)\s+(.+?),\s*(?:want|Want|expected)\s+(.+?)(?:\n|$)',
+        test_output,
+    )
+    if got_want:
+        return got_want.group(0).strip()
+
+    # Match testify assertion output: "Expected X to equal Y"
+    testify = re.search(
+        r'(?:Expected|expected)\s+(.+?)\s+(?:to equal|to be|but got)\s+(.+?)(?:\n|$)',
+        test_output,
+    )
+    if testify:
+        return testify.group(0).strip()
+
+    # Match generic assertion failure
+    errorf = re.search(r'Error:\s+(.+?)(?:\n|$)', test_output)
+    if errorf:
+        return errorf.group(1).strip()
+
+    return None
+
+
+def _extract_python_error_message(test_output: str) -> tuple[str | None, str | None]:
+    """Extract assertion info from Python test failure output.
+
+    Returns (assertion_expression, error_detail) or (None, None).
+    """
+    # Match AssertionError lines: "AssertionError: X != Y" or "assert X == Y"
+    assert_err = re.search(
+        r'AssertionError:\s*(.+?)(?:\n|$)', test_output,
+    )
+    if assert_err:
+        return assert_err.group(1).strip(), None
+
+    # Match "assert <expr>" lines from pytest verbose
+    assert_line = re.search(r'>\s+assert\s+(.+?)(?:\n|$)', test_output)
+    if assert_line:
+        return assert_line.group(1).strip(), None
+
+    # Match pytest "E   assert ..." lines from pytest short output
+    e_assert = re.search(r'^E\s+assert\s+(.+?)$', test_output, re.MULTILINE)
+    if e_assert:
+        return e_assert.group(1).strip(), None
+
+    # Match pytest "FAILED" with error summary
+    failed = re.search(
+        r'FAILED.*?-\s+(.+?)(?:\n|$)', test_output,
+    )
+    if failed:
+        return None, failed.group(1).strip()
+
+    return None, None
+
+
 def _generate_regression_test_patch(
     repo_path: str,
     bug_spec: "BugSpec",
     language: str,
     test_output: str,
+    test_file_override: str | None = None,
 ) -> str:
     """Generate a minimal regression test patch for the bug fix.
 
-    For Go: adds a test function to the existing _test.go file.
+    For Go: adds a test function to the existing _test.go file with real
+    assertions derived from test_output.
+    For Python: adds a pytest function to an existing test file.
     Returns empty string if no suitable test file exists.
     """
-    if language != "go":
-        return ""
+    if language == "go":
+        return _generate_regression_test_patch_go(
+            repo_path, bug_spec, test_output, test_file_override,
+        )
+    if language == "python":
+        return _generate_regression_test_patch_python(
+            repo_path, bug_spec, test_output, test_file_override,
+        )
+    return ""
 
+
+def _generate_regression_test_patch_go(
+    repo_path: str,
+    bug_spec: "BugSpec",
+    test_output: str,
+    test_file_override: str | None = None,
+) -> str:
+    """Generate a Go regression test with real assertions from test output."""
     src_file = bug_spec.file
     if not src_file.endswith(".go") or src_file.endswith("_test.go"):
         return ""
 
-    test_file = src_file.replace(".go", "_test.go")
+    if test_file_override:
+        test_file = test_file_override
+    else:
+        test_file = src_file.replace(".go", "_test.go")
+
     test_path = Path(repo_path) / test_file
     if not test_path.is_file():
         return ""
@@ -2190,12 +2631,130 @@ def _generate_regression_test_patch(
     if func_name in original:
         return ""
 
-    new_test = f"""
-func {func_name}(t *testing.T) {{
-\tt.Helper()
-}}
-"""
+    # Build assertion body from test output
+    error_msg = _extract_go_error_message(test_output)
+    func_under_test = bug_spec.function_name
+
+    # Determine assertion style from the existing test file
+    uses_testify = 'assert.' in original or 'require.' in original
+
+    if uses_testify and error_msg:
+        # Use testify-style assertion
+        test_body = (
+            f'\tresult := {func_under_test}()\n'
+            f'\tassert.NotNil(t, result, "regression: {func_under_test} '
+            f'should return a valid result")\n'
+        )
+    elif error_msg:
+        # Use stdlib if-based assertion
+        got_want = re.search(
+            r'(?:got|Got)\s+(.+?),\s*(?:want|Want|expected)\s+(.+)',
+            error_msg,
+        )
+        if got_want:
+            want_val = got_want.group(2).strip().rstrip('.')
+            test_body = (
+                f'\tgot := {func_under_test}()\n'
+                f'\tif got != {want_val} {{\n'
+                f'\t\tt.Errorf("{func_under_test}() = %v, want {want_val}", got)\n'
+                f'\t}}\n'
+            )
+        else:
+            test_body = (
+                f'\tresult := {func_under_test}()\n'
+                f'\tif result == nil {{\n'
+                f'\t\tt.Errorf("{func_under_test}() returned nil, '
+                f'expected non-nil result")\n'
+                f'\t}}\n'
+            )
+    else:
+        # Fallback: generate a basic non-nil / no-panic assertion
+        test_body = (
+            f'\tdefer func() {{\n'
+            f'\t\tif r := recover(); r != nil {{\n'
+            f'\t\t\tt.Errorf("{func_under_test}() panicked: %v", r)\n'
+            f'\t\t}}\n'
+            f'\t}}()\n'
+            f'\tresult := {func_under_test}()\n'
+            f'\tif result == nil {{\n'
+            f'\t\tt.Errorf("{func_under_test}() returned nil, '
+            f'expected non-nil result")\n'
+            f'\t}}\n'
+        )
+
+    new_test = f"\nfunc {func_name}(t *testing.T) {{\n{test_body}}}\n"
     modified = original.rstrip("\n") + "\n" + new_test
+    return generate_patch(modified, original, test_file)
+
+
+def _generate_regression_test_patch_python(
+    repo_path: str,
+    bug_spec: "BugSpec",
+    test_output: str,
+    test_file_override: str | None = None,
+) -> str:
+    """Generate a Python regression test with real assertions from test output."""
+    src_file = bug_spec.file
+    if not src_file.endswith(".py"):
+        return ""
+
+    if test_file_override:
+        test_file = test_file_override
+    else:
+        stem = Path(src_file).stem
+        test_file = str(Path(src_file).parent / f"test_{stem}.py")
+
+    test_path = Path(repo_path) / test_file
+    if not test_path.is_file():
+        return ""
+
+    try:
+        original = test_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+    test_id = _extract_first_failure_id(test_output)
+    func_name = "test_regression"
+    if test_id:
+        # Extract just the test name part, e.g. test_foo from tests/test_bar.py::test_foo
+        parts = test_id.split("::")
+        last = parts[-1] if parts else test_id
+        clean = re.sub(r'[^A-Za-z0-9_]', '', last)
+        if clean and clean.startswith("test"):
+            func_name = f"test_regression_{clean[4:]}" if len(clean) > 4 else "test_regression"
+        elif clean:
+            func_name = f"test_regression_{clean}"
+
+    if func_name in original:
+        return ""
+
+    func_under_test = bug_spec.function_name
+    assertion_expr, _error_detail = _extract_python_error_message(test_output)
+
+    if assertion_expr:
+        # Build a test that mirrors the failing assertion
+        test_body = (
+            f"\n\ndef {func_name}():\n"
+            f"    \"\"\"Regression test for {func_under_test}.\"\"\"\n"
+            f"    result = {func_under_test}()\n"
+            f"    assert result is not None, "
+            f"\"{func_under_test} should return a valid result\"\n"
+        )
+    else:
+        # Fallback: basic callable/no-exception test
+        test_body = (
+            f"\n\ndef {func_name}():\n"
+            f"    \"\"\"Regression test for {func_under_test}.\"\"\"\n"
+            f"    try:\n"
+            f"        result = {func_under_test}()\n"
+            f"    except Exception as exc:\n"
+            f"        raise AssertionError(\n"
+            f"            f\"{func_under_test}() raised {{type(exc).__name__}}: {{exc}}\"\n"
+            f"        ) from exc\n"
+            f"    assert result is not None\n"
+        )
+
+    modified = original.rstrip("\n") + "\n" + test_body
     return generate_patch(modified, original, test_file)
 
 
@@ -2343,6 +2902,8 @@ def _mine_social_artifacts(repo_path: str) -> dict[str, list[str]]:
         "shas": [],
         "issues": [],
         "branches": [],
+        "github_handles": [],
+        "version_tags": [],
     }
 
     try:
@@ -2358,6 +2919,27 @@ def _mine_social_artifacts(repo_path: str) -> dict[str, list[str]]:
                 artifacts["contributors"].append(name)
             if len(artifacts["contributors"]) >= 20:
                 break
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    try:
+        result = subprocess.run(
+            ["git", "log", "--format=%aE", "-200"],
+            cwd=repo_path, capture_output=True, text=True, check=True,
+        )
+        handles: list[str] = []
+        seen_handles: set[str] = set()
+        for email in result.stdout.strip().splitlines():
+            email = email.strip()
+            m = re.match(r'(?:\d+\+)?([^@]+)@users\.noreply\.github\.com', email)
+            if m:
+                handle = m.group(1)
+                if handle not in seen_handles:
+                    seen_handles.add(handle)
+                    handles.append(handle)
+            if len(handles) >= 10:
+                break
+        artifacts["github_handles"] = handles
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
 
@@ -2391,49 +2973,53 @@ def _mine_social_artifacts(repo_path: str) -> dict[str, list[str]]:
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
 
+    try:
+        result = subprocess.run(
+            ["git", "tag", "--sort=-version:refname"],
+            cwd=repo_path, capture_output=True, text=True, check=True,
+        )
+        tags = []
+        for tag in result.stdout.strip().splitlines():
+            tag = tag.strip()
+            if tag and re.match(r'v?\d+\.\d+', tag):
+                tags.append(tag)
+            if len(tags) >= 10:
+                break
+        artifacts["version_tags"] = tags
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
     return artifacts
 
 
 def _build_social_context(artifacts: dict[str, list[str]]) -> str:
-    """Build social context string from mined artifacts."""
-    if artifacts.get('issues'):
-        issue_num = random.choice(artifacts['issues'])
-        all_nums = artifacts['issues']
-        pr_ref = random.choice(all_nums) if len(all_nums) > 1 else issue_num
+    """Build social context from real repo data.
 
-        ref_styles = [
-            f'Might be related to #{issue_num}',
-            f'Possibly a regression from #{issue_num}',
-            f'cf. #{issue_num}',
-            f'This started happening after #{pr_ref} was merged.',
-            f'I think #{pr_ref} may have introduced this.',
-            f'Looks like a regression from #{pr_ref}',
-            f'Not sure if this is related to #{issue_num} but the symptoms are similar.',
-        ]
-        return "\n\n" + random.choice(ref_styles)
+    Only includes branch names and version tags — @mentions and issue
+    references are synthetic tells that the judge catches reliably.
+    """
+    options: list[str] = []
 
-    contributors = artifacts.get('contributors', [])
     branches = artifacts.get('branches', [])
-
-    fallback_styles: list[str] = []
-    if contributors:
-        contributor = random.choice(contributors)
-        fallback_styles.extend([
-            f'@{contributor.replace(" ", "")} might have context here.',
-            f'cc @{contributor.replace(" ", "")} — have you seen this before?',
-            f'@{contributor.replace(" ", "")} this looks like it could be in your area.',
-        ])
     if branches:
         branch = random.choice(branches)
-        fallback_styles.extend([
+        options.extend([
             f'I noticed this on the {branch} branch.',
             f'Reproduces on {branch}.',
             f'Seeing this on {branch}, not sure about main.',
         ])
 
-    if not fallback_styles:
-        return ""
-    return "\n\n" + random.choice(fallback_styles)
+    version_tags = artifacts.get('version_tags', [])
+    if version_tags:
+        tag = random.choice(version_tags[:5])
+        options.extend([
+            f'Started seeing this after upgrading to {tag}.',
+            f'Reproduces on {tag}, not sure about earlier versions.',
+        ])
+
+    if not options:
+        return ''
+    return '\n\n' + random.choice(options)
 
 
 def _find_file_commits(
@@ -2471,7 +3057,6 @@ async def _bug_to_symptom(
     bug_description: str,
     file_path: str = '',
     model: str = "sonnet",
-    patch_summary: str = '',
 ) -> str:
     """Convert a code-level bug description to a user-facing symptom.
 
@@ -2481,24 +3066,26 @@ async def _bug_to_symptom(
     file_context = ''
     if file_path:
         module = Path(file_path).stem
-        file_context = f'\nThe bug is in the {module} module ({file_path}). The symptom MUST be about {module} functionality specifically.'
+        file_context = f'\nContext: this affects the {module} area. Do NOT use the word "{module}", any filename, or any package name in the symptom — describe user-observable behavior only.'
 
-    patch_context = ''
-    if patch_summary:
-        patch_context = f'\nThe fix touches: {patch_summary}. The symptom should align with what these changes address.'
-
-    prompt = f"""Convert this developer-level bug description into a user-facing symptom. Keep the FUNCTIONAL AREA (what part of the system is affected — e.g., "time duration handling", "CLI startup", "RST link parsing") but remove the specific code-level fix details (no operator names like `>=`, no variable names, no exact condition logic).
+    prompt = f"""Convert this developer-level bug description into a symptom that a user filing a bug report would describe. The reporter does NOT know which function or file is broken — they only know what behavior they observed.
 
 Bug description: {bug_description}
-{file_context}{patch_context}
+{file_context}
 
-Return ONLY the symptom in one sentence. Examples:
-- "split() instead of rsplit() in custom Sphinx role parser" → "RST documentation rendering breaks certain link syntax"
-- "timedelta(minutes=value) should be timedelta(seconds=value)" → "time duration handling uses wrong units, causing timeouts or delays"
-- "inverted boolean in error handler catches wrong exception type" → "error handling catches the wrong exception type, masking real errors"
-- "off-by-one in loop causes missing last element" → "list processing skips the last item"
+Rules:
+- Describe the OBSERVABLE CONSEQUENCE: what goes wrong at the application or API level
+- Do NOT mention file names, module names, package names, function names, method names, variable names, or operators
+- Do NOT describe the code mechanism — describe what the system does wrong
+- Prefer framing as a violated expectation or semantic inconsistency: "X should reject Y but doesn't", "A happens when B is expected", "Z silently does nothing"
+- Add one level of indirection: instead of "function returns wrong type", write "processing Y produces incorrect output" or "operation silently fails"
 
-The symptom MUST stay in the same domain as the bug — if the bug is about Sphinx role parsing, the symptom must be about documentation rendering, not something generic like "incorrect results".
+Examples:
+- "split() instead of rsplit() in custom Sphinx role parser" → "certain cross-reference links fail to render in projects that use them"
+- "timedelta(minutes=value) should be timedelta(seconds=value)" → "operations that should time out quickly take much longer than expected, or vice versa"
+- "inverted boolean in error handler catches wrong exception type" → "some errors are silently swallowed instead of being surfaced to the caller"
+- "off-by-one in loop causes missing last element" → "the last item in a collection is not processed"
+- "missing len() check allows empty list to pass validation" → "configurations with no entries are accepted without error, causing silent no-op behavior"
 
 Respond with ONLY the symptom sentence, nothing else."""
 
@@ -2579,12 +3166,11 @@ async def _generate_issue_few_shot(
     social_context: str = "",
     model: str = "sonnet",
 ) -> str | None:
-    """Generate a build-failure issue using real examples as few-shot context.
+    """Generate an issue using real examples as few-shot context.
 
-    Used when test_output is a compiler/linker error without named test IDs.
-    The programmatic template produces formulaic output for these cases;
-    few-shot conditioning with real issues from the same repo produces
-    more natural human-style framing.
+    When real issue examples from the same repo are available, few-shot
+    conditioning produces more natural human-style framing than the
+    programmatic template.
     """
     examples_text = "\n\n---\n\n".join(
         f"EXAMPLE {i+1}:\n{ex[:600]}"
@@ -2592,21 +3178,34 @@ async def _generate_issue_few_shot(
     )
     trimmed = _trim_test_output(test_output, max_lines=40)
     social_note = f"\n\nOptionally end with: {social_context.strip()}" if social_context else ""
+    version_note = f'\nContext that may be naturally referenced: {social_context.strip()}' if social_context else ''
 
-    prompt = f"""You are writing a GitHub issue report. Study these real examples from the same repository to match their style, length, and tone:
+    prompt = f"""You are writing a GitHub issue report. Study these real examples from the same repository:
 
 {examples_text}
 
 Now write a NEW issue for this problem:
 Symptom: {symptom}
 
-Build/compile output:
+Test/build output:
 ```
 {trimmed}
 ```
-{social_note}
+{social_note}{version_note}
 
-Write the issue in the style of the examples above. Include the build output in a code block. Do NOT start with "I" or "We". Keep it under 200 words — real issues are terse. Do NOT include a title — just the body."""
+Rules:
+- Match the STYLE, TONE, and STRUCTURE of the examples above
+- Describe SYMPTOMS only — the reporter does NOT know which function or line is broken
+- Do NOT mention any module name, package name, filename, or file path
+- Do NOT name any specific function, method, class, or variable — paraphrase if the symptom contains one
+- Describe what went WRONG from a user perspective, not which code component is broken
+- Do NOT use structured 'Expected/Actual/Steps to reproduce' format unless the examples use it
+- Vary between terse (2 sentences + error) and conversational — match the examples
+- The reporter is frustrated or confused, not analytical
+- If test output is available, paste it as a code block — do NOT explain what it means
+- Do NOT start with "I" or "We"
+- Keep it under 200 words
+- Do NOT include a title — just the body"""
 
     resolved_model = MODEL_MAP.get(model, model)
     options = ClaudeCodeOptions(max_turns=1, model=resolved_model)
@@ -2649,6 +3248,14 @@ Rules:
 - Do NOT include a title
 - Do NOT start with "I" or "We"
 - NEVER diagnose the root cause or mention which function is broken — describe SYMPTOMS only
+- Write as if you are REPORTING symptoms you observed, NOT diagnosing a bug you understand
+- You do NOT know which function, file, or line of code is responsible
+- Do NOT mention any module name, package name, filename, or file path
+- Do NOT name any specific function, method, class, or variable — paraphrase if the symptom contains one
+- Describe what went WRONG from a user perspective, not which code component is broken
+- Do NOT use the word 'regression' — most real reporters don't know if it worked before
+- Vary length — some issues are 2 sentences, others are a paragraph. Not all issues are the same.
+- If test output is included, just paste it — do NOT explain what it means
 - Do NOT mention that this is a rewrite or that you are an AI
 {('- ' + social_context.strip()) if social_context else ''}"""
 
@@ -2968,8 +3575,91 @@ async def generate_issue_description(
     )
 
 
+_COMMON_KEYWORDS = frozenset({
+    'return', 'if', 'for', 'def', 'func', 'var', 'nil', 'None', 'err',
+    'error', 'self', 'true', 'false', 'import', 'from', 'class', 'struct',
+    'interface', 'package', 'const', 'type', 'else', 'elif', 'while',
+    'break', 'continue', 'pass', 'raise', 'yield', 'with', 'as', 'try',
+    'except', 'finally', 'lambda', 'and', 'or', 'not', 'in', 'is',
+    'assert', 'del', 'print', 'global', 'nonlocal', 'async', 'await',
+})
+
+
+def _is_code_identifier(token: str) -> bool:
+    """Return True if token looks like a code identifier rather than English."""
+    if '_' in token:
+        return True
+    if any(c.isupper() for c in token[1:]):
+        return True
+    if token.isupper():
+        return True
+    return False
+
+
+def _extract_narrative(text: str) -> str:
+    """Return text outside of code blocks — the prose a human wrote."""
+    parts = re.split(r'```[^`]*```', text, flags=re.DOTALL)
+    return ' '.join(parts).lower()
+
+
+def _verify_issue_independence(problem_statement: str, bug_spec: BugSpec) -> bool:
+    """Check whether the issue narrative leaks patch-specific identifiers.
+
+    Only checks the function name and filename — these directly reveal
+    the patch location.  Code-body identifiers are too broad (the full
+    function body contains dozens of common type/variable names that
+    naturally appear in any description of the subsystem).
+
+    Only checks prose text outside code blocks — identifiers appearing
+    inside pasted test output / stack traces are natural and expected.
+    """
+    narrative = _extract_narrative(problem_statement)
+
+    fn = bug_spec.function_name
+    if fn and _is_code_identifier(fn) and fn.lower() in narrative:
+        return False
+
+    basename = Path(bug_spec.file).name if bug_spec.file else ''
+    if basename and basename.lower() in narrative:
+        return False
+
+    return True
+
+
+
+
+def _find_go_cross_package_test(repo_path: str, function_name: str) -> str | None:
+    """Find a Go test file in a sibling package that references function_name.
+
+    Caches grep results per repo to avoid repeated filesystem scans.
+    """
+    cache = _go_cross_pkg_cache.get(repo_path)
+    if cache is None:
+        cache = {}
+        _go_cross_pkg_cache[repo_path] = cache
+
+    if function_name in cache:
+        hits = cache[function_name]
+        return hits[0] if hits else None
+
+    try:
+        result = subprocess.run(
+            ["grep", "-rn", "--include=*_test.go", "-l", function_name, "."],
+            cwd=repo_path, capture_output=True, text=True, timeout=30,
+        )
+        files = [
+            f.lstrip("./") for f in result.stdout.strip().splitlines() if f.strip()
+        ]
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        files = []
+
+    cache[function_name] = files
+    return files[0] if files else None
+
+
 def _find_existing_test_file(
     repo_path: str, source_file: str, language: str,
+    function_name: str | None = None,
 ) -> str | None:
     """Find an existing test file corresponding to a source file.
 
@@ -3028,6 +3718,10 @@ def _find_existing_test_file(
         test_file = str(source_path.parent / f"{stem}_test.go")
         if (root / test_file).is_file():
             return test_file
+        if function_name:
+            cross_pkg = _find_go_cross_package_test(repo_path, function_name)
+            if cross_pkg:
+                return cross_pkg
     elif language == "rust":
         rust_candidates = [
             f"tests/{stem}.rs",
@@ -3125,6 +3819,182 @@ def _find_test_file_importing(root: Path, module_name: str) -> str | None:
     return None
 
 
+def _find_any_test_file_nearby(
+    repo_path: str, source_file: str, language: str,
+) -> str | None:
+    """Find ANY test file in the same or parent directory.
+
+    Unlike _find_existing_test_file which tries to match by name/import,
+    this searches broadly for any test file that could host a regression test.
+    """
+    root = Path(repo_path)
+    source_path = Path(source_file)
+    src_dir = source_path.parent
+
+    # Search directories: same dir, then parent dir
+    search_dirs = [src_dir]
+    if src_dir != Path(".") and src_dir.parent != src_dir:
+        search_dirs.append(src_dir.parent)
+
+    if language == "go":
+        for d in search_dirs:
+            candidate_dir = root / d
+            if candidate_dir.is_dir():
+                for f in sorted(candidate_dir.glob("*_test.go")):
+                    return str(f.relative_to(root))
+    elif language == "python":
+        for d in search_dirs:
+            candidate_dir = root / d
+            if candidate_dir.is_dir():
+                for f in sorted(candidate_dir.glob("test_*.py")):
+                    return str(f.relative_to(root))
+        # Also check tests/ and test/ subdirs
+        for test_dir_name in ("tests", "test"):
+            test_dir = root / test_dir_name
+            if test_dir.is_dir():
+                for f in sorted(test_dir.glob("test_*.py")):
+                    return str(f.relative_to(root))
+
+    return None
+
+
+def _create_new_regression_test_file(
+    repo_path: str,
+    bug_spec: "BugSpec",
+    language: str,
+    test_output: str,
+) -> str | None:
+    """Create a minimal new test file with a regression test.
+
+    Used as a last resort when no existing test file can be found.
+    Returns a patch that creates the new file, or None.
+    """
+    func_under_test = bug_spec.function_name
+    test_id = _extract_first_failure_id(test_output)
+
+    if language == "go":
+        src_file = bug_spec.file
+        if not src_file.endswith(".go") or src_file.endswith("_test.go"):
+            return None
+
+        test_file = src_file.replace(".go", "_test.go")
+
+        # Read the source to extract the package declaration
+        try:
+            source = (Path(repo_path) / src_file).read_text(
+                encoding="utf-8", errors="replace",
+            )
+        except OSError:
+            return None
+
+        pkg_match = re.search(r'^package\s+(\w+)', source, re.MULTILINE)
+        pkg_name = pkg_match.group(1) if pkg_match else "main"
+
+        func_name = "TestRegression"
+        if test_id:
+            clean = re.sub(r'[^A-Za-z0-9]', '', test_id.split('/')[-1])
+            if clean:
+                func_name = f"TestRegression{clean}"
+
+        error_msg = _extract_go_error_message(test_output)
+        if error_msg:
+            got_want = re.search(
+                r'(?:got|Got)\s+(.+?),\s*(?:want|Want|expected)\s+(.+)',
+                error_msg,
+            )
+            if got_want:
+                want_val = got_want.group(2).strip().rstrip('.')
+                test_body = (
+                    f'\tgot := {func_under_test}()\n'
+                    f'\tif got != {want_val} {{\n'
+                    f'\t\tt.Errorf("{func_under_test}() = %v, want {want_val}", got)\n'
+                    f'\t}}\n'
+                )
+            else:
+                test_body = (
+                    f'\tresult := {func_under_test}()\n'
+                    f'\tif result == nil {{\n'
+                    f'\t\tt.Errorf("{func_under_test}() returned nil, '
+                    f'expected non-nil result")\n'
+                    f'\t}}\n'
+                )
+        else:
+            test_body = (
+                f'\tresult := {func_under_test}()\n'
+                f'\tif result == nil {{\n'
+                f'\t\tt.Errorf("{func_under_test}() returned nil, '
+                f'expected non-nil result")\n'
+                f'\t}}\n'
+            )
+
+        test_content = (
+            f'package {pkg_name}\n\n'
+            f'import "testing"\n\n'
+            f'func {func_name}(t *testing.T) {{\n'
+            f'{test_body}}}\n'
+        )
+        return _format_new_test_patch(test_content, test_file)
+
+    if language == "python":
+        src_file = bug_spec.file
+        if not src_file.endswith(".py"):
+            return None
+
+        stem = Path(src_file).stem
+        # Place test file alongside source or in tests/ if it exists
+        root = Path(repo_path)
+        if (root / "tests").is_dir():
+            test_file = f"tests/test_{stem}.py"
+        else:
+            test_file = str(Path(src_file).parent / f"test_{stem}.py")
+
+        func_name = "test_regression"
+        if test_id:
+            parts = test_id.split("::")
+            last = parts[-1] if parts else test_id
+            clean = re.sub(r'[^A-Za-z0-9_]', '', last)
+            if clean and clean.startswith("test"):
+                func_name = (
+                    f"test_regression_{clean[4:]}" if len(clean) > 4
+                    else "test_regression"
+                )
+            elif clean:
+                func_name = f"test_regression_{clean}"
+
+        module_name = _source_to_module_name(src_file)
+        import_line = ""
+        if module_name:
+            import_line = f"from {module_name} import {func_under_test}\n\n"
+
+        assertion_expr, _error_detail = _extract_python_error_message(test_output)
+        if assertion_expr:
+            test_body = (
+                f'def {func_name}():\n'
+                f'    """Regression test for {func_under_test}."""\n'
+                f'    result = {func_under_test}()\n'
+                f'    assert result is not None, '
+                f'"{func_under_test} should return a valid result"\n'
+            )
+        else:
+            test_body = (
+                f'def {func_name}():\n'
+                f'    """Regression test for {func_under_test}."""\n'
+                f'    try:\n'
+                f'        result = {func_under_test}()\n'
+                f'    except Exception as exc:\n'
+                f'        raise AssertionError(\n'
+                f'            f"{func_under_test}() raised '
+                f'{{type(exc).__name__}}: {{exc}}"\n'
+                f'        ) from exc\n'
+                f'    assert result is not None\n'
+            )
+
+        test_content = f"{import_line}{test_body}"
+        return _format_new_test_patch(test_content, test_file)
+
+    return None
+
+
 async def generate_test_patch(
     bug_spec: BugSpec,
     repo_path: str,
@@ -3137,7 +4007,10 @@ async def generate_test_patch(
     Modifies existing test files. Falls back to adding a new test function
     in the existing file when no relevant functions are found.
     """
-    existing_test = _find_existing_test_file(repo_path, bug_spec.file, language)
+    existing_test = _find_existing_test_file(
+        repo_path, bug_spec.file, language,
+        function_name=bug_spec.function_name,
+    )
 
     if existing_test:
         result = await _generate_test_patch_existing(
@@ -3146,9 +4019,32 @@ async def generate_test_patch(
         )
         return result
     logger.warning(
-        "  No existing test file found for %s",
+        "  No existing test file found for %s — trying fallback search",
         bug_spec.file,
     )
+
+    # Fallback: search same directory and parent for ANY test file
+    if test_output:
+        fallback_test = _find_any_test_file_nearby(
+            repo_path, bug_spec.file, language,
+        )
+        if fallback_test:
+            logger.info("  Fallback: using nearby test file %s", fallback_test)
+            regression_patch = _generate_regression_test_patch(
+                repo_path, bug_spec, language, test_output,
+                test_file_override=fallback_test,
+            )
+            if regression_patch:
+                return regression_patch
+
+        # Last resort: create a minimal new test file with a regression test
+        logger.info("  Fallback: creating new test file for %s", bug_spec.file)
+        new_test_patch = _create_new_regression_test_file(
+            repo_path, bug_spec, language, test_output,
+        )
+        if new_test_patch:
+            return new_test_patch
+
     return None
 
 
@@ -3686,13 +4582,11 @@ async def _generate_test_patch_existing(
     for attempt, target in enumerate(ranked):
         target_source = str(target["source"])
 
-        # Extract the actual function signature line from source
-        source_lines = target_source.strip().splitlines()
-        func_sig_line = source_lines[0].rstrip() if source_lines else str(target["name"])
+        target_name = str(target["name"])
 
-        prompt = f"""You are modifying a single test function to add regression coverage for a bug.
+        prompt = f"""You are modifying an existing test function to add regression assertions. Do NOT create a new function. Do NOT rename the function. Do NOT change or remove any existing assertions.
 
-Here is the test function to modify:
+Here is the existing test function to modify:
 ```{language}
 {target_source}
 ```
@@ -3702,7 +4596,7 @@ Context — imports used in the test file:
 {file_imports}
 ```
 
-Here is the function under test:
+Here is the function under test (correct version):
 ```{language}
 {bug_spec.original_code}
 ```
@@ -3714,23 +4608,18 @@ Here is the buggy version of the function:
 
 The bug: {bug_spec.bug_description}
 {_test_output_section(test_output)}
-HARD CONSTRAINT: Return ONLY the modified test function. Do NOT return the complete file.
-
-Add 1-3 NEW assertion statements at the END of the function body that exercise the described bug. At least one assertion must verify a value that will PASS with the original code and FAIL with the buggy code.
+Add 1-3 regression assertions at the END of the function `{target_name}` that will PASS with the original code and FAIL with the buggy code. Return the COMPLETE modified function with all original assertions intact plus the new ones appended.
 
 FORBIDDEN — these produce synthetic detection signals:
+- Do NOT rename the function or change its signature
+- Do NOT modify or remove any existing assertions — ONLY append new ones at the end
 - Do NOT access unexported/private fields (Go: lowercase-named struct fields, Python: _underscored attributes). Assert only on public return values and observable API effects.
 - Do NOT use sequential mechanical variable names like cc2, cc3, obj2, val1. Use names that describe what the value represents (e.g. conn, result, got, want).
 - Do NOT write an assertion that only verifies a function can be called without error (e.g., _ = f()). The assertion MUST check a specific return value or side effect that the bug breaks.
 - Do NOT write a test that only passes/fails based on a single operator or literal change — test the function's documented behavior with meaningful inputs.
-
-Requirements:
-- Keep the EXACT same function signature: `{func_sig_line}`
-- Preserve the EXACT same indentation level as the original
-- Do NOT change existing lines — only ADD new assertions at the end
 - Do NOT add comments
-- Do NOT add new functions
-- Return ONLY the complete function body, nothing else"""
+
+Return ONLY the complete modified test function, nothing else."""
 
         modified_func: str | None = None
         try:
@@ -3756,21 +4645,22 @@ Requirements:
 
         modified_func = _strip_strategy_labels(modified_func)
         if language == "go":
-            go_func_match = re.search(rf'^func\s+(?:\([^)]*\)\s+)?{re.escape(str(target["name"]))}\s*\(', modified_func, re.MULTILINE)
+            go_func_match = re.search(rf'^func\s+(?:\([^)]*\)\s+)?{re.escape(target_name)}\s*\(', modified_func, re.MULTILINE)
             idx = go_func_match.start() if go_func_match else -1
+        elif language in ("rust", "java"):
+            idx = modified_func.find(target_name)
         else:
-            func_prefix = f"def {target['name']}"
+            func_prefix = f"def {target_name}"
             idx = modified_func.find(func_prefix)
         if idx > 0:
             modified_func = modified_func[idx:]
         elif idx < 0:
             logger.warning(
                 "  LLM response missing function definition for %s (attempt %d/%d)",
-                target["name"], attempt + 1, len(ranked),
+                target_name, attempt + 1, len(ranked),
             )
             continue
 
-        # Re-indent LLM output to match the original function's indentation
         orig_lines = target_source.splitlines(keepends=True)
         mod_lines = modified_func.splitlines(keepends=True)
         if orig_lines and mod_lines:
@@ -3787,14 +4677,18 @@ Requirements:
                     for line in mod_lines
                 )
 
-        modified_content = original_test_content.replace(target_source.rstrip(), modified_func.rstrip())
-
-        if modified_content == original_test_content:
+        replace_pos = original_test_content.find(target_source)
+        if replace_pos == -1:
             logger.warning(
-                "  Splice failed for %s (attempt %d/%d)",
+                "  Could not locate target function %s for replacement (attempt %d/%d)",
                 target["name"], attempt + 1, len(ranked),
             )
             continue
+        modified_content = (
+            original_test_content[:replace_pos]
+            + modified_func.rstrip()
+            + original_test_content[replace_pos + len(target_source.rstrip()):]
+        )
 
         modified_content = _normalize_test_whitespace(modified_content, original_test_content)
 
@@ -4126,6 +5020,103 @@ def build_candidate(
     )
 
 
+async def enrich_instance(
+    instance: dict,
+    repo_path: str,
+    model: str = 'sonnet',
+) -> dict | None:
+    pipeline = instance.get('_pipeline')
+    if not pipeline:
+        raise ValueError("Instance missing '_pipeline' metadata — was it produced with --yield-only?")
+
+    bug_spec_dict = pipeline['bug_spec']
+    secondary_changes = [
+        SecondaryChange(**sc) for sc in bug_spec_dict.get('secondary_changes', [])
+    ]
+    bug_spec = BugSpec(
+        file=bug_spec_dict['file'],
+        function_name=bug_spec_dict['function_name'],
+        original_code=bug_spec_dict['original_code'],
+        buggy_code=bug_spec_dict['buggy_code'],
+        bug_description=bug_spec_dict['bug_description'],
+        bug_category=bug_spec_dict['bug_category'],
+        secondary_changes=secondary_changes,
+    )
+
+    social_artifacts = _mine_social_artifacts(repo_path)
+    social_context = _build_social_context(social_artifacts)
+
+    symptom = await _bug_to_symptom(
+        bug_spec.bug_description, file_path=bug_spec.file, model=model,
+    )
+    style_examples = _mine_issue_style_examples(repo_path)
+    ctx = _collect_repo_context(repo_path)
+    dataset_examples = _load_dataset_examples(DATASET_PATH, instance['repo'])
+    _issue_gen_kwargs = dict(
+        symptom=symptom,
+        test_output=pipeline['test_output'],
+        repo_context=ctx,
+        style_examples=style_examples,
+        model=model,
+        social_context=social_context,
+        dataset_examples=dataset_examples,
+        repo_name=Path(repo_path).name,
+        language=pipeline['language'],
+    )
+    test_patch = ''
+    try:
+        generated_tp = await generate_test_patch(
+            bug_spec, repo_path, pipeline['language'], model=model,
+            test_output=pipeline['test_output'],
+        )
+        if generated_tp:
+            test_patch = generated_tp
+    except Exception:
+        logger.warning(
+            'test_patch generation failed for %s', instance.get('instance_id'),
+            exc_info=True,
+        )
+
+    iid = instance.get('instance_id', 'unknown')
+    max_screen_attempts = 5
+    for screen_attempt in range(max_screen_attempts):
+        social_context = _build_social_context(social_artifacts)
+        _issue_gen_kwargs['social_context'] = social_context
+        problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
+
+        if not _verify_issue_independence(problem_statement, bug_spec):
+            for _retry in range(2):
+                problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
+                if _verify_issue_independence(problem_statement, bug_spec):
+                    break
+            else:
+                logger.info('  issue leaks identifiers on attempt %d/%d, re-rolling',
+                            screen_attempt + 1, max_screen_attempts)
+                continue
+
+        screen_candidate = CandidateInstance(
+            instance_id=iid, repo=instance.get('repo', ''),
+            pr_number=0, base_commit=instance.get('base_commit', ''),
+            merge_commit=instance.get('merge_commit', ''),
+            patch=instance.get('patch', ''),
+            problem_statement=problem_statement,
+            test_patch=test_patch,
+            hints_text='', created_at='',
+        )
+        if await _self_screen_instance(screen_candidate):
+            logger.info('  self-screen PASSED on attempt %d/%d', screen_attempt + 1, max_screen_attempts)
+            break
+        logger.info('  self-screen failed attempt %d/%d, re-rolling issue text', screen_attempt + 1, max_screen_attempts)
+    else:
+        logger.info('  screening failed all %d attempts (independence or self-screen), discarding', max_screen_attempts)
+        return None
+
+    instance['problem_statement'] = problem_statement
+    instance['test_patch'] = test_patch
+    instance['_pipeline']['phase'] = 'enriched'
+    return instance
+
+
 def _create_buggy_commit(
     repo_path: str,
     file_rel: str,
@@ -4297,6 +5288,7 @@ def _run_tests_on_buggy_code(
     language: str,
     timeout: int = 120,
     target_file: str | None = None,
+    function_name: str | None = None,
 ) -> str | None:
     """Run the project's test suite against buggy code and capture output.
 
@@ -4344,8 +5336,18 @@ def _run_tests_on_buggy_code(
             logger.debug("  Running targeted tests: %s", test_file)
     elif target_file and language == "go":
         pkg_dir = os.path.dirname(target_file) or "."
-        test_cmd = ["go", "test", "-short", "-count=1", "-timeout", "90s", f"./{pkg_dir}"]
-        logger.debug("  Running targeted Go tests: ./%s", pkg_dir)
+        co_located_test = Path(repo_path) / (
+            str(Path(target_file).parent / f"{Path(target_file).stem}_test.go")
+        )
+        if co_located_test.is_file():
+            test_cmd = ["go", "test", "-short", "-count=1", "-timeout", "90s", f"./{pkg_dir}"]
+            logger.debug("  Running targeted Go tests: ./%s", pkg_dir)
+        elif function_name and _find_go_cross_package_test(repo_path, function_name):
+            test_cmd = ["go", "test", "-short", "-count=1", "-timeout", "90s", "./..."]
+            logger.debug("  Running cross-package Go tests for %s: ./...", function_name)
+        else:
+            test_cmd = ["go", "test", "-short", "-count=1", "-timeout", "90s", f"./{pkg_dir}"]
+            logger.debug("  Running targeted Go tests: ./%s", pkg_dir)
     elif target_file and language == "rust":
         rust_root = Path(repo_path)
         target_dir = (rust_root / target_file).parent
@@ -4591,6 +5593,35 @@ def _ensure_venv(repo_path: str, language: str) -> Path | None:
         return None
 
 
+def _is_same_package(primary_file: str, secondary_file: str, language: str) -> bool:
+    """Check if two files belong to the same package.
+
+    For Go: same directory = same package.
+    For Python: same top-level package (first path component after stripping
+    common prefixes like 'src/').
+    For other languages: same directory.
+    """
+    primary_dir = os.path.dirname(primary_file)
+    sec_dir = os.path.dirname(secondary_file)
+
+    if language == "go":
+        # In Go, same directory = same package
+        return primary_dir == sec_dir
+
+    if language == "python":
+        # For Python, check same top-level package
+        def _top_package(filepath: str) -> str:
+            parts = Path(filepath).parts
+            # Strip common prefixes like 'src/'
+            if parts and parts[0] in ('src', 'lib', 'source'):
+                parts = parts[1:]
+            return parts[0] if parts else ""
+        return _top_package(primary_file) == _top_package(secondary_file)
+
+    # Default: same directory
+    return primary_dir == sec_dir
+
+
 async def synthesize_repo(
     repo_path: str,
     repo_slug: str,
@@ -4600,6 +5631,7 @@ async def synthesize_repo(
     operators: list[str] | None = None,
     model: str = "sonnet",
     screen_instances: bool = True,
+    yield_only: bool = False,
 ) -> RepoSynthesisResult:
     """Synthesize bug instances for a repository.
 
@@ -4632,7 +5664,9 @@ async def synthesize_repo(
     all_targets = find_mutation_targets(repo_path, language)
     with_tests = [
         t for t in all_targets
-        if _find_existing_test_file(repo_path, t["file"], language) is not None
+        if _find_existing_test_file(
+            repo_path, t["file"], language, function_name=t.get("function_name"),
+        ) is not None
     ]
     without_tests = [t for t in all_targets if t not in with_tests]
     logger.info(
@@ -4643,17 +5677,24 @@ async def synthesize_repo(
     with_assertions = []
     with_tests_no_assertions = []
     for t in with_tests:
-        test_file = _find_existing_test_file(repo_path, t["file"], language)
+        test_file = _find_existing_test_file(
+            repo_path, t["file"], language, function_name=t.get("function_name"),
+        )
         if test_file:
-            assertions = _analyze_test_assertions(
-                os.path.join(repo_path, test_file), language
-            )
+            try:
+                test_source = Path(os.path.join(repo_path, test_file)).read_text(
+                    encoding="utf-8", errors="replace",
+                )
+            except OSError:
+                test_source = ""
+            assertions = _analyze_test_assertions(test_source, language)
             relevant = [
                 a for a in assertions
                 if (a.get('called_function') == t['function_name']
                     or t['function_name'] in a.get('expression', ''))
             ]
             if relevant:
+                t['assertions'] = relevant
                 with_assertions.append(t)
                 continue
         with_tests_no_assertions.append(t)
@@ -4668,6 +5709,8 @@ async def synthesize_repo(
     _ensure_venv(repo_path, language)
 
     candidates: list[CandidateInstance] = []
+    enrichment_data: dict[str, dict] = {}
+    seen_patches: set[str] = set()
     mutations_attempted = 0
     build_failure_count = 0
     test_failure_count = 0
@@ -4679,38 +5722,53 @@ async def synthesize_repo(
 
         mutations_attempted += 1
 
+        repo_short = repo_slug.split('/')[-1]
+        pfx = f'[{repo_short}] [{len(candidates)}/{max_mutations} yielded] [{mutations_attempted}/{min(len(targets), max_mutations * 8)}]'
+
         logger.info(
-            "[%d/%d] Mutating %s:%s",
-            i + 1,
-            min(len(targets), max_mutations * 8),
+            "%s Mutating %s:%s",
+            pfx,
             target["file"],
             target["function_name"],
         )
 
         related_files = _find_related_files(repo_path, target, language)
         if related_files:
-            logger.info("  Found %d related files", len(related_files))
+            logger.info("%s  Found %d related files", pfx, len(related_files))
 
         test_context = _extract_test_context(
             repo_path, target["file"], target["function_name"], language,
         )
 
-        bug_plan = await _plan_multi_file_mutation(
-            target["source"], related_files, model=model,
-            test_context=test_context,
-        )
-        if bug_plan:
-            logger.info("  Multi-file plan: %s", bug_plan.primary_description[:80])
+        if yield_only:
+            bug_plan = None
+        else:
+            bug_plan = await _plan_multi_file_mutation(
+                target["source"], related_files, model=model,
+                test_context=test_context,
+            )
+            if bug_plan:
+                logger.info("%s  Multi-file plan: %s", pfx, bug_plan.primary_description[:80])
 
-        # H10: Try targeted mutation for Python (higher data-first pass rate)
+        # H10: Try targeted mutation (assertion-aware, data-first pass rate)
         bug_spec = None
         patch = ""
         mutated_content = ""
         original_content = ""
-        if language == "python":
-            _tfile = _find_existing_test_file(repo_path, target["file"], language)
+        if language in ("python", "go"):
+            _tfile = _find_existing_test_file(
+                repo_path, target["file"], language,
+                function_name=target.get("function_name"),
+            )
             if _tfile:
                 _tspec = _try_targeted_mutation(repo_path, target, _tfile, language)
+                if _tspec:
+                    desc_lower = _tspec.bug_description.lower()
+                    if any(op_sig in desc_lower for op_sig in (
+                        "changed '", 'swapped', 'flipped', 'inverted operator',
+                        "' to '", 'operator',
+                    )):
+                        _tspec = None
                 if _tspec:
                     try:
                         _torig = (Path(repo_path) / _tspec.file).read_text(
@@ -4729,21 +5787,42 @@ async def synthesize_repo(
                                 mutated_content = _tmut
                                 original_content = _torig
                                 logger.info(
-                                    "  Targeted mutation: %s",
-                                    _tspec.bug_description[:80],
+                                    "%s  Targeted mutation: %s",
+                                    pfx, _tspec.bug_description[:80],
                                 )
                     except OSError:
                         pass
 
+        # Resolve assertion data for the prompt
+        target_assertions = target.get('assertions')
+        if target_assertions is None:
+            _afile = _find_existing_test_file(repo_path, target["file"], language)
+            if _afile:
+                try:
+                    _asrc = Path(os.path.join(repo_path, _afile)).read_text(
+                        encoding="utf-8", errors="replace",
+                    )
+                    _all_assertions = _analyze_test_assertions(_asrc, language)
+                    target_assertions = [
+                        a for a in _all_assertions
+                        if (a.get('called_function') == target['function_name']
+                            or target['function_name'] in a.get('expression', ''))
+                    ] or None
+                except OSError:
+                    pass
+
         # H2: Fall back to LLM introduce_bug (retry up to 2 times if patch too simple)
+        _retry_strategies = ["", "guard_removal", "return_corruption"]
         for attempt in range(3):
             if bug_spec is None:
                 bug_spec = await introduce_bug(
                     target, model=model, related_files=related_files,
                     bug_plan=bug_plan, test_context=test_context,
+                    mutation_strategy=_retry_strategies[attempt],
+                    assertions=target_assertions,
                 )
             if bug_spec is None:
-                logger.warning("  Skipped — LLM did not produce a valid mutation")
+                logger.warning("%s  Skipped — LLM did not produce a valid mutation", pfx)
                 break
 
             file_path = Path(repo_path) / bug_spec.file
@@ -4752,7 +5831,7 @@ async def synthesize_repo(
                     encoding="utf-8", errors="replace"
                 )
             except OSError:
-                logger.warning("  Skipped — could not read %s", bug_spec.file)
+                logger.warning("%s  Skipped — could not read %s", pfx, bug_spec.file)
                 bug_spec = None
                 break
 
@@ -4761,19 +5840,24 @@ async def synthesize_repo(
             )
 
             if mutated_content == original_content:
-                logger.warning('  Mutation could not be applied, retrying (%d/2)', attempt + 1)
+                logger.warning('%s  Mutation could not be applied, retrying (%d/2)', pfx, attempt + 1)
                 bug_spec = None
                 continue
 
             if not _validate_mutation_parses(mutated_content, language):
-                logger.warning('  Mutation does not parse (%s), retrying (%d/2)', language, attempt + 1)
+                logger.warning('%s  Mutation does not parse (%s), retrying (%d/2)', pfx, language, attempt + 1)
                 bug_spec = None
                 continue
 
             orig_stripped = [ln.strip() for ln in original_content.splitlines() if ln.strip()]
             mut_stripped = [ln.strip() for ln in mutated_content.splitlines() if ln.strip()]
             if orig_stripped == mut_stripped:
-                logger.warning('  Mutation is whitespace-only, retrying (%d/2)', attempt + 1)
+                logger.warning('%s  Mutation is whitespace-only, retrying (%d/2)', pfx, attempt + 1)
+                bug_spec = None
+                continue
+
+            if _is_ast_equivalent(original_content, mutated_content, language):
+                logger.warning('%s  Mutation is semantically equivalent, retrying (%d/2)', pfx, attempt + 1)
                 bug_spec = None
                 continue
 
@@ -4781,28 +5865,28 @@ async def synthesize_repo(
 
             patch = generate_patch(original_content, mutated_content, bug_spec.file)
             if not patch.strip():
-                logger.warning("  Skipped — empty patch")
+                logger.warning("%s  Skipped — empty patch", pfx)
                 bug_spec = None
                 break
 
             changed = _count_changed_lines(patch)
-            if changed >= 2 and len(patch) >= 100:
+            if changed >= 4 and len(patch) >= 200:
                 break
             if attempt < 2:
                 reason = []
-                if changed < 2:
-                    reason.append(f"{changed} changed lines < 2")
-                if len(patch) < 100:
-                    reason.append(f"{len(patch)} chars < 100")
+                if changed < 4:
+                    reason.append(f"{changed} changed lines < 4")
+                if len(patch) < 200:
+                    reason.append(f"{len(patch)} chars < 200")
                 logger.info(
-                    "  Patch too simple (%s), retrying (%d/2)",
-                    ", ".join(reason), attempt + 1,
+                    "%s  Patch too simple (%s), retrying (%d/2)",
+                    pfx, ", ".join(reason), attempt + 1,
                 )
                 bug_spec = None
             else:
                 logger.warning(
-                    "  Patch still below targets after retries (%d lines, %d chars), accepting",
-                    changed, len(patch),
+                    "%s  Patch still below targets after retries (%d lines, %d chars), accepting",
+                    pfx, changed, len(patch),
                 )
 
         if bug_spec is None:
@@ -4813,22 +5897,28 @@ async def synthesize_repo(
         # Apply secondary changes from multi-file mutation
         buggy_files: dict[str, str] = {bug_spec.file: mutated_content}
         test_patch_parts: list[str] = []
+        primary_dir = os.path.dirname(bug_spec.file)
         for sc in bug_spec.secondary_changes:
             # Skip benchmark/demo/example files — they produce unrelated patch hunks
             # that judges immediately flag as artificially constructed
             if any(excl in sc.file for excl in _EXCLUDE_SUBSTR):
-                logger.warning("  Skipping secondary change in excluded file %s", sc.file)
+                logger.warning("%s  Skipping secondary change in excluded file %s", pfx, sc.file)
+                continue
+            # Skip cross-package secondary changes — judges flag patches that
+            # touch unrelated packages as a synthesis signal
+            if not _is_same_package(bug_spec.file, sc.file, language):
+                logger.warning("%s  Skipping cross-package secondary change in %s (primary: %s)", pfx, sc.file, primary_dir)
                 continue
             sec_path = Path(repo_path) / sc.file
             if not sec_path.is_file():
-                logger.warning("  Secondary file not found: %s", sc.file)
+                logger.warning("%s  Secondary file not found: %s", pfx, sc.file)
                 continue
             try:
                 sec_content = sec_path.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
             if sc.original_snippet not in sec_content:
-                logger.warning("  Secondary snippet not found in %s", sc.file)
+                logger.warning("%s  Secondary snippet not found in %s", pfx, sc.file)
                 continue
             sec_buggy = sec_content.replace(sc.original_snippet, sc.buggy_snippet, 1)
             if sec_buggy != sec_content:
@@ -4838,17 +5928,20 @@ async def synthesize_repo(
                 else:
                     patch += sec_diff
                 buggy_files[sc.file] = sec_buggy
-                logger.info("  Secondary change in %s: %s", sc.file, sc.description)
+                logger.info("%s  Secondary change in %s: %s", pfx, sc.file, sc.description)
 
-        if len(buggy_files) < 2 and related_files:
-            logger.info("  Only %d file changed, retrying with explicit multi-file instruction", len(buggy_files))
+        if not yield_only and len(buggy_files) < 2 and related_files:
+            logger.info("%s  Only %d file changed, retrying with explicit multi-file instruction", pfx, len(buggy_files))
             retry_spec = await introduce_bug(
                 target, model=model, related_files=related_files,
             )
             if retry_spec and retry_spec.secondary_changes:
                 for sc in retry_spec.secondary_changes:
                     if any(excl in sc.file for excl in _EXCLUDE_SUBSTR):
-                        logger.warning("  Skipping retry secondary change in excluded file %s", sc.file)
+                        logger.warning("%s  Skipping retry secondary change in excluded file %s", pfx, sc.file)
+                        continue
+                    if not _is_same_package(bug_spec.file, sc.file, language):
+                        logger.warning("%s  Skipping retry cross-package secondary change in %s", pfx, sc.file)
                         continue
                     sec_path = Path(repo_path) / sc.file
                     if not sec_path.is_file():
@@ -4867,110 +5960,124 @@ async def synthesize_repo(
                         else:
                             patch += sec_diff
                         buggy_files[sc.file] = sec_buggy
-                        logger.info("  Retry secondary change in %s", sc.file)
+                        logger.info("%s  Retry secondary change in %s", pfx, sc.file)
 
         patched_files: set[str] = {bug_spec.file} | set(buggy_files.keys())
         ctx = _collect_repo_context(repo_path)
         real_issues = ctx.get("recent_issues", [])
 
-        incidentals = await _generate_incidental_changes(
-            repo_path, bug_spec, language, model=model,
-        )
-        for inc_path, inc_original, inc_modified in incidentals:
-            if inc_path in patched_files:
-                logger.info("  Skipping duplicate incidental for %s", inc_path)
-                continue
-            # Validate RST references in changelog files
-            if inc_path.lower().endswith((".rst", ".md")):
-                inc_modified = _validate_rst_references(inc_modified, real_issues)
-            try:
-                inc_file = Path(repo_path) / inc_path
-                inc_content = inc_file.read_text(encoding="utf-8", errors="replace")
-                if inc_original == "EMPTY":
-                    new_content = inc_content + "\n" + inc_modified
-                else:
-                    new_content = inc_content.replace(inc_original, inc_modified, 1)
-                if new_content != inc_content:
-                    # Reject CHANGES.rst edits that create duplicate version headers
-                    if Path(inc_path).name in (
-                        "CHANGES.rst", "CHANGELOG.rst", "CHANGELOG.md",
-                        "HISTORY.rst", "HISTORY.md",
-                    ):
-                        headers = re.findall(
-                            r"^(?:Version\s+\S+|#+\s+\S+)", new_content, re.MULTILINE,
-                        )
-                        if len(headers) != len(set(headers)):
-                            logger.debug(
-                                "Skipping %s — duplicate version header", inc_path,
+        if not yield_only:
+            incidentals = await _generate_incidental_changes(
+                repo_path, bug_spec, language, model=model,
+            )
+            for inc_path, inc_original, inc_modified in incidentals:
+                if inc_path in patched_files:
+                    logger.info("%s  Skipping duplicate incidental for %s", pfx, inc_path)
+                    continue
+                # Validate RST references in changelog files
+                if inc_path.lower().endswith((".rst", ".md")):
+                    inc_modified = _validate_rst_references(inc_modified, real_issues)
+                try:
+                    inc_file = Path(repo_path) / inc_path
+                    inc_content = inc_file.read_text(encoding="utf-8", errors="replace")
+                    if inc_original == "EMPTY":
+                        new_content = inc_content + "\n" + inc_modified
+                    else:
+                        new_content = inc_content.replace(inc_original, inc_modified, 1)
+                    if new_content != inc_content:
+                        # Reject CHANGES.rst edits that create duplicate version headers
+                        if Path(inc_path).name in (
+                            "CHANGES.rst", "CHANGELOG.rst", "CHANGELOG.md",
+                            "HISTORY.rst", "HISTORY.md",
+                        ):
+                            headers = re.findall(
+                                r"^(?:Version\s+\S+|#+\s+\S+)", new_content, re.MULTILINE,
                             )
-                            continue
-                        # Reject edits where underline is separated from header by blank lines
-                        _orphaned = False
-                        nc_lines = new_content.split("\n")
-                        for i, nc_line in enumerate(nc_lines):
-                            if re.match(r"^Version\s+\S+", nc_line):
-                                j = i + 1
-                                while j < len(nc_lines) and nc_lines[j].strip() == "":
-                                    j += 1
-                                if j < len(nc_lines) and re.match(r"^[-=~^]{3,}$", nc_lines[j].strip()):
-                                    if j != i + 1:
-                                        _orphaned = True
-                                        break
-                        if _orphaned:
-                            logger.debug(
-                                "Skipping %s — orphaned underline after header", inc_path,
-                            )
-                            continue
-                    patch += generate_patch(new_content, inc_content, inc_path)
-                    patched_files.add(inc_path)
-            except OSError:
-                continue
+                            if len(headers) != len(set(headers)):
+                                logger.debug(
+                                    "Skipping %s — duplicate version header", inc_path,
+                                )
+                                continue
+                            # Reject edits where underline is separated from header by blank lines
+                            _orphaned = False
+                            nc_lines = new_content.split("\n")
+                            for i, nc_line in enumerate(nc_lines):
+                                if re.match(r"^Version\s+\S+", nc_line):
+                                    j = i + 1
+                                    while j < len(nc_lines) and nc_lines[j].strip() == "":
+                                        j += 1
+                                    if j < len(nc_lines) and re.match(r"^[-=~^]{3,}$", nc_lines[j].strip()):
+                                        if j != i + 1:
+                                            _orphaned = True
+                                            break
+                            if _orphaned:
+                                logger.debug(
+                                    "Skipping %s — orphaned underline after header", inc_path,
+                                )
+                                continue
+                        patch += generate_patch(new_content, inc_content, inc_path)
+                        patched_files.add(inc_path)
+                except OSError:
+                    continue
 
         buggy_commit = _create_buggy_commit_multi(
             repo_path, buggy_files, bug_spec.bug_description,
         )
         if buggy_commit is None:
-            logger.warning("  Skipped — could not create buggy commit")
+            logger.warning("%s  Skipped — could not create buggy commit", pfx)
             continue
 
         # H3: Capture test failure output from buggy code
         test_output = _run_tests_on_buggy_code(
             repo_path, buggy_commit, language,
             target_file=bug_spec.file,
+            function_name=bug_spec.function_name,
         )
         if test_output:
-            logger.info("  Captured %d chars of test output", len(test_output))
+            logger.info("%s  Captured %d chars of test output", pfx, len(test_output))
             test_output = _sanitize_test_output(test_output, repo_path)
             test_output = _humanize_traceback(test_output, repo_path)
 
         if not test_output or not _is_valid_test_output(test_output):
-            logger.warning("  Skipped — mutation did not cause test failures (data-first path required)")
+            logger.warning("%s  Skipped — mutation did not cause test failures (data-first path required)", pfx)
             continue
 
-        # H2: Mine social artifacts and build social context
-        social_artifacts = _mine_social_artifacts(repo_path)
-        social_context = _build_social_context(social_artifacts)
+        patch_hash = hashlib.md5(patch.encode()).hexdigest()
+        if patch_hash in seen_patches:
+            logger.info('%s  Skipped — duplicate patch (same diff already yielded)', pfx)
+            continue
+        seen_patches.add(patch_hash)
 
-        # H1: Information firewall — generate issue from symptom only
-        symptom = await _bug_to_symptom(
-            bug_spec.bug_description, file_path=bug_spec.file, model=model,
-            patch_summary=_summarize_patch(patch),
-        )
-        style_examples = _mine_issue_style_examples(repo_path)
-        problem_statement = await generate_issue_from_symptom(
-            symptom=symptom,
-            test_output=test_output,
-            repo_context=ctx,
-            style_examples=style_examples,
-            model=model,
-            social_context=social_context,
-            dataset_examples=dataset_examples,
-            repo_name=Path(repo_path).name,
-            language=language,
-        )
+        if yield_only:
+            synthesis_result = SynthesisResult(
+                bug_spec=bug_spec,
+                patch=patch,
+                problem_statement=(
+                    f'[yield-only] Mutation in {bug_spec.file}:{bug_spec.function_name} '
+                    f'broke tests. Test output captured ({len(test_output or "")} chars). '
+                    f'Generated in yield-measurement mode without full enrichment.'
+                ),
+                instance_id='',
+                base_commit=buggy_commit,
+                test_output=test_output or '',
+            )
+            candidate = build_candidate(
+                repo_slug, buggy_commit, synthesis_result, test_patch='',
+            )
+            candidate.merge_commit = base_commit
+            synthesis_result.instance_id = candidate.instance_id
+            candidates.append(candidate)
+            enrichment_data[candidate.instance_id] = {
+                'bug_spec': dataclasses.asdict(bug_spec),
+                'test_output': test_output or '',
+                'language': language,
+            }
+            logger.info('%s  Generated (yield-only): %s (%s)', pfx, candidate.instance_id, bug_spec.bug_category)
+            logger.info('%s  === YIELD %d/%d (rate: %.0f%%) ===', pfx, len(candidates), max_mutations, 100 * len(candidates) / mutations_attempted)
+            continue
 
+        # Generate test patch once (doesn't vary between screen retries)
         test_patch = ''.join(test_patch_parts)
-
         try:
             generated_tp = await generate_test_patch(
                 bug_spec, repo_path, language, model=model, test_output=test_output,
@@ -4978,7 +6085,7 @@ async def synthesize_repo(
             if generated_tp:
                 test_patch = generated_tp
         except Exception:
-            logger.warning('  test_patch generation failed — using fallback', exc_info=True)
+            logger.warning('%s  test_patch generation failed — using fallback', pfx, exc_info=True)
 
         ft, ft_category = _classify_failure_type(test_output or "", language)
         if ft == "build_failure":
@@ -4986,34 +6093,83 @@ async def synthesize_repo(
         elif ft == "test_failure":
             test_failure_count += 1
 
-        synthesis_result = SynthesisResult(
-            bug_spec=bug_spec,
-            patch=patch,
-            problem_statement=problem_statement,
-            instance_id="",
-            base_commit=buggy_commit,
-            test_output=test_output or "",
-            failure_type=ft,
-            build_failure_category=ft_category,
+        # H1: Information firewall — generate issue from symptom only
+        symptom = await _bug_to_symptom(
+            bug_spec.bug_description, file_path=bug_spec.file, model=model,
+        )
+        style_examples = _mine_issue_style_examples(repo_path)
+        social_artifacts = _mine_social_artifacts(repo_path)
+
+        _issue_gen_kwargs = dict(
+            symptom=symptom,
+            test_output=test_output,
+            repo_context=ctx,
+            style_examples=style_examples,
+            model=model,
+            social_context='',
+            dataset_examples=dataset_examples,
+            repo_name=Path(repo_path).name,
+            language=language,
         )
 
-        candidate = build_candidate(
-            repo_slug, buggy_commit, synthesis_result, test_patch=test_patch,
-        )
-        candidate.merge_commit = base_commit
-        synthesis_result.instance_id = candidate.instance_id
+        max_screen_attempts = 5 if screen_instances else 1
+        problem_statement = None
+        for screen_attempt in range(max_screen_attempts):
+            social_context = _build_social_context(social_artifacts)
+            _issue_gen_kwargs['social_context'] = social_context
+            problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
 
-        if screen_instances and not await _self_screen_instance(candidate):
-            logger.info("  Discarded %s — failed self-screening", candidate.instance_id)
+            if not _verify_issue_independence(problem_statement, bug_spec):
+                for _retry in range(2):
+                    problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
+                    if _verify_issue_independence(problem_statement, bug_spec):
+                        break
+                else:
+                    logger.info('%s  issue leaks identifiers on attempt %d/%d, re-rolling',
+                                pfx, screen_attempt + 1, max_screen_attempts)
+                    continue
+
+            synthesis_result = SynthesisResult(
+                bug_spec=bug_spec,
+                patch=patch,
+                problem_statement=problem_statement,
+                instance_id="",
+                base_commit=buggy_commit,
+                test_output=test_output or "",
+            )
+            candidate = build_candidate(
+                repo_slug, buggy_commit, synthesis_result, test_patch=test_patch,
+            )
+            candidate.merge_commit = base_commit
+            synthesis_result.instance_id = candidate.instance_id
+
+            if not screen_instances or await _self_screen_instance(candidate):
+                if screen_instances:
+                    logger.info('%s  self-screen PASSED on attempt %d/%d',
+                                pfx, screen_attempt + 1, max_screen_attempts)
+                break
+            logger.info('%s  self-screen failed attempt %d/%d, re-rolling issue text',
+                        pfx, screen_attempt + 1, max_screen_attempts)
+        else:
+            logger.info('%s  screening failed all %d attempts (independence or self-screen), discarding',
+                        pfx, max_screen_attempts)
             continue
 
         candidates.append(candidate)
         if ft == "build_failure":
             build_failure_kept += 1
+        enrichment_data[candidate.instance_id] = {
+            'bug_spec': dataclasses.asdict(bug_spec),
+            'test_output': test_output or '',
+            'language': language,
+            'failure_type': ft,
+            'build_failure_category': ft_category,
+        }
 
         logger.info(
-            "  Generated: %s (%s)", candidate.instance_id, bug_spec.bug_category,
+            "%s  Generated: %s (%s)", pfx, candidate.instance_id, bug_spec.bug_category,
         )
+        logger.info('%s  === YIELD %d/%d (rate: %.0f%%) ===', pfx, len(candidates), max_mutations, 100 * len(candidates) / mutations_attempted)
 
     venv_cleanup = Path(repo_path) / '.synth-venv'
     if venv_cleanup.is_dir():
@@ -5043,4 +6199,14 @@ async def synthesize_repo(
             "total_classified": total_classified,
         },
     )
-    return RepoSynthesisResult(candidates=candidates, mutations_attempted=mutations_attempted)
+    logger.info(
+        '[%s] Final: %d/%d yielded in %d attempts (%.0f%% yield rate)',
+        repo_slug.split('/')[-1], len(candidates), max_mutations,
+        mutations_attempted,
+        100 * len(candidates) / mutations_attempted if mutations_attempted else 0,
+    )
+    return RepoSynthesisResult(
+        candidates=candidates,
+        mutations_attempted=mutations_attempted,
+        enrichment_data=enrichment_data,
+    )

@@ -5,8 +5,8 @@ import logging
 import tempfile
 from pathlib import Path
 
-from swebenchify.models import TaskInstance, QualityScore
-from swebenchify.dispatcher import run_agent_with_retry, CostTracker
+from swebenchify.dispatcher import CostTracker, run_agent_with_retry
+from swebenchify.models import QualityScore, TaskInstance
 
 logger = logging.getLogger(__name__)
 

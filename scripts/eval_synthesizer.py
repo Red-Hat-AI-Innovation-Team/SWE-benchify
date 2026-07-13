@@ -15,7 +15,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import concurrent.futures
+import datetime
 import glob
+import hashlib
 import json
 import logging
 import os
@@ -24,6 +26,8 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
+from collections import defaultdict
 from dataclasses import asdict
 
 # ── Configuration ────────────────────────────────────────────────────────
@@ -100,7 +104,11 @@ class _FakeOptions:
 
 import swebenchify.synthesizer as synth_mod  # noqa: E402
 from swebenchify.grader import compute_f2p, create_repo_tarball  # noqa: E402
-from swebenchify.models import EnvironmentSpec, GoEnvironmentSpec, RustEnvironmentSpec  # noqa: E402
+from swebenchify.models import (  # noqa: E402
+    EnvironmentSpec,
+    GoEnvironmentSpec,
+    RustEnvironmentSpec,
+)
 
 synth_mod.query = _vertex_query  # type: ignore[assignment]
 synth_mod.ResultMessage = _FakeResultMessage  # type: ignore[assignment,misc]
@@ -422,7 +430,305 @@ def main():
                              'discriminator outputs detection recall')
     parser.add_argument('--results-dir', default='/tmp',
                         help='Directory for results JSON (default: /tmp)')
+    parser.add_argument('--yield-only', action='store_true',
+                        help='Measure yield rate only (~5 min). Skips issue generation, test patches, judge, F2P, diversity.')
+    parser.add_argument('--repo', type=str, default=None,
+                        help='Filter to a specific repo slug (e.g. grpc/grpc-go)')
+    parser.add_argument('-n', '--num-instances', type=int, default=None,
+                        help='Number of instances per repo (default: 2 for yield-only, 5 for full)')
+    parser.add_argument('--judge-only', type=str, default=None, metavar='INSTANCES_PATH',
+                        help='Path to saved instances JSONL. Skips synthesis, runs judge only.')
+    parser.add_argument('--judge-runs', type=int, default=3, metavar='N',
+                        help='Number of judge runs to average over (reduces eval noise). Default: 3.')
+    parser.add_argument('--enrich', type=str, default=None, metavar='INSTANCES_PATH',
+                        help='Enrich yield-only instances with issue text + test patch.')
     args = parser.parse_args()
+
+    def _dedup_by_patch(instances: list[dict]) -> list[dict]:
+        """Keep first instance per unique patch diff."""
+        seen: set[str] = set()
+        deduped: list[dict] = []
+        for inst in instances:
+            ph = hashlib.md5(inst.get('patch', '').encode()).hexdigest()
+            if ph in seen:
+                log.info('  dedup: dropping %s (duplicate patch)', inst.get('instance_id', '?'))
+                continue
+            seen.add(ph)
+            deduped.append(inst)
+        if len(deduped) < len(instances):
+            log.info('dedup: %d → %d instances (%d duplicates removed)',
+                     len(instances), len(deduped), len(instances) - len(deduped))
+        return deduped
+
+    if args.judge_only:
+        instances_path = args.judge_only
+        if not os.path.isfile(instances_path):
+            print(f'File not found: {instances_path}', file=sys.stderr)
+            sys.exit(1)
+
+        all_synth_instances = []
+        with open(instances_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                all_synth_instances.append(json.loads(line))
+
+        log.info('loaded %d instances from %s', len(all_synth_instances), instances_path)
+        all_synth_instances = _dedup_by_patch(all_synth_instances)
+
+        if not all_synth_instances:
+            print(json.dumps({'score': 0.0, 'details': 'No instances in file'}))
+            return
+
+        all_real = []
+        for ds_path in DATASET_PATHS:
+            if os.path.isfile(ds_path):
+                with open(ds_path) as f:
+                    all_real.extend(json.loads(line) for line in f)
+
+        repos_in_instances = list(set(inst.get('repo', '') for inst in all_synth_instances))
+        real_for_repos = [i for i in all_real if i['repo'] in repos_in_instances]
+        n_real_per_repo = 3
+        real_samples = []
+        for repo in repos_in_instances:
+            repo_real = [i for i in real_for_repos if i['repo'] == repo]
+            if repo_real:
+                real_samples.extend(random.sample(repo_real, min(n_real_per_repo, len(repo_real))))
+
+        n_s = len(all_synth_instances)
+        n_r = len(real_samples)
+
+        eval_set = []
+        for inst in all_synth_instances:
+            eval_set.append({'instance': inst, 'label': 'SYNTHETIC'})
+        for inst in real_samples:
+            eval_set.append({'instance': inst, 'label': 'REAL'})
+
+        n_judge_runs = max(1, args.judge_runs)
+        all_run_results = []
+        per_instance_fooled: dict[str, int] = defaultdict(int)
+        per_instance_total: dict[str, int] = defaultdict(int)
+        judge_start = time.time()
+
+        for run_idx in range(n_judge_runs):
+            if n_judge_runs > 1:
+                log.info('=== Judge run %d/%d ===', run_idx + 1, n_judge_runs)
+
+            random.shuffle(eval_set)
+            log.info('phase=judge eval_set=%d (synthetic=%d real=%d)', len(eval_set), n_s, n_r)
+            run_start = time.time()
+
+            results = []
+            for i, item in enumerate(eval_set):
+                inst = item['instance']
+                true_label = item['label']
+                iid = inst.get('instance_id', 'unknown')
+
+                verdict = judge_instance(inst)
+                predicted = verdict['classification']
+                correct = predicted == true_label
+
+                results.append({
+                    'instance_id': iid,
+                    'true_label': true_label,
+                    'predicted': predicted,
+                    'confidence': verdict['confidence'],
+                    'correct': correct,
+                    'reasoning': verdict['reasoning'],
+                    'run': run_idx,
+                })
+
+                if true_label == 'SYNTHETIC':
+                    per_instance_total[iid] += 1
+                    if not correct:
+                        per_instance_fooled[iid] += 1
+
+                log.info(
+                    'judge [%d/%d] instance=%s true=%s pred=%s conf=%s %s',
+                    i + 1, len(eval_set), iid, true_label, predicted,
+                    verdict['confidence'], 'CORRECT' if correct else 'WRONG',
+                )
+                log.info('  reason: %s', verdict['reasoning'][:120].replace(chr(10), ' '))
+                synth_so_far = [r for r in results if r['true_label'] == 'SYNTHETIC']
+                if synth_so_far:
+                    fooled = sum(1 for r in synth_so_far if not r['correct'])
+                    elapsed = time.time() - run_start
+                    log.info('  tally: %d/%d synthetic fooled (%.0f%%), %.0fs elapsed',
+                             fooled, len(synth_so_far), 100 * fooled / len(synth_so_far), elapsed)
+
+            all_run_results.append(results)
+            run_m = compute_metrics(results)
+            run_evasion = 1.0 - run_m['recall']
+            log.info('--- Run %d: %d/%d fooled (evasion: %.0f%%) ---',
+                     run_idx + 1, run_m['fn'], run_m['tp'] + run_m['fn'], run_evasion * 100)
+
+        # Aggregate across runs
+        all_results_flat = [r for run in all_run_results for r in run]
+        m = compute_metrics(all_results_flat)
+        recall = m['recall']
+        judge_evasion = 1.0 - recall
+
+        per_run_evasions = []
+        for results in all_run_results:
+            rm = compute_metrics(results)
+            per_run_evasions.append(1.0 - rm['recall'])
+
+        diversity = compute_diversity(all_synth_instances)
+
+        out_path = os.path.join(args.results_dir, 'synth-eval-results-judge-only.json')
+        with open(out_path, 'w') as f:
+            json.dump({
+                'source': instances_path,
+                'judge_model': JUDGE_MODEL,
+                'judge_runs': n_judge_runs,
+                'repos': repos_in_instances,
+                'metrics': m,
+                'per_run_evasion': per_run_evasions,
+                'per_instance_fooled': dict(per_instance_fooled),
+                'per_instance_total': dict(per_instance_total),
+                'diversity': diversity,
+                'results': all_results_flat,
+                'synthetic_instances': all_synth_instances,
+            }, f, indent=2)
+        log.info('results saved to %s', out_path)
+
+        judge_elapsed = time.time() - judge_start
+        if n_judge_runs > 1:
+            evasion_pcts = [f'{e:.0%}' for e in per_run_evasions]
+            log.info('=== %d runs complete in %.0fs ===', n_judge_runs, judge_elapsed)
+            log.info('  per-run evasion: %s', ', '.join(evasion_pcts))
+            log.info('  mean evasion: %.1f%%', 100 * sum(per_run_evasions) / len(per_run_evasions))
+            if per_instance_fooled:
+                log.info('  per-instance breakdown (fooled at least once):')
+                for iid in sorted(per_instance_fooled, key=lambda x: -per_instance_fooled[x]):
+                    f_count = per_instance_fooled[iid]
+                    t_count = per_instance_total[iid]
+                    log.info('    %s: %d/%d (%.0f%%)', iid, f_count, t_count, 100 * f_count / t_count)
+        else:
+            log.info('--- Judge complete: %d/%d fooled in %.0fs (evasion: %.0f%%) ---',
+                     m['fn'], m['tp'] + m['fn'], judge_elapsed, judge_evasion * 100)
+
+        mean_evasion = sum(per_run_evasions) / len(per_run_evasions)
+        run_detail = f' (runs: {", ".join(f"{e:.0%}" for e in per_run_evasions)})' if n_judge_runs > 1 else ''
+        print(json.dumps({
+            'score': round(mean_evasion, 3),
+            'details': (
+                f'JUDGE-ONLY from {os.path.basename(instances_path)}. '
+                f'{n_s} synthetic, {n_r} real. '
+                f'{n_judge_runs} judge run{"s" if n_judge_runs > 1 else ""}. '
+                f'Mean evasion: {mean_evasion:.0%}{run_detail}. '
+                f'Diversity: {diversity["overall"]:.2f}.'
+            ),
+        }))
+        return
+
+    if args.enrich:
+        instances_path = args.enrich
+        if not os.path.isfile(instances_path):
+            print(f'File not found: {instances_path}', file=sys.stderr)
+            sys.exit(1)
+
+        all_instances = []
+        with open(instances_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                all_instances.append(json.loads(line))
+
+        log.info('loaded %d instances from %s', len(all_instances), instances_path)
+        all_instances = _dedup_by_patch(all_instances)
+        enrich_start_total = time.time()
+
+        pipeline_instances = [i for i in all_instances if '_pipeline' in i]
+        if not pipeline_instances:
+            print(json.dumps({'score': 0.0, 'details': 'No instances with _pipeline metadata found'}))
+            return
+
+        by_repo = defaultdict(list)
+        for inst in pipeline_instances:
+            by_repo[inst['repo']].append(inst)
+
+        n_enriched = 0
+        for repo_slug, repo_instances in by_repo.items():
+            target = None
+            for t in EVAL_TARGETS:
+                if t['repo_slug'] == repo_slug:
+                    target = t.copy()
+                    break
+            if not target:
+                log.warning('no EVAL_TARGET for repo %s — skipping %d instances', repo_slug, len(repo_instances))
+                continue
+
+            ensure_repo(target)
+            repo_path = target['repo_path']
+
+            merge_commit = repo_instances[0].get('merge_commit', '')
+            if merge_commit:
+                subprocess.run(
+                    ['git', 'checkout', '--quiet', '--force', merge_commit],
+                    cwd=repo_path, check=True,
+                )
+
+            enrich_start = time.time()
+            for i, inst in enumerate(repo_instances):
+                iid = inst.get('instance_id', 'unknown')
+                log.info('enriching [%d/%d] %s', i + 1, len(repo_instances), iid)
+                try:
+                    result = asyncio.run(synth_mod.enrich_instance(inst, repo_path, model=SYNTH_MODEL))
+                    if result is None:
+                        log.warning('  skipped %s — failed screening', iid)
+                        inst['_pipeline']['phase'] = 'skipped'
+                        continue
+                    n_enriched += 1
+                    log.info(
+                        '  problem_statement=%d chars, test_patch=%d chars',
+                        len(inst.get('problem_statement', '')),
+                        len(inst.get('test_patch', '')),
+                    )
+                    ps_preview = inst.get('problem_statement', '')[:150].replace(chr(10), ' ')
+                    log.info('  preview: %s', ps_preview)
+                    bug_file = inst.get('_pipeline', {}).get('bug_spec', {}).get('file', '?')
+                    bug_func = inst.get('_pipeline', {}).get('bug_spec', {}).get('function_name', '?')
+                    elapsed = time.time() - enrich_start
+                    avg_per = elapsed / (i + 1)
+                    remaining = avg_per * (len(repo_instances) - i - 1)
+                    log.info('  source: %s:%s | %.0fs elapsed, ~%.0fs remaining',
+                             bug_file, bug_func, elapsed, remaining)
+                except Exception:
+                    log.error('enrichment failed for %s', iid, exc_info=True)
+
+        basename = os.path.splitext(os.path.basename(instances_path))[0]
+        out_dir = os.path.dirname(instances_path) or '.'
+        out_path = os.path.join(out_dir, f'{basename}-enriched.jsonl')
+
+        enriched_instances = [
+            inst for inst in all_instances
+            if inst.get('_pipeline', {}).get('phase') != 'skipped'
+        ]
+        with open(out_path, 'w') as f:
+            for inst in enriched_instances:
+                f.write(json.dumps(inst) + '\n')
+
+        meta_path = os.path.join(out_dir, f'{basename}-enriched.meta.json')
+        with open(meta_path, 'w') as f:
+            json.dump({
+                'source': instances_path,
+                'total_instances': len(all_instances),
+                'pipeline_instances': len(pipeline_instances),
+                'enriched': n_enriched,
+                'enrichment_rate': round(n_enriched / len(pipeline_instances), 3) if pipeline_instances else 0,
+            }, f, indent=2)
+
+        log.info('--- Enrichment complete: %d/%d in %.0fs ---',
+                 n_enriched, len(pipeline_instances), time.time() - enrich_start_total)
+
+        print(json.dumps({
+            'score': round(n_enriched / len(pipeline_instances), 3) if pipeline_instances else 0,
+            'details': f'Enriched {n_enriched}/{len(pipeline_instances)} instances. Output: {out_path}',
+        }))
+        return
 
     if args.role == 'discriminator':
         args.quick = False
@@ -430,13 +736,28 @@ def main():
     round_num = detect_round()
     commit = detect_commit()
 
-    if args.quick:
+    if args.yield_only:
         targets = [t.copy() for t in EVAL_TARGETS]
+        if args.repo:
+            targets = [t for t in targets if args.repo in t['repo_slug']]
+            if not targets:
+                print(f'No target matching --repo {args.repo!r}', file=sys.stderr)
+                sys.exit(1)
+        n_per_repo = args.num_instances if args.num_instances is not None else 2
         for t in targets:
-            t['n_synthetic'] = 3
+            t['n_synthetic'] = n_per_repo
+            t['n_real'] = 0
+    elif args.quick:
+        targets = [t.copy() for t in EVAL_TARGETS]
+        n_per_repo = args.num_instances if args.num_instances is not None else 3
+        for t in targets:
+            t['n_synthetic'] = n_per_repo
             t['n_real'] = 1
     else:
-        targets = EVAL_TARGETS
+        targets = [t.copy() for t in EVAL_TARGETS] if args.num_instances else EVAL_TARGETS
+        if args.num_instances:
+            for t in targets:
+                t['n_synthetic'] = args.num_instances
 
     log.info("round=%d commit=%s mode=%s", round_num, commit, 'quick' if args.quick else 'full')
     log.info("targets: %s", ', '.join(t['repo_slug'] for t in targets))
@@ -478,8 +799,13 @@ def main():
             language=target["language"],
             max_mutations=target["n_synthetic"] * 5,
             model="sonnet",
+            yield_only=getattr(args, 'yield_only', False),
         ))
         synth_instances = [asdict(c) for c in result.candidates]
+        for inst in synth_instances:
+            iid = inst.get('instance_id', '')
+            if iid in result.enrichment_data:
+                inst['_pipeline'] = {'phase': 'yield', **result.enrichment_data[iid]}
         mutations_attempted = result.mutations_attempted
         log.info("synthesized %d instances (%d mutations attempted)", len(synth_instances), mutations_attempted)
 
@@ -576,6 +902,66 @@ def main():
     yield_rate = n_s / total_mutations_attempted if total_mutations_attempted > 0 else 0
     n_r = len(all_real_samples)
     log.info("totals: synthetic=%d real=%d", n_s, n_r)
+
+    # Save instances per repo for later enrich/judge runs
+    synth_dir = os.path.join(PROJECT_ROOT, 'output', 'synthetic', commit)
+    os.makedirs(synth_dir, exist_ok=True)
+
+    by_repo = defaultdict(list)
+    for inst in all_synth_instances:
+        by_repo[inst.get('repo', 'unknown')].append(inst)
+
+    saved_paths = []
+    for repo_slug, repo_insts in by_repo.items():
+        target = next((t for t in targets if t['repo_slug'] == repo_slug), None)
+        lang = target['language'] if target else 'unknown'
+        safe_slug = repo_slug.replace('/', '__')
+        repo_path = os.path.join(synth_dir, f'{safe_slug}-{lang}.jsonl')
+        with open(repo_path, 'w') as f:
+            for inst in repo_insts:
+                f.write(json.dumps(inst) + '\n')
+        saved_paths.append(repo_path)
+        log.info('saved %d instances to %s', len(repo_insts), repo_path)
+        for inst in repo_insts:
+            iid = inst.get('instance_id', 'unknown')
+            bug_file = inst.get('_pipeline', {}).get('bug_spec', {}).get('file', '?')
+            bug_func = inst.get('_pipeline', {}).get('bug_spec', {}).get('function_name', '?')
+            log.info('  saved: %s %s:%s', iid, bug_file, bug_func)
+
+    combined_path = os.path.join(synth_dir, 'all.jsonl')
+    with open(combined_path, 'w') as f:
+        for inst in all_synth_instances:
+            f.write(json.dumps(inst) + '\n')
+    log.info('saved combined %d instances to %s', len(all_synth_instances), combined_path)
+
+    meta_path = os.path.join(synth_dir, 'meta.json')
+    with open(meta_path, 'w') as f:
+        json.dump({
+            'commit': commit,
+            'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            'mutations_attempted': total_mutations_attempted,
+            'instances_saved': len(all_synth_instances),
+            'yield_rate': yield_rate,
+            'repos': {
+                slug: len(insts) for slug, insts in by_repo.items()
+            },
+            'files': [os.path.basename(p) for p in saved_paths],
+            'mode': 'yield-only' if args.yield_only else ('quick' if args.quick else 'full'),
+        }, f, indent=2)
+    log.info('saved metadata to %s', meta_path)
+
+    if args.yield_only:
+        log.info('phase=yield_only yield_rate=%.3f (%d/%d)', yield_rate, n_s, total_mutations_attempted)
+        print(json.dumps({
+            'score': round(yield_rate, 3),
+            'details': (
+                f'R{round_num} ({commit}): YIELD-ONLY. '
+                f'{n_s} mutations broke tests out of {total_mutations_attempted} attempted. '
+                f'Yield rate: {yield_rate:.2f}. '
+                f'Repos: {", ".join(t["repo_slug"] for t in targets)}.'
+            ),
+        }))
+        return
 
     if not all_synth_instances:
         log.error("no synthetic instances generated across any repo")

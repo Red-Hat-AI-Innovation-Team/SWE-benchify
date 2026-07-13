@@ -284,6 +284,8 @@ def load_config(path: str) -> Config:
     with open(config_path) as f:
         raw = yaml.safe_load(f)
 
+    logger.debug("parsed YAML config from path=%s", path)
+
     if not isinstance(raw, dict):
         raise ValueError("Config file must contain a YAML mapping")
 
@@ -301,6 +303,8 @@ def load_config(path: str) -> Config:
         resolved = _resolve_env_var(token_val)
         if resolved is not None:
             github_tokens[repo_name] = str(resolved)
+        else:
+            logger.warning("token for repo=%s resolved to None, skipping", repo_name)
 
     cfg = Config(
         repos=repos,
@@ -331,6 +335,12 @@ def load_config(path: str) -> Config:
 
     logger.info(
         "Config loaded",
-        extra={"repos": len(cfg.repos), "output_dir": cfg.output.dir, "has_token": cfg.github_token is not None},
+        extra={
+            "repos": len(cfg.repos),
+            "go_repos": len(cfg.go_repos),
+            "rust_repos": len(cfg.rust_repos),
+            "output_dir": cfg.output.dir,
+            "has_token": cfg.github_token is not None,
+        },
     )
     return cfg

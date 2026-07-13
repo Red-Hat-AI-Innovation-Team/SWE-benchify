@@ -15,7 +15,8 @@ from dataclasses import asdict
 
 import requests
 
-from swebenchify.github import github_get as _shared_github_get, make_headers
+from swebenchify.github import github_get as _shared_github_get
+from swebenchify.github import make_headers
 from swebenchify.models import CandidatePR, Repository
 
 logger = logging.getLogger(__name__)

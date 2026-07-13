@@ -228,6 +228,8 @@ def deserialize_env_spec(data: dict) -> AnyEnvironmentSpec:
     to empty strings.
     """
     language = data.get("language", "")
+    if not language:
+        logger.warning("missing language field in env spec data, defaulting to Go")
     if language == "go" or not language:
         if not language:
             logger.warning("No language field in env spec, defaulting to Go")
