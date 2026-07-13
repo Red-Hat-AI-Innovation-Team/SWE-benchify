@@ -189,6 +189,8 @@ class SynthesisResult:
     instance_id: str
     base_commit: str
     test_output: str = ""
+    failure_type: str = ""
+    build_failure_category: str = ""
 
 
 @dataclasses.dataclass
@@ -2663,6 +2665,48 @@ Rules:
     return None
 
 
+def _classify_failure_type(test_output: str, language: str) -> tuple[str, str]:
+    """Classify mutation failure as build or test failure with a category.
+
+    Returns:
+        (failure_type, category) where failure_type is 'build_failure',
+        'test_failure', or '' and category is a language-specific subcategory.
+    """
+    _BUILD_SIGNALS: dict[str, list[tuple[str, list[str]]]] = {
+        "go": [
+            ("type_error", ["cannot use", "too many return values", "not enough return values"]),
+            ("undefined_symbol", ["undefined:", "undeclared name"]),
+            ("interface_error", ["does not implement"]),
+        ],
+        "python": [
+            ("syntax_error", ["SyntaxError", "IndentationError"]),
+            ("import_error", ["ImportError", "ModuleNotFoundError"]),
+            ("name_error", ["NameError"]),
+        ],
+        "java": [
+            ("type_error", ["incompatible types"]),
+            ("symbol_error", ["cannot find symbol"]),
+            ("syntax_error", ["illegal start"]),
+        ],
+        "rust": [
+            ("type_error", ["mismatched types"]),
+            ("borrow_error", ["cannot borrow", "use of moved value"]),
+            ("unresolved", ["unresolved import", "cannot find"]),
+        ],
+    }
+
+    lang = language.lower()
+    categories = _BUILD_SIGNALS.get(lang, [])
+    for all_lang_cats in ([categories] if categories else [list(c) for c in _BUILD_SIGNALS.values()]):
+        for category, signals in all_lang_cats:
+            if any(sig in test_output for sig in signals):
+                return ("build_failure", category)
+
+    if _extract_first_failure_id(test_output):
+        return ("test_failure", "")
+    return ("", "")
+
+
 async def generate_issue_from_symptom(
     symptom: str,
     test_output: str | None = None,
@@ -2713,16 +2757,8 @@ async def generate_issue_from_symptom(
     if not test_output:
         return f'{general_area}\n\n```\n{symptom}\n```'
 
-    # For build/compiler failures (no named test IDs), use few-shot conditioning when
-    # real issue examples are available.  The programmatic template produces formulaic
-    # "just compiler errors" output that judges flag; real examples teach the right style.
-    _build_failure_signals = ('cannot use', 'undefined:', 'too many return values',
-                              'not enough return values', 'does not implement', 'undeclared name')
-    is_build_failure = (
-        not _extract_first_failure_id(test_output)
-        and any(sig in test_output for sig in _build_failure_signals)
-    )
-    if is_build_failure and dataset_examples:
+    failure_type, _ = _classify_failure_type(test_output, language)
+    if failure_type == "build_failure" and dataset_examples:
         llm_issue = await _generate_issue_few_shot(
             symptom=symptom,
             test_output=test_output,
@@ -4085,6 +4121,7 @@ def build_candidate(
         problem_statement=synthesis_result.problem_statement,
         hints_text="",
         created_at=datetime.now(timezone.utc).isoformat(),
+        failure_type=synthesis_result.failure_type,
         provenance="synthetic",
     )
 
@@ -4632,6 +4669,9 @@ async def synthesize_repo(
 
     candidates: list[CandidateInstance] = []
     mutations_attempted = 0
+    build_failure_count = 0
+    test_failure_count = 0
+    build_failure_kept = 0
 
     for i, target in enumerate(targets[:max_mutations * 8]):
         if len(candidates) >= max_mutations:
@@ -4940,6 +4980,12 @@ async def synthesize_repo(
         except Exception:
             logger.warning('  test_patch generation failed — using fallback', exc_info=True)
 
+        ft, ft_category = _classify_failure_type(test_output or "", language)
+        if ft == "build_failure":
+            build_failure_count += 1
+        elif ft == "test_failure":
+            test_failure_count += 1
+
         synthesis_result = SynthesisResult(
             bug_spec=bug_spec,
             patch=patch,
@@ -4947,6 +4993,8 @@ async def synthesize_repo(
             instance_id="",
             base_commit=buggy_commit,
             test_output=test_output or "",
+            failure_type=ft,
+            build_failure_category=ft_category,
         )
 
         candidate = build_candidate(
@@ -4960,6 +5008,8 @@ async def synthesize_repo(
             continue
 
         candidates.append(candidate)
+        if ft == "build_failure":
+            build_failure_kept += 1
 
         logger.info(
             "  Generated: %s (%s)", candidate.instance_id, bug_spec.bug_category,
@@ -4977,5 +5027,20 @@ async def synthesize_repo(
         len(candidates),
         max_mutations,
         mutations_attempted,
+    )
+    total_classified = build_failure_count + test_failure_count
+    logger.info(
+        "Mutation viability",
+        extra={
+            "build_failures": build_failure_count,
+            "test_failures": test_failure_count,
+            "build_failure_kept": build_failure_kept,
+            "build_viability_rate": (
+                build_failure_kept / build_failure_count
+                if build_failure_count > 0
+                else 0.0
+            ),
+            "total_classified": total_classified,
+        },
     )
     return RepoSynthesisResult(candidates=candidates, mutations_attempted=mutations_attempted)
