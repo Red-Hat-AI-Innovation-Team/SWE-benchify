@@ -2991,17 +2991,12 @@ def _mine_social_artifacts(repo_path: str) -> dict[str, list[str]]:
 
 
 def _build_social_context(artifacts: dict[str, list[str]]) -> str:
-    """Build social context from real repo data."""
-    options: list[str] = []
+    """Build social context from real repo data.
 
-    github_handles = artifacts.get('github_handles', [])
-    if github_handles:
-        handle = random.choice(github_handles)
-        options.extend([
-            f'cc @{handle}',
-            f'@{handle} might have context here.',
-            f'@{handle} this looks like it could be in your area.',
-        ])
+    Only includes branch names and version tags — @mentions and issue
+    references are synthetic tells that the judge catches reliably.
+    """
+    options: list[str] = []
 
     branches = artifacts.get('branches', [])
     if branches:
@@ -3013,18 +3008,11 @@ def _build_social_context(artifacts: dict[str, list[str]]) -> str:
         ])
 
     version_tags = artifacts.get('version_tags', [])
-    issues = artifacts.get('issues', [])
     if version_tags:
         tag = random.choice(version_tags[:5])
         options.extend([
             f'Started seeing this after upgrading to {tag}.',
             f'Reproduces on {tag}, not sure about earlier versions.',
-        ])
-    if issues:
-        issue = random.choice(issues)
-        options.extend([
-            f'Might be related to #{issue}.',
-            f'Similar to #{issue} but different symptom.',
         ])
 
     if not options:
