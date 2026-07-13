@@ -6,12 +6,15 @@ values. See docs/SPEC.md Section 6 for the configuration schema.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -132,6 +135,7 @@ def _resolve_env_var(value: object) -> object:
     if match:
         env_val = os.environ.get(match.group(1))
         if not env_val:
+            logger.warning("Environment variable unset or empty", extra={"var": match.group(1)})
             return None
         return env_val
     return value
@@ -272,6 +276,7 @@ def load_config(path: str) -> Config:
         FileNotFoundError: If the config file does not exist.
         ValueError: If required fields are missing or invalid.
     """
+    logger.info("Loading config", extra={"path": path})
     config_path = Path(path)
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {path}")
@@ -324,4 +329,8 @@ def load_config(path: str) -> Config:
     if not os.access(str(output_path), os.W_OK):
         raise ValueError(f"Output directory is not writable: {cfg.output.dir}")
 
+    logger.info(
+        "Config loaded",
+        extra={"repos": len(cfg.repos), "output_dir": cfg.output.dir, "has_token": cfg.github_token is not None},
+    )
     return cfg

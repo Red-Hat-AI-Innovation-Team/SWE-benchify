@@ -8,6 +8,7 @@ so adding a new language is configuration, not forked code.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from io import StringIO
 from pathlib import Path
@@ -15,7 +16,12 @@ from typing import Any, Callable
 
 from unidiff import PatchSet
 
-from swebenchify.models import AnyEnvironmentSpec, EnvironmentSpec, GoEnvironmentSpec, RustEnvironmentSpec
+from swebenchify.models import (
+    AnyEnvironmentSpec,
+    EnvironmentSpec,
+    GoEnvironmentSpec,
+    RustEnvironmentSpec,
+)
 from swebenchify.parsers import (
     GoJSONParser,
     MavenSurefireParser,
@@ -25,6 +31,8 @@ from swebenchify.parsers import (
     normalize_go_f2p,
     normalize_rust_f2p,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -51,11 +59,15 @@ _BACKENDS: dict[str, LanguageBackend] = {}
 
 
 def register_backend(backend: LanguageBackend) -> None:
+    logger.debug("Registering backend", extra={"language": backend.name})
     _BACKENDS[backend.name] = backend
 
 
 def get_backend(language: str) -> LanguageBackend | None:
-    return _BACKENDS.get(language)
+    backend = _BACKENDS.get(language)
+    if backend is None:
+        logger.warning("No backend registered", extra={"language": language, "available": list(_BACKENDS.keys())})
+    return backend
 
 
 def _reconstruct_file_diff(patched_file: Any, hunks: list[Any]) -> str:
@@ -87,6 +99,7 @@ def refine_patch_split(
     try:
         patch_set = PatchSet(StringIO(gold_patch))
     except Exception:
+        logger.warning("Failed to parse gold patch for hunk-level split", extra={"backend": backend.name})
         return gold_patch, test_patch
 
     ext = {"rust": ".rs"}.get(backend.name)
@@ -118,6 +131,10 @@ def refine_patch_split(
     if extra_test:
         combined = (test_patch or "") + "".join(extra_test)
         refined_test = combined if combined else None
+        logger.info(
+            "Refined patch split: moved test hunks from gold to test patch",
+            extra={"backend": backend.name, "moved_hunks": len(extra_test)},
+        )
     else:
         refined_test = test_patch
 
@@ -151,6 +168,7 @@ def _go_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmentSpe
         base = f"golang:{spec.go_version}"
     else:
         base = "golang:latest"
+    logger.debug("Building Go Dockerfile", extra={"repo": repo, "base_image": base, "tarball": repo_tarball})
 
     source_url = "https://github.com/Red-Hat-AI-Innovation-Team/SWE-benchify"
     lines = [
@@ -205,7 +223,9 @@ def _go_test_scope(test_patch: str) -> str:
         else:
             pkgs.add(f"./{pkg_dir}")
 
-    return " ".join(sorted(pkgs)) if pkgs else "./..."
+    scope = " ".join(sorted(pkgs)) if pkgs else "./..."
+    logger.debug("Resolved Go test scope", extra={"packages": scope})
+    return scope
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +240,7 @@ def _python_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmen
     else:
         version = (spec.language_version if spec else None) or "3.11"
         base = f"python:{version}-slim"
+    logger.debug("Building Python Dockerfile", extra={"repo": repo, "base_image": base, "tarball": repo_tarball})
 
     source_url = "https://github.com/Red-Hat-AI-Innovation-Team/SWE-benchify"
     lines = [
@@ -308,6 +329,7 @@ def _java_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmentS
 
     java_version = (spec.language_version if spec else None) or "17"
     base = f"maven:3-eclipse-temurin-{java_version}"
+    logger.debug("Building Java Dockerfile", extra={"repo": repo, "base_image": base, "tarball": repo_tarball})
 
     source_url = "https://github.com/Red-Hat-AI-Innovation-Team/SWE-benchify"
     lines = [
@@ -377,8 +399,11 @@ def _java_test_scope(test_patch: str) -> str:
             classes.append(class_name)
 
     if not classes:
+        logger.debug("No Java test classes found in patch")
         return ""
-    return "-Dtest=" + ",".join(classes)
+    scope = "-Dtest=" + ",".join(classes)
+    logger.debug("Resolved Java test scope", extra={"classes": classes})
+    return scope
 
 
 def _java_normalize_f2p(test_ids: list[str]) -> list[str]:
@@ -395,6 +420,7 @@ def _rust_make_dockerfile(repo: str, base_commit: str, env_spec: AnyEnvironmentS
         base = f"rust:{spec.rust_version}-slim"
     else:
         base = "rust:latest"
+    logger.debug("Building Rust Dockerfile", extra={"repo": repo, "base_image": base, "tarball": repo_tarball})
 
     source_url = "https://github.com/Red-Hat-AI-Innovation-Team/SWE-benchify"
     lines = [

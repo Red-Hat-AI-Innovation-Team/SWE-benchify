@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -126,7 +129,9 @@ def compute_env_spec_hash(spec: GoEnvironmentSpec) -> str:
         "system_dependencies": sorted(spec.system_dependencies),
     }
     serialised = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(serialised.encode()).hexdigest()
+    digest = hashlib.sha256(serialised.encode()).hexdigest()
+    logger.debug("Computed Go env spec hash", extra={"hash": digest[:12], "go_version": spec.go_version})
+    return digest
 
 
 def compute_python_env_spec_hash(spec: EnvironmentSpec) -> str:
@@ -143,7 +148,9 @@ def compute_python_env_spec_hash(spec: EnvironmentSpec) -> str:
         "base_image": spec.base_image,
     }
     serialised = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(serialised.encode()).hexdigest()
+    digest = hashlib.sha256(serialised.encode()).hexdigest()
+    logger.debug("Computed Python env spec hash", extra={"hash": digest[:12], "language_version": spec.language_version})
+    return digest
 
 
 def compute_java_env_spec_hash(spec: EnvironmentSpec) -> str:
@@ -158,7 +165,9 @@ def compute_java_env_spec_hash(spec: EnvironmentSpec) -> str:
         "system_dependencies": sorted(spec.system_dependencies),
     }
     serialised = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(serialised.encode()).hexdigest()
+    digest = hashlib.sha256(serialised.encode()).hexdigest()
+    logger.debug("Computed Java env spec hash", extra={"hash": digest[:12], "language_version": spec.language_version})
+    return digest
 
 
 @dataclass
@@ -202,7 +211,9 @@ def compute_rust_env_spec_hash(spec: RustEnvironmentSpec) -> str:
         "system_dependencies": sorted(spec.system_dependencies),
     }
     serialised = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(serialised.encode()).hexdigest()
+    digest = hashlib.sha256(serialised.encode()).hexdigest()
+    logger.debug("Computed Rust env spec hash", extra={"hash": digest[:12], "rust_version": spec.rust_version})
+    return digest
 
 
 # Type alias used by pipeline code that accepts either language's spec.
@@ -218,6 +229,8 @@ def deserialize_env_spec(data: dict) -> AnyEnvironmentSpec:
     """
     language = data.get("language", "")
     if language == "go" or not language:
+        if not language:
+            logger.warning("No language field in env spec, defaulting to Go")
         valid = {k: v for k, v in data.items() if k in GoEnvironmentSpec.__dataclass_fields__}
         return GoEnvironmentSpec(**valid)
     if language == "rust":
@@ -225,6 +238,7 @@ def deserialize_env_spec(data: dict) -> AnyEnvironmentSpec:
         return RustEnvironmentSpec(**valid)
     required_defaults = {k: "" for k in ("language", "language_version", "package_manager", "install_cmd", "test_cmd")}
     valid = {**required_defaults, **{k: v for k, v in data.items() if k in EnvironmentSpec.__dataclass_fields__}}
+    logger.debug("Deserialized env spec", extra={"language": language})
     return EnvironmentSpec(**valid)
 
 
