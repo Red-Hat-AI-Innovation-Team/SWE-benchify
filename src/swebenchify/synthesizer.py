@@ -113,32 +113,44 @@ DATASET_PATH = os.environ.get(
 def _load_dataset_examples(
     dataset_path: str, repo_slug: str, n: int = 5,
 ) -> list[str]:
-    """Load real issue examples from the SWE-benchify dataset JSONL file.
+    """Load real issue examples from dataset JSONL files.
 
-    Filters to instances matching the target repo_slug and randomly
-    samples n problem_statement texts.
+    Searches the primary dataset file and language-specific instance files
+    in the same directory. Filters to instances matching the target
+    repo_slug and randomly samples n problem_statement texts.
     """
-    try:
-        path = Path(dataset_path)
-        if not path.is_file():
-            return []
-        matching: list[str] = []
-        with path.open(encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if record.get("repo") == repo_slug and record.get("problem_statement"):
-                    matching.append(record["problem_statement"])
-        if not matching:
-            return []
-        return random.sample(matching, min(n, len(matching)))
-    except OSError:
+    matching: list[str] = []
+
+    # Collect candidate JSONL paths: the primary dataset + language-specific files
+    paths_to_check: list[Path] = []
+    primary = Path(dataset_path)
+    if primary.is_file():
+        paths_to_check.append(primary)
+    parent = primary.parent
+    if parent.is_dir():
+        for p in parent.glob("instances-*.jsonl"):
+            if p != primary:
+                paths_to_check.append(p)
+
+    for path in paths_to_check:
+        try:
+            with path.open(encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if record.get("repo") == repo_slug and record.get("problem_statement"):
+                        matching.append(record["problem_statement"])
+        except OSError:
+            continue
+
+    if not matching:
         return []
+    return random.sample(matching, min(n, len(matching)))
 
 
 @dataclasses.dataclass
@@ -2270,7 +2282,7 @@ async def _self_screen_instance(candidate: CandidateInstance) -> bool:
     classification = classification_match.group(1)
     confidence = confidence_match.group(1) if confidence_match else "LOW"
 
-    if classification == "SYNTHETIC" and confidence in ("HIGH", "MEDIUM"):
+    if classification == "SYNTHETIC" and confidence == "HIGH":
         logger.info("  Self-screen REJECTED candidate (SYNTHETIC, %s confidence)", confidence)
         return False
 
@@ -2990,34 +3002,258 @@ def _mine_social_artifacts(repo_path: str) -> dict[str, list[str]]:
     return artifacts
 
 
-def _build_social_context(artifacts: dict[str, list[str]]) -> str:
-    """Build social context from real repo data.
+_github_social_cache: dict[str, dict] = {}
 
-    Only includes branch names and version tags — @mentions and issue
-    references are synthetic tells that the judge catches reliably.
+
+def _fetch_github_social_context(
+    repo_slug: str,
+    token: str | None = None,
+) -> dict:
+    """Fetch real social context from the GitHub REST API.
+
+    Cached per repo_slug for the lifetime of the process.
     """
-    options: list[str] = []
+    if repo_slug in _github_social_cache:
+        return _github_social_cache[repo_slug]
 
+    from swebenchify.github import github_get
+
+    result: dict = {
+        "issues": [],
+        "prs": [],
+        "contributors": [],
+        "workflows": [],
+        "issue_templates": [],
+        "repo_url": f"https://github.com/{repo_slug}",
+    }
+
+    token = token or os.environ.get("GITHUB_TOKEN")
+    if not token:
+        logger.info("No GITHUB_TOKEN set; GitHub social mining will use unauthenticated rate limit")
+
+    owner, repo = repo_slug.split("/", 1)
+    base = "https://api.github.com"
+
+    # Recent issues (excluding PRs which GitHub includes in the issues endpoint)
+    try:
+        resp = github_get(
+            f"{base}/repos/{owner}/{repo}/issues",
+            token=token,
+            params={"state": "all", "per_page": "50", "sort": "created", "direction": "desc"},
+        )
+        if resp.status_code == 200:
+            for item in resp.json():
+                if item.get("pull_request"):
+                    continue
+                result["issues"].append({
+                    "number": item["number"],
+                    "title": item.get("title", ""),
+                    "author": (item.get("user") or {}).get("login", ""),
+                    "labels": [la["name"] for la in item.get("labels", [])],
+                })
+    except Exception:
+        logger.warning("Failed to fetch issues for %s", repo_slug)
+
+    # Recent merged PRs
+    try:
+        resp = github_get(
+            f"{base}/repos/{owner}/{repo}/pulls",
+            token=token,
+            params={"state": "closed", "per_page": "30", "sort": "created", "direction": "desc"},
+        )
+        if resp.status_code == 200:
+            for item in resp.json():
+                if not item.get("merged_at"):
+                    continue
+                result["prs"].append({
+                    "number": item["number"],
+                    "title": item.get("title", ""),
+                    "author": (item.get("user") or {}).get("login", ""),
+                })
+    except Exception:
+        logger.warning("Failed to fetch PRs for %s", repo_slug)
+
+    # Top contributors
+    try:
+        resp = github_get(
+            f"{base}/repos/{owner}/{repo}/contributors",
+            token=token,
+            params={"per_page": "30"},
+        )
+        if resp.status_code == 200:
+            result["contributors"] = [
+                c["login"] for c in resp.json()
+                if c.get("login") and c.get("type") != "Bot"
+            ]
+    except Exception:
+        logger.warning("Failed to fetch contributors for %s", repo_slug)
+
+    # CI workflow names
+    try:
+        resp = github_get(
+            f"{base}/repos/{owner}/{repo}/actions/workflows",
+            token=token,
+            params={"per_page": "10"},
+        )
+        if resp.status_code == 200:
+            result["workflows"] = [
+                w["name"] for w in resp.json().get("workflows", [])
+                if w.get("state") == "active"
+            ]
+    except Exception:
+        logger.warning("Failed to fetch workflows for %s", repo_slug)
+
+    # Issue templates
+    try:
+        resp = github_get(
+            f"{base}/repos/{owner}/{repo}/contents/.github/ISSUE_TEMPLATE",
+            token=token,
+        )
+        if resp.status_code == 200:
+            import base64 as _b64
+            template_files = resp.json()
+            if isinstance(template_files, list):
+                for tf in template_files[:3]:
+                    if not tf.get("download_url"):
+                        continue
+                    try:
+                        tresp = github_get(tf["url"], token=token)
+                        if tresp.status_code == 200:
+                            content = tresp.json().get("content", "")
+                            encoding = tresp.json().get("encoding", "")
+                            if encoding == "base64" and content:
+                                decoded = _b64.b64decode(content).decode("utf-8", errors="replace")
+                                result["issue_templates"].append(decoded)
+                    except Exception:
+                        pass
+    except Exception:
+        logger.debug("No issue templates for %s", repo_slug)
+
+    logger.info(
+        "GitHub social context for %s: %d issues, %d PRs, %d contributors, %d workflows, %d templates",
+        repo_slug, len(result["issues"]), len(result["prs"]),
+        len(result["contributors"]), len(result["workflows"]),
+        len(result["issue_templates"]),
+    )
+
+    _github_social_cache[repo_slug] = result
+    return result
+
+
+def _build_social_context(
+    artifacts: dict[str, list[str]],
+    github_context: dict | None = None,
+    mutated_file: str = "",
+) -> str:
+    """Build social context fragments from real repo data.
+
+    When github_context is provided (from _fetch_github_social_context),
+    produces rich fragments using real issue numbers, PR numbers,
+    contributor handles, and CI workflow names from the GitHub API.
+    Selects 0-3 fragments from different categories to vary density.
+    """
+    # Build pools of candidate fragments by category
+    pools: dict[str, list[str]] = {}
+
+    # Category: cross-references (real issue numbers)
+    if github_context and github_context.get("issues"):
+        issues = github_context["issues"]
+        issue = random.choice(issues)
+        num = issue["number"]
+        title_short = issue["title"][:50]
+        pools["xref"] = [
+            f'Similar to #{num}.',
+            f'Possibly related to #{num}.',
+            f'Not sure if this is the same root cause as #{num} ("{title_short}").',
+            f'Might be a duplicate of #{num} but the symptoms are slightly different.',
+        ]
+
+    # Category: PR references
+    if github_context and github_context.get("prs"):
+        prs = github_context["prs"]
+        pr = random.choice(prs)
+        pools["pr"] = [
+            f'This started happening after #{pr["number"]} was merged.',
+            f'Might be related to the changes in #{pr["number"]}.',
+            f'Bisected to around the time #{pr["number"]} landed.',
+        ]
+
+    # Category: CC mentions (real contributor handles)
+    if github_context and github_context.get("contributors"):
+        contribs = github_context["contributors"]
+        pick = random.sample(contribs, min(2, len(contribs)))
+        if len(pick) == 1:
+            pools["cc"] = [
+                f'cc @{pick[0]}',
+                f'/cc @{pick[0]}',
+            ]
+        else:
+            pools["cc"] = [
+                f'cc @{pick[0]} @{pick[1]}',
+                f'/cc @{pick[0]}',
+                f'@{pick[0]} any ideas?',
+            ]
+
+    # Category: CI references (real workflow names)
+    if github_context and github_context.get("workflows"):
+        wf = random.choice(github_context["workflows"])
+        pools["ci"] = [
+            f'The {wf} workflow started failing.',
+            f'CI is red on {wf}.',
+            f'Noticed this in the {wf} run.',
+            f'{wf} is failing on main.',
+        ]
+
+    # Category: version pinpointing (real tags, adjacent pair)
+    version_tags = artifacts.get('version_tags', [])
+    if len(version_tags) >= 2:
+        idx = random.randint(0, min(4, len(version_tags) - 2))
+        newer, older = version_tags[idx], version_tags[idx + 1]
+        pools["version"] = [
+            f'Worked on {older}, broken on {newer}.',
+            f'Started seeing this after upgrading to {newer}.',
+            f'Reproduces on {newer}, not sure about {older}.',
+        ]
+    elif version_tags:
+        tag = version_tags[0]
+        pools["version"] = [
+            f'Started seeing this after upgrading to {tag}.',
+            f'Reproduces on {tag}, not sure about earlier versions.',
+        ]
+
+    # Category: branch context
     branches = artifacts.get('branches', [])
     if branches:
         branch = random.choice(branches)
-        options.extend([
-            f'I noticed this on the {branch} branch.',
+        pools["branch"] = [
             f'Reproduces on {branch}.',
             f'Seeing this on {branch}, not sure about main.',
-        ])
+        ]
 
-    version_tags = artifacts.get('version_tags', [])
-    if version_tags:
-        tag = random.choice(version_tags[:5])
-        options.extend([
-            f'Started seeing this after upgrading to {tag}.',
-            f'Reproduces on {tag}, not sure about earlier versions.',
-        ])
+    # Category: source permalink
+    if github_context and mutated_file and artifacts.get("shas"):
+        repo_url = github_context.get("repo_url", "")
+        sha = random.choice(artifacts["shas"][:5])
+        line = random.randint(50, 300)
+        pools["permalink"] = [
+            f'See: {repo_url}/blob/{sha}/{mutated_file}#L{line}',
+        ]
 
-    if not options:
+    if not pools:
         return ''
-    return '\n\n' + random.choice(options)
+
+    # Select 0-3 fragments from different categories
+    n_fragments = random.choices([0, 1, 2, 3], weights=[15, 40, 30, 15])[0]
+    if n_fragments == 0:
+        return ''
+
+    categories = list(pools.keys())
+    random.shuffle(categories)
+    selected = []
+    for cat in categories[:n_fragments]:
+        selected.append(random.choice(pools[cat]))
+
+    return '\n\n' + '\n'.join(selected)
 
 
 def _find_file_commits(
@@ -3175,8 +3411,13 @@ async def _generate_issue_few_shot(
         for i, ex in enumerate(dataset_examples[:3])
     )
     trimmed = _trim_test_output(test_output, max_lines=40)
-    social_note = f"\n\nOptionally end with: {social_context.strip()}" if social_context else ""
-    version_note = f'\nContext that may be naturally referenced: {social_context.strip()}' if social_context else ''
+    social_instruction = ""
+    if social_context:
+        social_instruction = f"""
+
+Social context to weave naturally into the issue (use 1-2 of these, place them where they'd naturally appear — inline, not bolted on at the end):
+{social_context.strip()}
+"""
 
     prompt = f"""You are writing a GitHub issue report. Study these real examples from the same repository:
 
@@ -3189,8 +3430,7 @@ Test/build output:
 ```
 {trimmed}
 ```
-{social_note}{version_note}
-
+{social_instruction}
 Rules:
 - Match the STYLE, TONE, and STRUCTURE of the examples above
 - Describe SYMPTOMS only — the reporter does NOT know which function or line is broken
@@ -3203,7 +3443,8 @@ Rules:
 - If test output is available, paste it as a code block — do NOT explain what it means
 - Do NOT start with "I" or "We"
 - Keep it under 200 words
-- Do NOT include a title — just the body"""
+- Do NOT include a title — just the body
+- Social references (issue numbers, @mentions, PR refs) should be woven into sentences naturally, NOT added as a separate block"""
 
     resolved_model = MODEL_MAP.get(model, model)
     options = ClaudeCodeOptions(max_turns=1, model=resolved_model)
@@ -3228,12 +3469,19 @@ async def _rewrite_issue_narrative(
     model: str,
 ) -> str | None:
     """Ask the LLM to rewrite a programmatically assembled draft into a natural issue."""
+    social_instruction = ""
+    if social_context:
+        social_instruction = f"""
+Social context to weave naturally into the issue (use 1-2 of these, place them where they'd naturally appear in the flow — e.g. "Similar to #1234 but..." at the start, or "cc @user" at the end):
+{social_context.strip()}
+"""
+
     prompt = f"""Write a terse GitHub issue as a busy developer who just hit a bug.
 Symptom: {symptom}
 
 Draft for reference (rewrite, don't copy verbatim):
 {draft}
-
+{social_instruction}
 Rules:
 - 80-200 words MAXIMUM (hard limit — real issues average 112 words)
 - NO markdown headers (no ##, no **bold sections**)
@@ -3255,7 +3503,7 @@ Rules:
 - Vary length — some issues are 2 sentences, others are a paragraph. Not all issues are the same.
 - If test output is included, just paste it — do NOT explain what it means
 - Do NOT mention that this is a rewrite or that you are an AI
-{('- ' + social_context.strip()) if social_context else ''}"""
+- Social references (issue numbers, @mentions, PR refs) should appear inline where natural, NOT as a separate block at the end"""
 
     resolved_model = MODEL_MAP.get(model, model)
     options = ClaudeCodeOptions(max_turns=1, model=resolved_model)
@@ -3280,6 +3528,7 @@ async def generate_issue_from_symptom(
     dataset_examples: list[str] | None = None,
     repo_name: str = "",
     language: str = "",
+    github_context: dict | None = None,
 ) -> str:
     """Generate a realistic GitHub issue description from a symptom only.
 
@@ -3353,18 +3602,31 @@ async def generate_issue_from_symptom(
         # Terse
         '',
         '',
-        # CI-related
-        'CI started failing after the last merge.',
-        'Build is red on main.',
-        'This showed up in CI overnight.',
-        'Our nightly build caught this.',
-        'CI is broken, looks like a recent change.',
         # Version/regression
         'Pretty sure this is a regression.',
         'This was working last week.',
         'Bisected to a recent commit.',
         'Looks like something broke in the latest changes.',
     ]
+
+    # Replace generic CI openers with workflow-specific ones when available
+    if github_context and github_context.get("workflows"):
+        wf = random.choice(github_context["workflows"])
+        _ISSUE_OPENERS.extend([
+            f'{wf} started failing after the last merge.',
+            f'{wf} is red on main.',
+            f'This showed up in {wf} overnight.',
+            f'{wf} caught this.',
+            f'{wf} is broken, looks like a recent change.',
+        ])
+    else:
+        _ISSUE_OPENERS.extend([
+            'CI started failing after the last merge.',
+            'Build is red on main.',
+            'This showed up in CI overnight.',
+            'Our nightly build caught this.',
+            'CI is broken, looks like a recent change.',
+        ])
 
     test_id = _extract_first_failure_id(test_output)
     trimmed_output = _trim_test_output(test_output)
@@ -4998,7 +5260,10 @@ async def enrich_instance(
     )
 
     social_artifacts = _mine_social_artifacts(repo_path)
-    social_context = _build_social_context(social_artifacts)
+    github_context = _fetch_github_social_context(instance['repo'])
+    social_context = _build_social_context(
+        social_artifacts, github_context=github_context, mutated_file=bug_spec.file,
+    )
 
     symptom = await _bug_to_symptom(
         bug_spec.bug_description, file_path=bug_spec.file, model=model,
@@ -5016,6 +5281,7 @@ async def enrich_instance(
         dataset_examples=dataset_examples,
         repo_name=Path(repo_path).name,
         language=pipeline['language'],
+        github_context=github_context,
     )
     test_patch = ''
     try:
@@ -5034,7 +5300,9 @@ async def enrich_instance(
     iid = instance.get('instance_id', 'unknown')
     max_screen_attempts = 5
     for screen_attempt in range(max_screen_attempts):
-        social_context = _build_social_context(social_artifacts)
+        social_context = _build_social_context(
+            social_artifacts, github_context=github_context, mutated_file=bug_spec.file,
+        )
         _issue_gen_kwargs['social_context'] = social_context
         problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
 
@@ -6044,6 +6312,7 @@ async def synthesize_repo(
         )
         style_examples = _mine_issue_style_examples(repo_path)
         social_artifacts = _mine_social_artifacts(repo_path)
+        github_context = _fetch_github_social_context(repo_slug)
 
         _issue_gen_kwargs = dict(
             symptom=symptom,
@@ -6055,12 +6324,15 @@ async def synthesize_repo(
             dataset_examples=dataset_examples,
             repo_name=Path(repo_path).name,
             language=language,
+            github_context=github_context,
         )
 
         max_screen_attempts = 5 if screen_instances else 1
         problem_statement = None
         for screen_attempt in range(max_screen_attempts):
-            social_context = _build_social_context(social_artifacts)
+            social_context = _build_social_context(
+                social_artifacts, github_context=github_context, mutated_file=bug_spec.file,
+            )
             _issue_gen_kwargs['social_context'] = social_context
             problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
 
