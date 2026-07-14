@@ -1,0 +1,1036 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SWE-benchify: Automated Synthesis of Realistic Software Engineering Benchmarks</title>
+<style>
+  :root {
+    --bg: #fafaf9;
+    --fg: #1c1917;
+    --fg-muted: #57534e;
+    --fg-faint: #a8a29e;
+    --accent: #b45309;
+    --accent-light: #fef3c7;
+    --border: #e7e5e4;
+    --code-bg: #f5f5f4;
+    --card-bg: #ffffff;
+    --section-bg: #fefce8;
+    --sidebar-w: 220px;
+    --max-w: 720px;
+    --max-w-wide: 960px;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Source Serif 4', 'Georgia', 'Times New Roman', serif;
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.7;
+    font-size: 17px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ── Layout: sidebar + main ─────────────────────── */
+
+  .page-layout {
+    display: flex;
+    min-height: 100vh;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: var(--sidebar-w);
+    height: 100vh;
+    overflow-y: auto;
+    border-right: 1px solid var(--border);
+    background: var(--bg);
+    padding: 32px 0;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .sidebar .project-name {
+    font-family: 'Inter', 'Helvetica Neue', sans-serif;
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--fg);
+    padding: 0 24px;
+    margin-bottom: 32px;
+  }
+
+  .sidebar nav ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+
+  .sidebar nav a {
+    display: block;
+    padding: 8px 24px;
+    font-family: 'Inter', 'Helvetica Neue', sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--fg-faint);
+    text-decoration: none;
+    border-left: 2px solid transparent;
+    transition: color 0.15s, border-color 0.15s;
+    line-height: 1.4;
+  }
+
+  .sidebar nav a:hover {
+    color: var(--fg-muted);
+  }
+
+  .sidebar nav a.active {
+    color: var(--fg);
+    border-left-color: var(--accent);
+    font-weight: 600;
+  }
+
+  .sidebar nav .section-num {
+    display: inline-block;
+    width: 24px;
+    color: var(--fg-faint);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+  }
+
+  .sidebar nav a.active .section-num {
+    color: var(--accent);
+  }
+
+  .main-content {
+    margin-left: var(--sidebar-w);
+    flex: 1;
+    min-width: 0;
+  }
+
+  .container { max-width: var(--max-w); margin: 0 auto; padding: 0 24px; }
+  .container-wide { max-width: var(--max-w-wide); margin: 0 auto; padding: 0 24px; }
+
+  /* ── Mobile: collapse sidebar ───────────────────── */
+
+  @media (max-width: 900px) {
+    .sidebar {
+      position: static;
+      width: 100%;
+      height: auto;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+      flex-direction: row;
+      flex-wrap: wrap;
+      align-items: center;
+      padding: 16px 0;
+    }
+
+    .sidebar .project-name { margin-bottom: 0; margin-right: 24px; }
+
+    .sidebar nav { width: 100%; overflow-x: auto; }
+
+    .sidebar nav ul {
+      display: flex;
+      gap: 0;
+      padding: 8px 0 0;
+    }
+
+    .sidebar nav a {
+      white-space: nowrap;
+      border-left: none;
+      border-bottom: 2px solid transparent;
+      padding: 8px 14px;
+    }
+
+    .sidebar nav a.active {
+      border-left: none;
+      border-bottom-color: var(--accent);
+    }
+
+    .main-content { margin-left: 0; }
+
+    .page-layout { flex-direction: column; }
+  }
+
+  /* ── Header ─────────────────────────────────────── */
+
+  header {
+    padding: 80px 0 48px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  header h1 {
+    font-size: 36px;
+    font-weight: 700;
+    line-height: 1.2;
+    letter-spacing: -0.02em;
+    margin-bottom: 16px;
+  }
+
+  .github-link {
+    color: var(--fg-faint);
+    text-decoration: none;
+    vertical-align: middle;
+    margin-left: 4px;
+    transition: color 0.15s;
+  }
+
+  .github-link:hover { color: var(--fg); }
+
+  header .subtitle {
+    font-size: 19px;
+    color: var(--fg-muted);
+    line-height: 1.5;
+    max-width: 600px;
+  }
+
+  /* ── Sections ────────────────────────────────────── */
+
+  section { padding: 64px 0; border-bottom: 1px solid var(--border); }
+  section:last-of-type { border-bottom: none; }
+
+  h2 {
+    font-size: 26px;
+    font-weight: 700;
+    letter-spacing: -0.015em;
+    margin-bottom: 8px;
+  }
+
+  h2 .section-number {
+    font-family: 'Inter', 'Helvetica Neue', sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+    letter-spacing: 0.05em;
+    display: block;
+    margin-bottom: 8px;
+  }
+
+  h3 {
+    font-size: 20px;
+    font-weight: 600;
+    margin-top: 40px;
+    margin-bottom: 12px;
+  }
+
+  p { margin-bottom: 16px; }
+
+  p + h3 { margin-top: 48px; }
+
+  strong { font-weight: 600; }
+
+  /* ── Key insight callouts ─────────────────────────── */
+
+  .callout {
+    background: var(--section-bg);
+    border-left: 3px solid var(--accent);
+    padding: 20px 24px;
+    margin: 24px 0;
+    border-radius: 0 6px 6px 0;
+  }
+
+  .callout p { margin-bottom: 0; }
+
+  .callout .label {
+    font-family: 'Inter', 'Helvetica Neue', sans-serif;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--accent);
+    margin-bottom: 8px;
+  }
+
+  /* ── Constraint list ──────────────────────────────── */
+
+  .constraint-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin: 24px 0;
+  }
+
+  @media (max-width: 640px) { .constraint-grid { grid-template-columns: 1fr; } }
+
+  .constraint {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 18px;
+  }
+
+  .constraint .num {
+    font-family: 'Inter', 'Helvetica Neue', sans-serif;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--accent);
+    margin-bottom: 4px;
+  }
+
+  .constraint .title {
+    font-weight: 600;
+    font-size: 15px;
+    margin-bottom: 4px;
+  }
+
+  .constraint .desc {
+    font-size: 14px;
+    color: var(--fg-muted);
+    line-height: 1.5;
+  }
+
+  .constraint.removed {
+    border-style: dashed;
+    opacity: 0.55;
+  }
+
+  .constraint.removed .title { text-decoration: line-through; }
+
+  /* ── Comparison table ─────────────────────────────── */
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 24px 0;
+    font-size: 15px;
+  }
+
+  th, td {
+    text-align: left;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  th {
+    font-family: 'Inter', 'Helvetica Neue', sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--fg-muted);
+  }
+
+  td:first-child { font-weight: 500; }
+
+  /* ── Pipeline diagram ─────────────────────────────── */
+
+  .pipeline {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    margin: 32px 0;
+    overflow-x: auto;
+    padding-bottom: 8px;
+  }
+
+  .pipeline-stage {
+    flex: 1;
+    min-width: 130px;
+    text-align: center;
+    position: relative;
+  }
+
+  .pipeline-stage .box {
+    background: var(--card-bg);
+    border: 1.5px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 12px;
+    margin: 0 4px;
+    transition: border-color 0.15s;
+  }
+
+  .pipeline-stage .box:hover { border-color: var(--accent); }
+
+  .pipeline-stage .stage-num {
+    font-family: 'Inter', 'Helvetica Neue', sans-serif;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--accent);
+    margin-bottom: 6px;
+  }
+
+  .pipeline-stage .stage-title {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+
+  .pipeline-stage .stage-desc {
+    font-size: 12px;
+    color: var(--fg-muted);
+    line-height: 1.4;
+  }
+
+  .pipeline-arrow {
+    display: flex;
+    align-items: center;
+    font-size: 18px;
+    color: var(--fg-faint);
+    flex-shrink: 0;
+  }
+
+  /* ── Code blocks ──────────────────────────────────── */
+
+  code {
+    font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.88em;
+    background: var(--code-bg);
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px 24px;
+    overflow-x: auto;
+    margin: 24px 0;
+    font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  /* ── Lists ─────────────────────────────────────────── */
+
+  ul, ol {
+    margin: 16px 0;
+    padding-left: 24px;
+  }
+
+  li { margin-bottom: 8px; }
+
+  li::marker { color: var(--fg-faint); }
+
+  /* ── Vision section ──────────────────────────────── */
+
+  .vision-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    margin: 32px 0;
+  }
+
+  @media (max-width: 640px) { .vision-grid { grid-template-columns: 1fr; } }
+
+  .vision-card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px;
+  }
+
+  .vision-card h4 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 8px;
+  }
+
+  .vision-card p {
+    font-size: 14px;
+    color: var(--fg-muted);
+    line-height: 1.5;
+    margin-bottom: 0;
+  }
+
+  /* ── Footer ──────────────────────────────────────── */
+
+  footer {
+    padding: 48px 0;
+    font-family: 'Inter', 'Helvetica Neue', sans-serif;
+    font-size: 13px;
+    color: var(--fg-faint);
+    text-align: center;
+  }
+
+  /* ── Transitions ──────────────────────────────────── */
+
+  .fade-target {
+    opacity: 0;
+    transform: translateY(12px);
+    transition: opacity 0.5s ease, transform 0.5s ease;
+  }
+
+  .fade-target.visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<div class="page-layout">
+
+<!-- ═══════════════════ SIDEBAR ═══════════════════ -->
+
+<aside class="sidebar">
+  <div class="project-name">SWE-benchify</div>
+  <nav>
+    <ul>
+      <li><a href="#motivation"><span class="section-num">01</span> Motivation</a></li>
+      <li><a href="#constraints"><span class="section-num">02</span> Qualification Problem</a></li>
+      <li><a href="#synthesis"><span class="section-num">03</span> Synthesis Approach</a></li>
+      <li><a href="#synthesizer"><span class="section-num">04</span> The Synthesizer</a></li>
+      <li><a href="#evaluation"><span class="section-num">05</span> Evaluation</a></li>
+      <li><a href="#comparison"><span class="section-num">05b</span> Comparison</a></li>
+      <li><a href="#vision"><span class="section-num">06</span> End State</a></li>
+    </ul>
+  </nav>
+</aside>
+
+<!-- ═══════════════════ MAIN CONTENT ══════════════ -->
+
+<main class="main-content">
+
+<!-- ═══════════════════ HEADER ═══════════════════ -->
+
+<header>
+  <div class="container">
+    <h1>SWE-benchify <a href="https://github.com/Red-Hat-AI-Innovation-Team/SWE-benchify" class="github-link" aria-label="GitHub repository"><svg width="28" height="28" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a></h1>
+    <p class="subtitle">
+      Automated synthesis of realistic software engineering benchmark instances that evade judge detection, create separation between frontier models, and scale to any GitHub repository in any language.
+    </p>
+  </div>
+</header>
+
+<!-- ═══════════════════ MOTIVATION ════════════════ -->
+
+<section id="motivation">
+  <div class="container">
+    <h2><span class="section-number">01</span>Why We Need Better Benchmarks</h2>
+
+    <p>
+      SWE-bench is the standard benchmark for evaluating coding agents on real-world software engineering tasks. Each instance is an issue-PR pair mined from an open-source GitHub repository: a bug report paired with the pull request that fixed it. An agent's job is to read the issue, navigate the codebase, and produce a patch that makes the failing tests pass.
+    </p>
+
+    <p>
+      The original SWE-bench dataset and its successor SWE-bench Verified were constructed through a labor-intensive pipeline: automated PR mining from 12 Python repositories, followed by Docker-based validation, followed (for Verified) by manual human annotation where labelers rated each instance on specificity, test scope, and overall quality. Out of thousands of candidate PRs, only 2,294 survived for SWE-bench and 500 for Verified.
+    </p>
+
+    <p>
+      This process, while rigorous, has fundamental limitations that synthetic generation can address.
+    </p>
+
+    <h3>The Yield Problem</h3>
+    <p>
+      Mining valid benchmark instances from real PRs has an extremely low yield. Each candidate must satisfy a conjunction of eleven independent constraints simultaneously. The failure rate at each stage compounds multiplicatively, and debugging <em>which</em> constraint failed on a specific instance requires understanding the full pipeline end-to-end. Our experience across 182 commits and four programming languages (Python, Go, Rust, Java) confirmed this: what appears conceptually simple (find a bug fix, extract the patch, run the tests) runs headlong into the messy realities of software repositories.
+    </p>
+
+    <h3>The Scaling Problem</h3>
+    <p>
+      Human annotation doesn't scale. SWE-bench Verified required trained annotators to evaluate each instance against a three-question rubric (specificity, test scope, other issues). This produced a high-quality set of 500 instances but cannot be repeated at the frequency or scale needed to keep pace with rapidly improving frontier models. The benchmark saturates; the field needs fresh, unseen problems on demand.
+    </p>
+
+    <h3>The Language Problem</h3>
+    <p>
+      SWE-bench covers only Python. The real world writes Go, Rust, Java, TypeScript, and dozens of other languages. Extending the mining approach to each new language requires solving language-specific challenges in patch extraction, test identification, output parsing, and toolchain management, each with its own failure modes. Rust puts tests <em>inline</em> in source files. Go uses co-located <code>*_test.go</code> files. Java's Maven convention differs from its Gradle convention. Each language is a new engineering project.
+    </p>
+  </div>
+</section>
+
+<!-- ═══════════════════ CONSTRAINTS ═══════════════ -->
+
+<section id="constraints">
+  <div class="container">
+    <h2><span class="section-number">02</span>The Qualification Problem</h2>
+
+    <p>
+      A valid SWE-bench instance must satisfy all eleven of the following constraints. Failure on any single constraint eliminates the candidate. This conjunction is what makes mining so difficult, and what motivates synthesis.
+    </p>
+
+    <div class="constraint-grid">
+      <div class="constraint">
+        <div class="num">C1</div>
+        <div class="title">Bug-Fix PR</div>
+        <div class="desc">The PR must fix a real bug, not be a refactor, feature addition, or documentation change.</div>
+      </div>
+      <div class="constraint">
+        <div class="num">C2</div>
+        <div class="title">Issue Linkage</div>
+        <div class="desc">The PR must be linked to an issue with a sufficiently detailed problem statement (&gt;40 words, no raw URLs or SHAs).</div>
+      </div>
+      <div class="constraint">
+        <div class="num">C3</div>
+        <div class="title">Patch Separability</div>
+        <div class="desc">The diff must cleanly separate into a gold (fix) patch and a test patch, even when tests are inline (Rust) or co-located (Go).</div>
+      </div>
+      <div class="constraint">
+        <div class="num">C4</div>
+        <div class="title">Fail-to-Pass</div>
+        <div class="desc">Tests must fail before the fix and pass after. This is the core validity signal.</div>
+      </div>
+      <div class="constraint">
+        <div class="num">C5</div>
+        <div class="title">Determinism</div>
+        <div class="desc">Test failures must be deterministic across multiple runs. Flaky tests create unreproducible instances.</div>
+      </div>
+      <div class="constraint">
+        <div class="num">C6</div>
+        <div class="title">Environment Reproducibility</div>
+        <div class="desc">The environment must be fully reproducible in a Docker container with the correct toolchain version.</div>
+      </div>
+      <div class="constraint">
+        <div class="num">C7</div>
+        <div class="title">Toolchain Availability</div>
+        <div class="desc">The correct compiler/interpreter version must be detected and available. Silent version failures (e.g., Go 1.22 vs 1.23) produce zero output with no error.</div>
+      </div>
+      <div class="constraint">
+        <div class="num">C8</div>
+        <div class="title">Parseable Output</div>
+        <div class="desc">Test output must be parseable into individual pass/fail verdicts. Regex-based parsing of verbose text is fragile; structured output (e.g., <code>go test -json</code>) is essential.</div>
+      </div>
+      <div class="constraint">
+        <div class="num">C9</div>
+        <div class="title">Solvability</div>
+        <div class="desc">Failing tests must not reference symbols introduced by the fix (unsolvable) or fail due to environment issues (ImportError, AttributeError).</div>
+      </div>
+      <div class="constraint">
+        <div class="num">C10</div>
+        <div class="title">Freshness</div>
+        <div class="desc">The instance must not overlap with existing published benchmark datasets.</div>
+      </div>
+      <div class="constraint">
+        <div class="num">C11</div>
+        <div class="title">Commit Reachability</div>
+        <div class="desc">GitHub's <code>merge_commit_sha</code> on PRs points to a temporary test-merge commit that gets garbage-collected. The base commit derived from it becomes unreachable, and fallbacks (<code>pr.base.sha</code>, archive API) often fail for older PRs.</div>
+      </div>
+    </div>
+
+    <div class="callout">
+      <div class="label">Key Insight</div>
+      <p>
+        Synthetic generation eliminates six of these constraints entirely (C1, C2, C3, C9, C10, C11) and simplifies a seventh (C6). We control the bug, the issue, the patch split, the solvability, the freshness, and the base commit by construction. This transforms a low-yield mining operation into a high-yield synthesis pipeline.
+      </p>
+    </div>
+
+    <p>
+      The constraints below are struck through to indicate those that synthesis eliminates:
+    </p>
+
+    <div class="constraint-grid">
+      <div class="constraint removed">
+        <div class="num">C1</div>
+        <div class="title">Bug-Fix PR</div>
+        <div class="desc">We introduce the bug ourselves. It's a bug fix by construction.</div>
+      </div>
+      <div class="constraint removed">
+        <div class="num">C2</div>
+        <div class="title">Issue Linkage</div>
+        <div class="desc">We generate the issue text from observed symptoms. Linked by construction.</div>
+      </div>
+      <div class="constraint removed">
+        <div class="num">C3</div>
+        <div class="title">Patch Separability</div>
+        <div class="desc">We produce the gold patch and test patch as separate artifacts.</div>
+      </div>
+      <div class="constraint">
+        <div class="num">C4</div>
+        <div class="title">Fail-to-Pass</div>
+        <div class="desc">Still required. Docker-validated with N-run flake quarantine.</div>
+      </div>
+      <div class="constraint">
+        <div class="num">C5</div>
+        <div class="title">Determinism</div>
+        <div class="desc">Still required. Three-run intersection with quarantine.</div>
+      </div>
+      <div class="constraint removed">
+        <div class="num">C6</div>
+        <div class="title">Environment Reproducibility</div>
+        <div class="desc">Environment-first: we start from a known-good repo state with passing tests.</div>
+      </div>
+      <div class="constraint">
+        <div class="num">C7</div>
+        <div class="title">Toolchain Availability</div>
+        <div class="desc">Still required. Per-language toolchain detection remains necessary.</div>
+      </div>
+      <div class="constraint">
+        <div class="num">C8</div>
+        <div class="title">Parseable Output</div>
+        <div class="desc">Still required. Structured test output parsers for each language.</div>
+      </div>
+      <div class="constraint removed">
+        <div class="num">C9</div>
+        <div class="title">Solvability</div>
+        <div class="desc">The fix reverses our mutation. No new symbols needed.</div>
+      </div>
+      <div class="constraint removed">
+        <div class="num">C10</div>
+        <div class="title">Freshness</div>
+        <div class="desc">Every instance is novel by construction. Decontamination is a verify step, not a filter.</div>
+      </div>
+      <div class="constraint removed">
+        <div class="num">C11</div>
+        <div class="title">Commit Reachability</div>
+        <div class="desc">We start from a known-good commit with passing tests. No dependency on GitHub's ephemeral merge SHAs.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════ SYNTHESIS APPROACH ═════════ -->
+
+<section id="synthesis">
+  <div class="container">
+    <h2><span class="section-number">03</span>From Mining to Synthesis</h2>
+
+    <p>
+      Our synthesis approach inverts the traditional SWE-bench pipeline. Instead of searching for naturally-occurring bug fixes, we start from a known-good repository state and introduce controlled bugs that produce realistic problem instances.
+    </p>
+
+    <h3>Environment-First Architecture</h3>
+    <p>
+      We build a Docker environment per repository (not per instance), starting from a commit where the full test suite passes. This insight, independently validated by SWE-Smith (which used it to reduce storage from 50&ndash;150TB to 295GB), eliminates the environment reproducibility constraint and provides a stable baseline for bug introduction.
+    </p>
+
+    <h3>Dual Mutation Strategy</h3>
+
+    <p><strong>Strategy A: Targeted Mutation.</strong> We analyze test assertions to identify operator patterns, then apply inverse mutations. If a test asserts <code>assertEqual(f(x), 5)</code> and <code>f</code> uses addition, we swap <code>+</code> for <code>-</code>. This produces deterministic, guaranteed-to-break mutations with a direct connection to existing test coverage. The mutation table covers arithmetic operators, comparison operators, logical operators, raise removal, and return value changes.</p>
+
+    <p><strong>Strategy B: LLM-Guided Semantic Mutation.</strong> An LLM studies a source file and introduces a realistic behavioral bug: an off-by-one error, a missing edge case, an inverted condition, a wrong variable reference. This produces subtler, more realistic bugs that better approximate the kinds of mistakes developers actually make. Multi-file coordination is supported, where the LLM plans bugs that span related modules.</p>
+
+    <h3>The Information Firewall</h3>
+    <p>
+      The most critical design decision in the synthesizer is preventing the issue text from leaking information about the root cause. SWE-Smith's issue generation prompt includes the failing test source code and execution output, which can leak the solution approach to a solving agent. Our pipeline enforces a strict information firewall:
+    </p>
+
+    <ol>
+      <li>The bug specification (operator name, variable, file, function) is converted to a <strong>symptom description</strong> that strips all implementation details.</li>
+      <li>The issue text is generated from the symptom <em>only</em>. The LLM never sees the bug spec, function name, file path, or code.</li>
+      <li>Issue content is constructed data-first: ~80% pasted test output, ~20% LLM framing.</li>
+      <li>Social artifacts (contributor @-mentions, issue cross-references, branch names) are mined from real git history and embedded to match the repository's conversational style.</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ═══════════════════ SYNTHESIZER DEEP DIVE ══════ -->
+
+<section id="synthesizer">
+  <div class="container-wide">
+    <h2><span class="section-number">04</span>The Synthesizer</h2>
+  </div>
+  <div class="container">
+
+    <p>
+      The synthesizer is a ~5,000-line module that orchestrates the end-to-end process of producing a synthetic benchmark instance. It operates in six phases:
+    </p>
+  </div>
+
+  <div class="container-wide">
+    <div class="pipeline">
+      <div class="pipeline-stage">
+        <div class="box">
+          <div class="stage-num">1</div>
+          <div class="stage-title">Target Selection</div>
+          <div class="stage-desc">Find functions with test coverage, score by edge-case signals</div>
+        </div>
+      </div>
+      <div class="pipeline-arrow">&rarr;</div>
+      <div class="pipeline-stage">
+        <div class="box">
+          <div class="stage-num">2</div>
+          <div class="stage-title">Bug Introduction</div>
+          <div class="stage-desc">Targeted mutation or LLM-guided semantic injection</div>
+        </div>
+      </div>
+      <div class="pipeline-arrow">&rarr;</div>
+      <div class="pipeline-stage">
+        <div class="box">
+          <div class="stage-num">3</div>
+          <div class="stage-title">Issue Generation</div>
+          <div class="stage-desc">Symptom extraction &rarr; information firewall &rarr; natural-language issue</div>
+        </div>
+      </div>
+      <div class="pipeline-arrow">&rarr;</div>
+      <div class="pipeline-stage">
+        <div class="box">
+          <div class="stage-num">4</div>
+          <div class="stage-title">Test Patch</div>
+          <div class="stage-desc">Add assertions to existing test files that expose the bug</div>
+        </div>
+      </div>
+      <div class="pipeline-arrow">&rarr;</div>
+      <div class="pipeline-stage">
+        <div class="box">
+          <div class="stage-num">5</div>
+          <div class="stage-title">Validation</div>
+          <div class="stage-desc">Docker F2P/P2P with N-run flake quarantine</div>
+        </div>
+      </div>
+      <div class="pipeline-arrow">&rarr;</div>
+      <div class="pipeline-stage">
+        <div class="box">
+          <div class="stage-num">6</div>
+          <div class="stage-title">Self-Screen</div>
+          <div class="stage-desc">Judge rejects instances classified as synthetic with high confidence</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="container">
+    <h3>Target Selection &amp; Prioritization</h3>
+    <p>
+      The synthesizer walks the repository tree, extracts functions using language-specific patterns, and scores them by edge-case signals: error handling, type checks, None guards, boundary conditions. Targets are ranked in three tiers based on test coverage: functions with direct test assertions (highest priority), functions with test files but no direct assertions, and functions without test coverage (lowest priority). This assertion-aware prioritization, introduced in our most recent work, directs mutations toward code that is most likely to produce a valid fail-to-pass signal.
+    </p>
+
+    <h3>Anti-Detection Measures</h3>
+    <p>
+      Synthetic instances carry telltale fingerprints that a discriminator can learn to detect. The synthesizer applies multiple layers of decontamination:
+    </p>
+    <ul>
+      <li><strong>Output sanitization:</strong> Strips environment variables (<code>ANTHROPIC_*</code>, <code>FACTORY_*</code>, <code>CLAUDE_*</code>), macOS/homebrew paths, and synthetic keywords from test output.</li>
+      <li><strong>Traceback humanization:</strong> Transforms raw test output to resemble a user's local environment.</li>
+      <li><strong>Opener randomization:</strong> Replaces formulaic LLM openers ("I'm encountering an issue...") with varied natural alternatives (frustrated, casual, terse, CI-related, version-regression styles).</li>
+      <li><strong>Social artifact injection:</strong> Embeds real contributor @-mentions, commit SHAs, issue cross-references, and branch names mined from the repository's git history.</li>
+      <li><strong>Issue-patch alignment check:</strong> Catches the failure mode where the issue describes one kind of problem (e.g., a license check failure) but the patch fixes a different kind (e.g., a logic bug).</li>
+      <li><strong>Self-screening:</strong> Before emission, each candidate is run through the same real-vs-synthetic judge. Instances classified as synthetic with high confidence are discarded.</li>
+    </ul>
+
+    <h3>Multi-Language Support</h3>
+    <p>
+      The synthesizer operates across Python, Go, Java, and Rust, with language-specific handling for function extraction, test identification, compilation checks, and test output parsing. Each language has its own <code>LanguageBackend</code> with registered parsers (PytestVerboseParser, GoJSONParser, MavenSurefireParser, RustTestParser) and validation pipelines.
+    </p>
+  </div>
+</section>
+
+<!-- ═══════════════════ EVALUATION ════════════════ -->
+
+<section id="evaluation">
+  <div class="container">
+    <h2><span class="section-number">05</span>Evaluation</h2>
+
+    <p>
+      We evaluate synthetic instances along four dimensions. All four must be satisfied simultaneously for the synthesis pipeline to be considered successful.
+    </p>
+
+    <h3>Structural Validity</h3>
+    <p>
+      Every instance must have non-empty gold patch, test patch, and issue text, with at least 2 changed lines. The patch must apply cleanly. This is a gate: any structural failure zeros the score.
+    </p>
+
+    <h3>Functional Validity (F2P/P2P)</h3>
+    <p>
+      Each instance is validated in Docker: tests must fail on the buggy code (fail-to-pass) and pass on the fixed code (pass-to-pass). Validation runs N times (default 3) with flake quarantine. Any test that appears in FAIL_TO_PASS on some runs but not all is quarantined. If quarantining removes the instance's only failing test, the instance is dropped.
+    </p>
+
+    <h3>Realism (Judge Evasion)</h3>
+    <p>
+      An LLM judge (Claude Opus) examines each instance and classifies it as REAL or SYNTHETIC with HIGH/MEDIUM/LOW confidence. The judge evaluates patch naturalness, issue text quality, test patch realism, cross-file coherence, social artifacts, and formatting patterns. Evasion rate is the proportion of instances the judge classifies as real or low-confidence synthetic. The target is evasion &gt;50%, near the theoretical ceiling of indistinguishability.
+    </p>
+
+    <h3>Diversity</h3>
+    <p>
+      Instances must exhibit diversity in bug types (operator swap, edge case, logic error), affected files, patch complexity, and target repositories. A monoculture of similar bugs, even if individually realistic, would be a poor benchmark. Diversity is measured as an aggregate across these dimensions and acts as a 0.3-weighted component of the overall score.
+    </p>
+
+    <div class="callout">
+      <div class="label">Usability Formula</div>
+      <p>
+        The probability that a synthetic instance is usable as a benchmark problem:
+        <br><br>
+        <code>P(usable) = yield &times; f2p_rate &times; evasion &times; diversity</code>
+        <br><br>
+        This multiplicative formula means that weakness in any single dimension dominates. A pipeline with 90% yield but 10% evasion produces 9% usable instances.
+      </p>
+    </div>
+
+    <h3>Separation (Planned)</h3>
+    <p>
+      The ultimate validation of a benchmark is that it creates meaningful separation between models of different capability levels. We verify this by running haiku, sonnet, and opus on generated instances and confirming monotonic ordering with significant inter-tier gaps. Our Phase 1 reproduction of the original SWE-bench confirmed this ordering holds: haiku 3% &lt; sonnet 10% &lt; opus 65%.
+    </p>
+  </div>
+</section>
+
+<!-- ═══════════════════ COMPARISON ════════════════ -->
+
+<section id="comparison" style="background: var(--code-bg);">
+  <div class="container">
+    <h2><span class="section-number">05b</span>Comparison with Existing Approaches</h2>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Dimension</th>
+          <th>SWE-bench (Human)</th>
+          <th>SWE-Smith</th>
+          <th>SWE-benchify</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Source</td>
+          <td>Mined PRs + human labels</td>
+          <td>Synthetic (AST/LLM mutation)</td>
+          <td>Synthetic (targeted + semantic mutation)</td>
+        </tr>
+        <tr>
+          <td>Scale</td>
+          <td>2,294 / 500 verified</td>
+          <td>50,000+</td>
+          <td>Optimizes for quality over volume</td>
+        </tr>
+        <tr>
+          <td>Languages</td>
+          <td>Python only</td>
+          <td>Python only</td>
+          <td>Python, Go, Rust, Java</td>
+        </tr>
+        <tr>
+          <td>Validation</td>
+          <td>Docker + human review</td>
+          <td>1 broken test, 2 min timeout</td>
+          <td>Docker F2P/P2P, N-run flake quarantine</td>
+        </tr>
+        <tr>
+          <td>Issue text</td>
+          <td>Real issues</td>
+          <td>LLM from test code (leaks hints)</td>
+          <td>LLM from symptoms only (information firewall)</td>
+        </tr>
+        <tr>
+          <td>Realism check</td>
+          <td>Human judgment</td>
+          <td>None</td>
+          <td>LLM discriminator + self-screening</td>
+        </tr>
+        <tr>
+          <td>Improvement</td>
+          <td>Manual</td>
+          <td>One-shot pipeline</td>
+          <td>Iterative pipeline refinement</td>
+        </tr>
+        <tr>
+          <td>Flake handling</td>
+          <td>Manual exclusion</td>
+          <td>None</td>
+          <td>Multi-run quarantine</td>
+        </tr>
+        <tr>
+          <td>Model separation</td>
+          <td>Measured post-hoc</td>
+          <td>Not measured</td>
+          <td>First-class criterion</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ═══════════════════ VISION ════════════════════ -->
+
+<section id="vision">
+  <div class="container">
+    <h2><span class="section-number">06</span>End State</h2>
+
+    <p>
+      The goal is a system where you can point at an arbitrary GitHub repository in any programming language and generate hyper-realistic issue-PR pairs on demand. These synthetic problems must satisfy two hard criteria and one soft criterion:
+    </p>
+
+    <div class="vision-grid">
+      <div class="vision-card">
+        <h4>Indistinguishable from Real</h4>
+        <p>
+          A frontier LLM judge cannot reliably distinguish synthetic instances from real ones. The issue text reads like a frustrated developer, the patch looks like a natural bug fix, and the test changes match the repository's testing conventions.
+        </p>
+      </div>
+      <div class="vision-card">
+        <h4>Creates Model Separation</h4>
+        <p>
+          The problems are hard enough that weaker models fail and strong enough that frontier models can solve them. Performance on synthetic problems should correlate with performance on real software engineering tasks. The benchmark measures genuine capability, not benchmark-specific tricks.
+        </p>
+      </div>
+      <div class="vision-card">
+        <h4>Any Repo, Any Language</h4>
+        <p>
+          The pipeline handles Python, Go, Rust, and Java today with a <code>LanguageBackend</code> abstraction that makes adding new languages tractable. The environment-first architecture means each new repository requires only a passing test suite and a Docker image, not per-instance environment engineering.
+        </p>
+      </div>
+      <div class="vision-card">
+        <h4>Continuous &amp; On-Demand</h4>
+        <p>
+          As models improve and saturate existing benchmarks, the system generates fresh, unseen problems automatically. Self-screening ensures that quality remains high: instances that a judge can detect as synthetic are discarded before emission.
+        </p>
+      </div>
+    </div>
+
+    <div class="callout">
+      <div class="label">The Fundamental Bet</div>
+      <p>
+        If we can produce synthetic problems that are indistinguishable from real ones and that create separation between models, then performance on these synthetic problems is a valid proxy for real-world software engineering utility.
+      </p>
+    </div>
+
+    <h3>Why This Matters</h3>
+    <p>
+      The field needs benchmarks that are fresh (unsaturated), multilingual (reflecting real-world software), scalable (no human annotation bottleneck), and trustworthy (validated, not just face-valid). SWE-benchify aims to be the infrastructure that produces them: not a one-time dataset, but a benchmark <em>factory</em> that can generate evaluation data at the speed the field demands.
+    </p>
+  </div>
+</section>
+
+</main>
+</div>
+
+<!-- ═══════════════════ FOOTER ════════════════════ -->
+
+<footer>
+  <div class="container">
+    SWE-benchify
+  </div>
+</footer>
+
+<!-- ═══════════════════ SCROLL SPY + ANIMATION ════ -->
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  // Fade-in animation
+  document.querySelectorAll('section > .container > h2, section > .container-wide > h2, .callout, .constraint-grid, .pipeline, .vision-grid, table').forEach(el => {
+    el.classList.add('fade-target');
+  });
+
+  const fadeObserver = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('visible');
+        fadeObserver.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.15, rootMargin: '0px 0px -40px 0px' });
+
+  document.querySelectorAll('.fade-target').forEach(el => fadeObserver.observe(el));
+
+  // Scroll spy for sidebar
+  const sections = document.querySelectorAll('section[id]');
+  const navLinks = document.querySelectorAll('.sidebar nav a');
+
+  const scrollObserver = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        navLinks.forEach(link => link.classList.remove('active'));
+        const active = document.querySelector(`.sidebar nav a[href="#${entry.target.id}"]`);
+        if (active) active.classList.add('active');
+      }
+    });
+  }, { threshold: 0, rootMargin: '-10% 0px -80% 0px' });
+
+  sections.forEach(section => scrollObserver.observe(section));
+
+  // Smooth scroll on nav click
+  navLinks.forEach(link => {
+    link.addEventListener('click', (e) => {
+      e.preventDefault();
+      const target = document.querySelector(link.getAttribute('href'));
+      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
+});
+</script>
+
+</body>
+</html>
