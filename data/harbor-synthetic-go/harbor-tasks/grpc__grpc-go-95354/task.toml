@@ -1,0 +1,34 @@
+schema_version = "1.3"
+
+[task]
+name = "swebenchify/go__grpc__grpc-go-95354"
+description = "Binary metadata values with standard base64 padding are not being decoded correctly when received as header values. This"
+keywords = ["go", "swe-bench", "bug-fix"]
+
+[metadata]
+repo = "grpc/grpc-go"
+instance_id = "grpc__grpc-go-95354"
+base_commit = "d83274d1cdc076294e9c79248d628e9bd227f578"
+difficulty = "medium"
+language = "go"
+source = "swebenchify"
+version = "0.0"
+
+[verifier]
+timeout_sec = 300.0
+network_mode = "allowlist"
+allowed_hosts = ["proxy.golang.org", "sum.golang.org", "storage.googleapis.com"]
+
+[agent]
+timeout_sec = 1800.0
+user = "root"
+network_mode = "allowlist"
+allowed_hosts = ["proxy.golang.org", "sum.golang.org", "storage.googleapis.com"]
+
+artifacts = ["/logs/artifacts/candidate_patch.diff", "/logs/artifacts/patch_stat.txt", "/logs/verifier/report.json"]
+
+[environment]
+docker_image = "ghcr.io/red-hat-ai-innovation-team/swe-benchify/grpc-go:a481b8f755bc"
+cpus = 2
+memory_mb = 4096
+storage_mb = 10240

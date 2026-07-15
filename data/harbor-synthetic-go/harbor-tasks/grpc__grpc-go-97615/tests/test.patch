@@ -1,0 +1,27 @@
+diff --git a/interop/xds/custom_lb_test.go b/interop/xds/custom_lb_test.go
+--- a/interop/xds/custom_lb_test.go
++++ b/interop/xds/custom_lb_test.go
+@@ -53,6 +53,23 @@
+ // custom lb as the top level Load Balancing policy of the channel, then asserts
+ // it can successfully make an RPC and also that the rpc behavior the Custom LB
+ // is configured with makes it's way to the server in metadata.
++
++
++func TestParseConfigInvalidJSON(t *testing.T) {
++	builder := balancer.Get("rpc_behavior")
++	if builder == nil {
++		t.Fatal("rpc_behavior balancer not registered")
++	}
++	configParser, ok := builder.(balancer.ConfigParser)
++	if !ok {
++		t.Fatal("rpc_behavior balancer does not implement ConfigParser")
++	}
++	_, err := configParser.ParseConfig(json.RawMessage(`not valid json`))
++	if err == nil {
++		t.Fatal("ParseConfig with invalid JSON should return an error, but got nil")
++	}
++}
++
+ func (s) TestCustomLB(t *testing.T) {
+ 	errCh := testutils.NewChannel()
+ 	// Setup a backend which verifies the expected rpc-behavior metadata is

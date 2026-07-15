@@ -1,0 +1,13 @@
+diff --git a/internal/xds/clients/internal/buffer/unbounded.go b/internal/xds/clients/internal/buffer/unbounded.go
+--- a/internal/xds/clients/internal/buffer/unbounded.go
++++ b/internal/xds/clients/internal/buffer/unbounded.go
+@@ -55,6 +55,9 @@
+ func (b *Unbounded) Put(t any) error {
+ 	b.mu.Lock()
+ 	defer b.mu.Unlock()
++	if b.closing {
++		return errBufferClosed
++	}
+ 	if len(b.backlog) == 0 {
+ 		select {
+ 		case b.c <- t:

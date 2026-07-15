@@ -1,0 +1,128 @@
+[
+  {
+    "instance_id": "containers__podman-98442",
+    "task_dir": "containers__podman-98442",
+    "repo": "containers/podman",
+    "language": "go"
+  },
+  {
+    "instance_id": "containers__podman-99547",
+    "task_dir": "containers__podman-99547",
+    "repo": "containers/podman",
+    "language": "go"
+  },
+  {
+    "instance_id": "grpc__grpc-go-90276",
+    "task_dir": "grpc__grpc-go-90276",
+    "repo": "grpc/grpc-go",
+    "language": "go"
+  },
+  {
+    "instance_id": "grpc__grpc-go-90897",
+    "task_dir": "grpc__grpc-go-90897",
+    "repo": "grpc/grpc-go",
+    "language": "go"
+  },
+  {
+    "instance_id": "grpc__grpc-go-91606",
+    "task_dir": "grpc__grpc-go-91606",
+    "repo": "grpc/grpc-go",
+    "language": "go"
+  },
+  {
+    "instance_id": "grpc__grpc-go-91628",
+    "task_dir": "grpc__grpc-go-91628",
+    "repo": "grpc/grpc-go",
+    "language": "go"
+  },
+  {
+    "instance_id": "grpc__grpc-go-92674",
+    "task_dir": "grpc__grpc-go-92674",
+    "repo": "grpc/grpc-go",
+    "language": "go"
+  },
+  {
+    "instance_id": "grpc__grpc-go-93050",
+    "task_dir": "grpc__grpc-go-93050",
+    "repo": "grpc/grpc-go",
+    "language": "go"
+  },
+  {
+    "instance_id": "grpc__grpc-go-93501",
+    "task_dir": "grpc__grpc-go-93501",
+    "repo": "grpc/grpc-go",
+    "language": "go"
+  },
+  {
+    "instance_id": "grpc__grpc-go-93786",
+    "task_dir": "grpc__grpc-go-93786",
+    "repo": "grpc/grpc-go",
+    "language": "go"
+  },
+  {
+    "instance_id": "grpc__grpc-go-94111",
+    "task_dir": "grpc__grpc-go-94111",
+    "repo": "grpc/grpc-go",
+    "language": "go"
+  },
+  {
+    "instance_id": "grpc__grpc-go-95354",
+    "task_dir": "grpc__grpc-go-95354",
+    "repo": "grpc/grpc-go",
+    "language": "go"
+  },
+  {
+    "instance_id": "grpc__grpc-go-96926",
+    "task_dir": "grpc__grpc-go-96926",
+    "repo": "grpc/grpc-go",
+    "language": "go"
+  },
+  {
+    "instance_id": "grpc__grpc-go-96965",
+    "task_dir": "grpc__grpc-go-96965",
+    "repo": "grpc/grpc-go",
+    "language": "go"
+  },
+  {
+    "instance_id": "grpc__grpc-go-98479",
+    "task_dir": "grpc__grpc-go-98479",
+    "repo": "grpc/grpc-go",
+    "language": "go"
+  },
+  {
+    "instance_id": "grpc__grpc-go-98713",
+    "task_dir": "grpc__grpc-go-98713",
+    "repo": "grpc/grpc-go",
+    "language": "go"
+  },
+  {
+    "instance_id": "grpc__grpc-go-98809",
+    "task_dir": "grpc__grpc-go-98809",
+    "repo": "grpc/grpc-go",
+    "language": "go"
+  },
+  {
+    "instance_id": "grpc__grpc-go-99075",
+    "task_dir": "grpc__grpc-go-99075",
+    "repo": "grpc/grpc-go",
+    "language": "go"
+  },
+  {
+    "instance_id": "grpc__grpc-go-99711",
+    "task_dir": "grpc__grpc-go-99711",
+    "repo": "grpc/grpc-go",
+    "language": "go"
+  },
+  {
+    "instance_id": "grpc__grpc-go-97615",
+    "task_dir": "grpc__grpc-go-97615",
+    "repo": "grpc/grpc-go",
+    "language": "go"
+  },
+  {
+    "instance_id": "grpc__grpc-go-98295",
+    "task_dir": "grpc__grpc-go-98295",
+    "repo": "grpc/grpc-go",
+    "language": "go"
+  }
+]

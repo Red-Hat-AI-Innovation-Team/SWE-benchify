@@ -1,0 +1,12 @@
+diff --git a/internal/transport/readyreader/ready_reader.go b/internal/transport/readyreader/ready_reader.go
+--- a/internal/transport/readyreader/ready_reader.go
++++ b/internal/transport/readyreader/ready_reader.go
+@@ -148,7 +148,7 @@
+ 		pool.Put(buf)
+ 		return nil, 0, err
+ 	}
+-	return buf, bufSize, nil
++	return buf, n, nil
+ }
+ 
+ // New detects if [syscall.RawConn] is available for non-memory-pinning reads.

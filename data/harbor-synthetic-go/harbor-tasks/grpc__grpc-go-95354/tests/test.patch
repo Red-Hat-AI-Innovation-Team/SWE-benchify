@@ -1,0 +1,23 @@
+diff --git a/internal/transport/http_util_test.go b/internal/transport/http_util_test.go
+--- a/internal/transport/http_util_test.go
++++ b/internal/transport/http_util_test.go
+@@ -252,6 +252,19 @@
+ 	net.Conn
+ }
+ 
++
++func TestDecodeBinHeaderPadded(t *testing.T) {
++	input := "Zm9vAGJhcg=="
++	expected := "foo\x00bar"
++	got, err := decodeBinHeader(input)
++	if err != nil {
++		t.Fatalf("decodeBinHeader(%q) returned error: %v", input, err)
++	}
++	if string(got) != expected {
++		t.Errorf("decodeBinHeader(%q) = %q, want %q", input, string(got), expected)
++	}
++}
++
+ func (c *badNetworkConn) Write([]byte) (int, error) {
+ 	return 0, io.EOF
+ }

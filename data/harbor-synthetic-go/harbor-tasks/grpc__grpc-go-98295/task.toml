@@ -1,0 +1,34 @@
+schema_version = "1.3"
+
+[task]
+name = "swebenchify/go__grpc__grpc-go-98295"
+description = "When the amount of data being read is smaller than the internal read buffer, the returned byte count seems to reflect th"
+keywords = ["go", "swe-bench", "bug-fix"]
+
+[metadata]
+repo = "grpc/grpc-go"
+instance_id = "grpc__grpc-go-98295"
+base_commit = "06cedecbb72a30fa2f130c01af459e08c475ce08"
+difficulty = "medium"
+language = "go"
+source = "swebenchify"
+version = "0.0"
+
+[verifier]
+timeout_sec = 300.0
+network_mode = "allowlist"
+allowed_hosts = ["proxy.golang.org", "sum.golang.org", "storage.googleapis.com"]
+
+[agent]
+timeout_sec = 1800.0
+user = "root"
+network_mode = "allowlist"
+allowed_hosts = ["proxy.golang.org", "sum.golang.org", "storage.googleapis.com"]
+
+artifacts = ["/logs/artifacts/candidate_patch.diff", "/logs/artifacts/patch_stat.txt", "/logs/verifier/report.json"]
+
+[environment]
+docker_image = "ghcr.io/red-hat-ai-innovation-team/swe-benchify/grpc-go:a481b8f755bc"
+cpus = 2
+memory_mb = 4096
+storage_mb = 10240

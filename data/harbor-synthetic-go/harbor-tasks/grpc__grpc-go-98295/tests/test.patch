@@ -1,0 +1,30 @@
+diff --git a/internal/transport/readyreader/ready_reader_ext_test.go b/internal/transport/readyreader/ready_reader_ext_test.go
+--- a/internal/transport/readyreader/ready_reader_ext_test.go
++++ b/internal/transport/readyreader/ready_reader_ext_test.go
+@@ -71,6 +71,26 @@
+ 	if !bytes.Equal((*bufHandle)[:n], data) {
+ 		t.Errorf("Read data = %s; want %s", string((*bufHandle)[:n]), string(data))
+ 	}
++
++	if n == 1024 {
++		t.Errorf("returned byte count equals bufSize (1024), expected actual bytes read (%d)", len(data))
++	}
++
++	shortData := []byte("hi")
++	shortReader, shortWriter := net.Pipe()
++	go shortWriter.Write(shortData)
++	shortReadyReader := readyreader.New(shortReader)
++	shortBuf, shortN, shortErr := shortReadyReader.ReadOnReady(4096, pool)
++	if shortErr != nil {
++		t.Fatalf("ReadOnReady() on short data failed: %v", shortErr)
++	}
++	defer pool.Put(shortBuf)
++	if shortN != len(shortData) {
++		t.Errorf("short read: n = %d; want %d", shortN, len(shortData))
++	}
++	if !bytes.Equal((*shortBuf)[:shortN], shortData) {
++		t.Errorf("short read data = %s; want %s", string((*shortBuf)[:shortN]), string(shortData))
++	}
+ }
+ 
+ func (s) TestReadyReader_EOF(t *testing.T) {

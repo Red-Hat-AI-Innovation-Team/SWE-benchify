@@ -1,0 +1,30 @@
+diff --git a/internal/serviceconfig/duration_test.go b/internal/serviceconfig/duration_test.go
+--- a/internal/serviceconfig/duration_test.go
++++ b/internal/serviceconfig/duration_test.go
+@@ -83,4 +83,26 @@
+ 			}
+ 		}
+ 	}
++
++	var halfSecond Duration
++	if err := halfSecond.UnmarshalJSON([]byte(`"0.5s"`)); err != nil {
++		t.Fatalf("UnmarshalJSON of \"0.5s\" returned unexpected error: %v", err)
++	}
++	if time.Duration(halfSecond) != 500*time.Millisecond {
++		t.Errorf("UnmarshalJSON of \"0.5s\" = %v; want 500ms", time.Duration(halfSecond))
++	}
++
++	var quarterSecond Duration
++	if err := quarterSecond.UnmarshalJSON([]byte(`"2.25s"`)); err != nil {
++		t.Fatalf("UnmarshalJSON of \"2.25s\" returned unexpected error: %v", err)
++	}
++	if time.Duration(quarterSecond) != 2*time.Second+250*time.Millisecond {
++		t.Errorf("UnmarshalJSON of \"2.25s\" = %v; want 2.25s", time.Duration(quarterSecond))
++	}
++
++	var dotOnly Duration
++	err := dotOnly.UnmarshalJSON([]byte(`".s"`))
++	if err == nil || !strings.Contains(err.Error(), "malformed duration") {
++		t.Errorf("UnmarshalJSON of \".s\" = %v, %v; want malformed duration error", time.Duration(dotOnly), err)
++	}
+ }
