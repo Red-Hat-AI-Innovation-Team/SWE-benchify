@@ -1,0 +1,42 @@
+diff --git a/interop/orcalb_test.go b/interop/orcalb_test.go
+--- a/interop/orcalb_test.go
++++ b/interop/orcalb_test.go
+@@ -272,6 +272,38 @@
+ 	if ctx.Err() != nil {
+ 		t.Fatalf("timed out waiting for OOB reports from both endpoints; seenA=%v seenB=%v", seenA, seenB)
+ 	}
++
++	srvA.metricsRecorder.SetCPUUtilization(0.5)
++	updatedWant := &v3orcapb.OrcaLoadReport{CpuUtilization: 0.5}
++	seenUpdated := false
++	for ; ctx.Err() == nil && !seenUpdated; <-time.After(100 * time.Millisecond) {
++		orcaUpdated := &v3orcapb.OrcaLoadReport{}
++		if _, err := tc.UnaryCall(contextWithORCAResult(ctx, &orcaUpdated), &testpb.SimpleRequest{}); err != nil {
++			continue
++		}
++		if diff := cmp.Diff(orcaUpdated, updatedWant, protocmp.Transform()); diff == "" {
++			seenUpdated = true
++		}
++	}
++	if !seenUpdated {
++		t.Fatalf("timed out waiting for updated OOB report with CpuUtilization=0.5 from endpoint A after metric change")
++	}
++
++	srvB.metricsRecorder.SetCPUUtilization(0.7)
++	updatedWantB := &v3orcapb.OrcaLoadReport{CpuUtilization: 0.7}
++	seenUpdatedB := false
++	for ; ctx.Err() == nil && !seenUpdatedB; <-time.After(100 * time.Millisecond) {
++		orcaUpdatedB := &v3orcapb.OrcaLoadReport{}
++		if _, err := tc.UnaryCall(contextWithORCAResult(ctx, &orcaUpdatedB), &testpb.SimpleRequest{}); err != nil {
++			continue
++		}
++		if diff := cmp.Diff(orcaUpdatedB, updatedWantB, protocmp.Transform()); diff == "" {
++			seenUpdatedB = true
++		}
++	}
++	if !seenUpdatedB {
++		t.Fatalf("timed out waiting for updated OOB report with CpuUtilization=0.7 from endpoint B after metric change")
++	}
+ }
+ 
+ // TestEndpointUpdate verifies client behavior in response to a resolver update

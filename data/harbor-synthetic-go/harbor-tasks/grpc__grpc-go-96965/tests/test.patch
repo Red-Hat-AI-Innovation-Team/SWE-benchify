@@ -1,0 +1,34 @@
+diff --git a/internal/xds/clients/grpctransport/grpc_transport_test.go b/internal/xds/clients/grpctransport/grpc_transport_test.go
+--- a/internal/xds/clients/grpctransport/grpc_transport_test.go
++++ b/internal/xds/clients/grpctransport/grpc_transport_test.go
+@@ -172,6 +172,30 @@
+ 		t.Fatalf("Build(serverID3) call failed: %v", err)
+ 	}
+ 	defer tr3.Close()
++
++	differentURIWithLocal := clients.ServerIdentifier{
++		ServerURI:  "different-server-address",
++		Extensions: ServerIdentifierExtension{ConfigName: "local"},
++	}
++	trDifferentURI, err := b.Build(differentURIWithLocal)
++	if err != nil {
++		t.Fatalf("Build with different server URI but valid config name 'local' failed: %v", err)
++	}
++	defer trDifferentURI.Close()
++
++	differentURIWithInsecure := clients.ServerIdentifier{
++		ServerURI:  "another-server",
++		Extensions: ServerIdentifierExtension{ConfigName: "insecure"},
++	}
++	trAnotherURI, err := b.Build(differentURIWithInsecure)
++	if err != nil {
++		t.Fatalf("Build with server URI 'another-server' and config name 'insecure' failed: %v", err)
++	}
++	defer trAnotherURI.Close()
++
++	if trDifferentURI == nil || trAnotherURI == nil {
++		t.Fatal("Expected non-nil transports for builds with different server URIs but valid config names")
++	}
+ }
+ 
+ // TestBuild_Failure verifies that the Builder returns error when incorrect

@@ -1,0 +1,37 @@
+diff --git a/cmd/podman/machine/list_test.go b/cmd/podman/machine/list_test.go
+--- a/cmd/podman/machine/list_test.go
++++ b/cmd/podman/machine/list_test.go
+@@ -31,6 +31,33 @@
+ 				a.Name, b.Name, ab, ba)
+ 		}
+ 	}
++
++	runningEarlier := &machine.ListResponse{Name: "running-early", Running: true, LastUp: base}
++	stoppedLater := &machine.ListResponse{Name: "stopped-later", Running: false, LastUp: base.Add(2 * time.Hour)}
++	runningBeforeStoppedResult := compareResponseByRunningAndLastUp(runningEarlier, stoppedLater)
++	assert.Equal(t, -1, runningBeforeStoppedResult,
++		"running machines should sort before stopped machines regardless of LastUp")
++
++	sorted := slices.Clone(samples)
++	slices.SortFunc(sorted, compareResponseByRunningAndLastUp)
++	for i := 0; i < len(sorted)-1; i++ {
++		if sorted[i].Running && !sorted[i+1].Running {
++			continue
++		}
++		if !sorted[i].Running && sorted[i+1].Running {
++			t.Errorf("stopped machine %s sorted before running machine %s", sorted[i].Name, sorted[i+1].Name)
++		}
++		if sorted[i].Running == sorted[i+1].Running {
++			assert.False(t, sorted[i].LastUp.Before(sorted[i+1].LastUp),
++				"within same running group, %s (LastUp=%v) should not sort before %s (LastUp=%v)",
++				sorted[i].Name, sorted[i].LastUp, sorted[i+1].Name, sorted[i+1].LastUp)
++		}
++	}
++
++	runningLater := &machine.ListResponse{Name: "running-later", Running: true, LastUp: base.Add(time.Hour)}
++	runningEarlierVsLater := compareResponseByRunningAndLastUp(runningEarlier, runningLater)
++	assert.Equal(t, 1, runningEarlierVsLater,
++		"among running machines, the one with a later LastUp should sort first")
+ }
+ 
+ func Test_sortMachines(t *testing.T) {

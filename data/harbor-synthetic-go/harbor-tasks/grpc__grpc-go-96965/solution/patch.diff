@@ -1,0 +1,15 @@
+diff --git a/internal/xds/clients/grpctransport/grpc_transport.go b/internal/xds/clients/grpctransport/grpc_transport.go
+--- a/internal/xds/clients/grpctransport/grpc_transport.go
++++ b/internal/xds/clients/grpctransport/grpc_transport.go
+@@ -98,9 +98,9 @@
+ 		return nil, fmt.Errorf("grpctransport: Extensions field is %T, but must be %T in ServerIdentifier", si.Extensions, ServerIdentifierExtension{})
+ 	}
+ 
+-	config, ok := b.configs[si.ServerURI]
++	config, ok := b.configs[sce.ConfigName]
+ 	if !ok {
+-		return nil, fmt.Errorf("grpctransport: unknown config name %q specified in ServerIdentifierExtension", si.ServerURI)
++		return nil, fmt.Errorf("grpctransport: unknown config name %q specified in ServerIdentifierExtension", sce.ConfigName)
+ 	}
+ 	if config.Credentials == nil {
+ 		return nil, fmt.Errorf("grpctransport: config %q has nil credentials bundle", sce.ConfigName)
