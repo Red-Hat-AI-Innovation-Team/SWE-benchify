@@ -481,6 +481,7 @@
       <li><a href="#evaluation"><span class="section-num">05</span> Evaluation</a></li>
       <li><a href="#comparison"><span class="section-num">05b</span> Comparison</a></li>
       <li><a href="#vision"><span class="section-num">06</span> End State</a></li>
+      <li><a href="explorer.html"><span class="section-num">07</span> Explorer</a></li>
     </ul>
   </nav>
 </aside>
@@ -974,6 +975,25 @@
   </div>
 </section>
 
+<!-- ═══════════════════ INSTANCE EXPLORER ═════════ -->
+
+<section id="explorer">
+  <div class="container">
+    <h2><span class="section-number">07</span>Instance Explorer</h2>
+    <p>
+      Browse sample problem instances synthesized from the <a href="https://github.com/grpc/grpc-go" style="color:var(--accent)">grpc/grpc-go</a> repository.
+      Each shows the generated issue alongside its fix patch, rendered as they would appear in a real GitHub workflow.
+    </p>
+    <p style="margin-top:16px">
+      <a href="explorer.html" style="display:inline-flex;align-items:center;gap:8px;padding:10px 20px;border:1.5px solid var(--accent);border-radius:8px;color:var(--accent);font-family:'Inter','Helvetica Neue',sans-serif;font-size:14px;font-weight:600;text-decoration:none;transition:background 0.15s,color 0.15s"
+         onmouseover="this.style.background='var(--accent)';this.style.color='#fff'"
+         onmouseout="this.style.background='transparent';this.style.color='var(--accent)'">
+        Open Instance Explorer &rarr;
+      </a>
+    </p>
+  </div>
+</section>
+
 </main>
 </div>
 
@@ -1031,6 +1051,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 });
 </script>
+
 
 </body>
 </html>
