@@ -113,32 +113,44 @@ DATASET_PATH = os.environ.get(
 def _load_dataset_examples(
     dataset_path: str, repo_slug: str, n: int = 5,
 ) -> list[str]:
-    """Load real issue examples from the SWE-benchify dataset JSONL file.
+    """Load real issue examples from dataset JSONL files.
 
-    Filters to instances matching the target repo_slug and randomly
-    samples n problem_statement texts.
+    Searches the primary dataset file and language-specific instance files
+    in the same directory. Filters to instances matching the target
+    repo_slug and randomly samples n problem_statement texts.
     """
-    try:
-        path = Path(dataset_path)
-        if not path.is_file():
-            return []
-        matching: list[str] = []
-        with path.open(encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if record.get("repo") == repo_slug and record.get("problem_statement"):
-                    matching.append(record["problem_statement"])
-        if not matching:
-            return []
-        return random.sample(matching, min(n, len(matching)))
-    except OSError:
+    matching: list[str] = []
+
+    # Collect candidate JSONL paths: the primary dataset + language-specific files
+    paths_to_check: list[Path] = []
+    primary = Path(dataset_path)
+    if primary.is_file():
+        paths_to_check.append(primary)
+    parent = primary.parent
+    if parent.is_dir():
+        for p in parent.glob("instances-*.jsonl"):
+            if p != primary:
+                paths_to_check.append(p)
+
+    for path in paths_to_check:
+        try:
+            with path.open(encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if record.get("repo") == repo_slug and record.get("problem_statement"):
+                        matching.append(record["problem_statement"])
+        except OSError:
+            continue
+
+    if not matching:
         return []
+    return random.sample(matching, min(n, len(matching)))
 
 
 @dataclasses.dataclass
