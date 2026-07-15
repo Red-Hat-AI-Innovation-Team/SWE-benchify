@@ -153,6 +153,32 @@ def _load_dataset_examples(
     return random.sample(matching, min(n, len(matching)))
 
 
+_SIMILARITY_THRESHOLD = 0.15
+
+
+def _trigram_jaccard(a: str, b: str) -> float:
+    """Trigram Jaccard similarity between two texts."""
+    tokens_a = re.findall(r'\w+', a.lower())
+    tokens_b = re.findall(r'\w+', b.lower())
+    if len(tokens_a) < 3 or len(tokens_b) < 3:
+        return 0.0
+    set_a = {tuple(tokens_a[i:i+3]) for i in range(len(tokens_a) - 2)}
+    set_b = {tuple(tokens_b[i:i+3]) for i in range(len(tokens_b) - 2)}
+    intersection = len(set_a & set_b)
+    union = len(set_a | set_b)
+    return intersection / union if union else 0.0
+
+
+def _is_too_similar_to_examples(
+    generated: str, examples: list[str], threshold: float = _SIMILARITY_THRESHOLD,
+) -> bool:
+    """Return True if generated text is too similar to any example."""
+    for ex in examples:
+        if _trigram_jaccard(generated, ex) > threshold:
+            return True
+    return False
+
+
 @dataclasses.dataclass
 class SecondaryChange:
     """A change to a related file as part of a multi-file bug fix.
@@ -3341,7 +3367,10 @@ async def generate_issue_from_symptom(
             model=model,
         )
         if llm_issue:
-            return llm_issue
+            if _is_too_similar_to_examples(llm_issue, dataset_examples):
+                logger.warning("few-shot issue too similar to real examples, falling back to template")
+            else:
+                return llm_issue
 
     _ISSUE_OPENERS = [
         # Original
