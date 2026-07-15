@@ -705,6 +705,7 @@
       <li>The issue text is generated from the symptom <em>only</em>. The LLM never sees the bug spec, function name, file path, or code.</li>
       <li>Issue content is constructed data-first: ~80% pasted test output, ~20% LLM framing.</li>
       <li>Social artifacts (contributor @-mentions, issue cross-references, branch names) are mined from real git history and embedded to match the repository's conversational style.</li>
+      <li>When real issues from the same repository are available, the LLM is <strong>few-shot conditioned</strong> on their style, tone, and structure. A trigram similarity guard rejects any generated text that too closely resembles the examples.</li>
     </ol>
   </div>
 </section>
