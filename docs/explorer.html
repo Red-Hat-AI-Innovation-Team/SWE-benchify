@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Instance Explorer — SWE-benchify</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #fafaf9;
+    --fg: #1c1917;
+    --fg-muted: #57534e;
+    --fg-faint: #a8a29e;
+    --accent: #b45309;
+    --accent-light: #fef3c7;
+    --border: #e7e5e4;
+    --code-bg: #f5f5f4;
+    --card-bg: #ffffff;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Source Serif 4', 'Georgia', 'Times New Roman', serif;
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.7;
+    font-size: 17px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ── Top bar ────────────────────────────────────── */
+
+  .topbar {
+    border-bottom: 1px solid var(--border);
+    padding: 16px 32px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    background: var(--bg);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+
+  .topbar a {
+    font-family: 'Inter', 'Helvetica Neue', sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--fg-faint);
+    text-decoration: none;
+    transition: color 0.15s;
+  }
+
+  .topbar a:hover { color: var(--fg); }
+
+  .topbar .project-name {
+    font-family: 'Inter', 'Helvetica Neue', sans-serif;
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--fg);
+    text-decoration: none;
+  }
+
+  .topbar .sep { color: var(--fg-faint); }
+
+  .topbar .page-title {
+    font-family: 'Inter', 'Helvetica Neue', sans-serif;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--fg-muted);
+  }
+
+  /* ── Instance picker ────────────────────────────── */
+
+  .picker-bar {
+    padding: 16px 32px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+    background: var(--card-bg);
+  }
+
+  .instance-pill {
+    font-family: 'Inter', 'Helvetica Neue', sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 7px 16px;
+    border-radius: 20px;
+    border: 1.5px solid var(--border);
+    background: var(--card-bg);
+    color: var(--fg-muted);
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s, background 0.15s;
+  }
+
+  .instance-pill:hover {
+    border-color: var(--accent);
+    color: var(--fg);
+  }
+
+  .instance-pill.active {
+    border-color: var(--accent);
+    background: var(--accent-light);
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  /* ── Two-pane viewer ────────────────────────────── */
+
+  .viewer {
+    display: flex;
+    min-height: calc(100vh - 110px);
+  }
+
+  .issue-pane {
+    width: 50%;
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .diff-pane {
+    width: 50%;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  @media (max-width: 900px) {
+    .viewer { flex-direction: column; }
+    .issue-pane, .diff-pane { width: 100%; }
+    .issue-pane { border-right: none; border-bottom: 1px solid var(--border); }
+  }
+
+  /* ── Issue pane ─────────────────────────────────── */
+
+  .pane-header {
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    flex-shrink: 0;
+  }
+
+  .issue-title {
+    font-size: 20px;
+    font-weight: 600;
+    line-height: 1.3;
+    margin-bottom: 4px;
+  }
+
+  .issue-meta {
+    font-family: 'Inter', 'Helvetica Neue', sans-serif;
+    font-size: 12px;
+    color: var(--fg-faint);
+  }
+
+  .label-badge {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 1px 7px;
+    border-radius: 12px;
+    margin-left: 6px;
+    vertical-align: 1px;
+  }
+
+  .label-bug { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+
+  .issue-body {
+    padding: 24px;
+    font-size: 15px;
+    line-height: 1.7;
+    overflow-y: auto;
+    flex: 1;
+  }
+
+  .issue-body p { margin-bottom: 12px; }
+
+  .issue-body pre {
+    background: #161b22;
+    color: #e6edf3;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 14px 18px;
+    margin: 12px 0;
+    font-size: 12.5px;
+    line-height: 1.5;
+    overflow-x: auto;
+  }
+
+  .issue-body code {
+    background: var(--code-bg);
+    font-size: 13px;
+    padding: 2px 5px;
+    border-radius: 4px;
+  }
+
+  .issue-body pre code {
+    background: none;
+    padding: 0;
+    font-size: inherit;
+  }
+
+  /* ── Diff pane ──────────────────────────────────── */
+
+  .diff-pane-header {
+    font-family: 'Inter', 'Helvetica Neue', sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--fg-muted);
+  }
+
+  .diff-pane-header .file-count {
+    color: var(--fg-faint);
+    font-weight: 500;
+  }
+
+  .diff-scroll {
+    overflow: auto;
+    flex: 1;
+  }
+
+  .diff-file-header {
+    padding: 8px 18px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    border-top: 1px solid var(--border);
+    font-family: 'JetBrains Mono', 'SF Mono', monospace;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--fg-muted);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
+
+  .diff-file-header:first-child { border-top: none; }
+
+  .diff-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: 'JetBrains Mono', 'SF Mono', monospace;
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+
+  .diff-table td {
+    padding: 0 14px;
+    border: none;
+    vertical-align: top;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
+  .diff-table .ln {
+    width: 1px;
+    white-space: nowrap;
+    text-align: right;
+    color: var(--fg-faint);
+    user-select: none;
+    padding-right: 10px;
+    font-size: 11px;
+    border-right: 1px solid var(--border);
+  }
+
+  .diff-table tr.hunk-row td {
+    background: #dbeafe;
+    color: #1e40af;
+    font-weight: 600;
+    padding-top: 4px;
+    padding-bottom: 4px;
+  }
+
+  .diff-table tr.add-row td.code { background: #dcfce7; color: #166534; }
+  .diff-table tr.del-row td.code { background: #fee2e2; color: #991b1b; }
+  .diff-table tr.add-row td.ln { background: #f0fdf4; }
+  .diff-table tr.del-row td.ln { background: #fef2f2; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <a href="index.html" class="project-name">SWE-benchify</a>
+  <span class="sep">/</span>
+  <span class="page-title">Instance Explorer</span>
+</div>
+
+<div class="picker-bar" id="instance-picker"></div>
+
+<div class="viewer">
+  <div class="issue-pane">
+    <div class="pane-header">
+      <div class="issue-title" id="issue-title"></div>
+      <div class="issue-meta" id="issue-meta"></div>
+    </div>
+    <div class="issue-body" id="issue-body"></div>
+  </div>
+  <div class="diff-pane">
+    <div class="pane-header diff-pane-header">
+      Files changed <span class="file-count" id="file-count"></span>
+    </div>
+    <div class="diff-scroll" id="diff-body"></div>
+  </div>
+</div>
+
+<script>
+(function() {
+  var INSTANCES = [
+    {
+      id: "grpc__grpc-go-90897",
+      summary: "Duration parsing off by factor of 10",
+      problem_statement: "Fractional seconds in duration parsing appear to be off by a factor of 10, and some invalid duration formats are being accepted without error.\n\nFor example, a duration like `\".050s\"` parses as 500ms instead of 50ms, and `\"-0.200s\"` comes back as -2s instead of -200ms. It also looks like certain malformed inputs (like an empty JSON object for a balancer config) aren't being rejected when they should be.\n\n```\n--- FAIL: TestDuration_MarshalUnmarshal (0.00s)\n    duration_test.go:75: UnmarshalJSON of \"-100.700s\" = -1m47s, <nil>; want -1m40.7s, <nil>\n    duration_test.go:75: UnmarshalJSON of \".050s\" = 500ms, <nil>; want 50ms, <nil>\n    duration_test.go:75: UnmarshalJSON of \"-.001s\" = -10ms, <nil>; want -1ms, <nil>\n    duration_test.go:75: UnmarshalJSON of \"-0.200s\" = -2s, <nil>; want -200ms, <nil>\n--- FAIL: TestBalancerConfigUnmarshalJSON (0.00s)\n    --- FAIL: TestBalancerConfigUnmarshalJSON/empty_json (0.00s)\n        serviceconfig_test.go:130: UnmarshalJSON() error = <nil>, wantErr true\nFAIL\nFAIL\tgoogle.golang.org/grpc/internal/serviceconfig\t0.623s\nFAIL\n```\n\nSomething seems broken in how the fractional part of the seconds string is being converted — every fractional value is consistently 10x what it should be. cc @dfawley @eshitachandwani",
+      patch: "diff --git a/internal/serviceconfig/duration.go b/internal/serviceconfig/duration.go\n--- a/internal/serviceconfig/duration.go\n+++ b/internal/serviceconfig/duration.go\n@@ -75,6 +75,9 @@\n \tif len(ss) > 2 {\n \t\treturn fmt.Errorf(\"malformed duration %q: too many decimals\", s)\n \t}\n+\t// hasDigits is set if either the whole or fractional part of the number is\n+\t// present, since both are optional but one is required.\n+\thasDigits := false\n \tvar sec, ns int64\n \tif len(ss[0]) > 0 {\n \t\tvar err error\n@@ -86,6 +89,7 @@\n \t\tif sec > maxProtoSeconds {\n \t\t\treturn fmt.Errorf(\"out of range: %q\", s)\n \t\t}\n+\t\thasDigits = true\n \t}\n \tif len(ss) == 2 && len(ss[1]) > 0 {\n \t\tif len(ss[1]) > 9 {\n@@ -95,11 +99,12 @@\n \t\tif ns, err = strconv.ParseInt(ss[1], 10, 64); err != nil {\n \t\t\treturn fmt.Errorf(\"malformed duration %q: %v\", s, err)\n \t\t}\n-\t\tfor i := 10; i > len(ss[1]); i-- {\n+\t\tfor i := 9; i > len(ss[1]); i-- {\n \t\t\tns *= 10\n \t\t}\n+\t\thasDigits = true\n \t}\n-\tif sec == 0 && ns == 0 && len(ss[0]) == 0 && (len(ss) < 2 || len(ss[1]) == 0) {\n+\tif !hasDigits {\n \t\treturn fmt.Errorf(\"malformed duration %q: contains no numbers\", s)\n \t}\n \ndiff --git a/internal/serviceconfig/serviceconfig.go b/internal/serviceconfig/serviceconfig.go\n--- a/internal/serviceconfig/serviceconfig.go\n+++ b/internal/serviceconfig/serviceconfig.go\n@@ -75,7 +75,7 @@\n \tvar ir intermediateBalancerConfig\n \terr := json.Unmarshal(b, &ir)\n \tif err != nil {\n-\t\treturn nil\n+\t\treturn err\n \t}\n \n \tvar names []string\n"
+    },
+    {
+      id: "grpc__grpc-go-96926",
+      summary: "Binary log config returns non-nil on empty input",
+      problem_statement: "When an empty or invalid binary log configuration string is provided, the logger creation path returns a non-nil logger object instead of `nil`. This means callers that check whether a logger was actually configured (by comparing to `nil`) can't tell that the configuration was bogus or absent, potentially leading to crashes later when operations try to use what looks like a valid logger but isn't really functional.\n\nThis worked on v1.83.0-dev but is broken on v1.84.0-dev.\n\n```\n--- FAIL: Test (0.01s)\n    --- FAIL: Test/NewLoggerFromConfigStringInvalid (0.00s)\n        env_config_test.go:88: With config \"\", want logger <nil>, got &{{<nil> map[] map[] map[]}}\n        tlogger.go:129: WARNING env_config.go:53 [binarylog] failed to parse binary log config: invalid config: \"*{}\", \"{}\" contains invalid substring  (t=+115.667µs)\n        tlogger.go:129: WARNING env_config.go:53 [binarylog] failed to parse binary log config: invalid config: \"*{}\", \"{}\" contains invalid substring  (t=+135µs)\n        tlogger.go:129: WARNING env_config.go:53 [binarylog] failed to parse binary log config: invalid header/message length config: \"{a}\", \"{a}\" contains invalid substring  (t=+151µs)\n        tlogger.go:129: WARNING env_config.go:53 [binarylog] failed to parse binary log config: invalid config: conflicting method rules for method s/m found  (t=+166.833µs)\n        tlogger.go:129: WARNING env_config.go:53 [binarylog] failed to parse binary log config: invalid config: conflicting blacklist rules for method s/m found  (t=+177.542µs)\n```\n\nFor invalid configs the logger should come back as `nil` so downstream code can detect there's nothing configured, rather than silently handing back an empty shell.",
+      patch: "diff --git a/internal/binarylog/env_config.go b/internal/binarylog/env_config.go\n--- a/internal/binarylog/env_config.go\n+++ b/internal/binarylog/env_config.go\n@@ -43,10 +43,10 @@\n // If two configs exist for one certain method or service, the one specified\n // later overrides the previous config.\n func NewLoggerFromConfigString(s string) Logger {\n+\tif s == \"\" {\n+\t\treturn nil\n+\t}\n \tl := newEmptyLogger()\n-\tif s == \"\" {\n-\t\treturn l\n-\t}\n \tmethods := strings.Split(s, \",\")\n \tfor _, method := range methods {\n \t\tif err := l.fillMethodLoggerWithConfigString(method); err != nil {\ndiff --git a/internal/binarylog/binarylog.go b/internal/binarylog/binarylog.go\n--- a/internal/binarylog/binarylog.go\n+++ b/internal/binarylog/binarylog.go\n@@ -75,9 +75,7 @@\n func init() {\n \tconst envStr = \"GRPC_BINARY_LOG_FILTER\"\n \tconfigStr := os.Getenv(envStr)\n-\tif configStr != \"\" {\n-\t\tbinLogger = NewLoggerFromConfigString(configStr)\n-\t}\n+\tbinLogger = NewLoggerFromConfigString(configStr)\n }\n \n // MethodLoggerConfig contains the setting for logging behavior of a method\n"
+    },
+    {
+      id: "grpc__grpc-go-96175",
+      summary: "Unbounded buffer panics on put after close",
+      problem_statement: "After closing the unbounded buffer, putting a new item into it should return an error indicating the buffer is closed. Instead, the write is attempted on the underlying closed channel, causing a panic.\n\nThis makes it impossible to gracefully handle the \"buffer already closed\" case — callers have no way to detect the closed state and avoid crashing.\n\n```\n--- FAIL: Test (0.00s)\n    --- FAIL: Test/Close (0.00s)\npanic: send on closed channel [recovered, repanicked]\n\ngoroutine 6 [running]:\ntesting.tRunner.func1.2({0x102e05f00, 0x102e4e700})\n\t/usr/local/go/src/testing/testing.go:1974 +0x1a0\ntesting.tRunner.func1()\n\t/usr/local/go/src/testing/testing.go:1977 +0x318\npanic({0x102e05f00?, 0x102e4e700?})\n\t/usr/local/go/src/runtime/panic.go:860 +0x12c\n```\n\nThe put operation needs to check whether the buffer has been closed and reject the item with an error rather than panicking.",
+      patch: "diff --git a/internal/xds/clients/internal/buffer/unbounded.go b/internal/xds/clients/internal/buffer/unbounded.go\n--- a/internal/xds/clients/internal/buffer/unbounded.go\n+++ b/internal/xds/clients/internal/buffer/unbounded.go\n@@ -55,6 +55,9 @@\n func (b *Unbounded) Put(t any) error {\n \tb.mu.Lock()\n \tdefer b.mu.Unlock()\n+\tif b.closing {\n+\t\treturn errBufferClosed\n+\t}\n \tif len(b.backlog) == 0 {\n \t\tselect {\n \t\tcase b.c <- t:\n"
+    },
+    {
+      id: "grpc__grpc-go-93836",
+      summary: "Missing transport credential validation",
+      problem_statement: "When creating a new client connection without specifying any transport credentials (or with conflicting credential settings), the call succeeds silently instead of returning an error. This means insecure or misconfigured connections can be established without any warning, which seems like a pretty dangerous default.\n\nIt looks like global dial options can also interfere here — adding options globally and then dialing without proper credentials should still be caught, but it isn't.\n\n```\n--- FAIL: Test (19.42s)\n    --- FAIL: Test/AddGlobalDialOptions (10.05s)\n        tlogger.go:133: INFO clientconn.go:1833 [core] original dial target is: \"fake\"  (t=+258.625µs)\n        tlogger.go:133: INFO clientconn.go:512 [core] [Channel #1] Channel created for target \"fake\"  (t=+420.583µs)\n        tlogger.go:133: INFO clientconn.go:243 [core] [Channel #1] parsed dial target is: resolver.Target{URL:url.URL{Scheme:\"dns\", Opaque:\"\", User:(*url.Userinfo)(nil), Host:\"\", Path:\"/fake\", Fragment:\"\", RawQuery:\"\", RawPath:\"\", RawFragment:\"\", ForceQuery:false, OmitHost:false}}  (t=+444.083µs)\n        tlogger.go:133: INFO clientconn.go:244 [core] [Channel #1] Channel authority set to \"fake\"  (t=+454.375µs)\n        default_dial_option_server_option_test.go:34: NewClient without a credential did not fail\n```\n\nThe test also leaks several goroutines related to callback serialization, presumably because the connection was never expected to be created in the first place. /cc @atollena",
+      patch: "diff --git a/clientconn.go b/clientconn.go\n--- a/clientconn.go\n+++ b/clientconn.go\n@@ -224,6 +224,10 @@\n \tchainUnaryClientInterceptors(cc)\n \tchainStreamClientInterceptors(cc)\n \n+\tif err := cc.validateTransportCredentials(); err != nil {\n+\t\treturn nil, err\n+\t}\n+\n \tif cc.dopts.defaultServiceConfigRawJSON != nil {\n \t\tscpr := parseServiceConfig(*cc.dopts.defaultServiceConfigRawJSON, cc.dopts.maxCallAttempts)\n \t\tif scpr.Err != nil {\n"
+    },
+    {
+      id: "grpc__grpc-go-98918",
+      summary: "Per-RPC behavior metadata not attached to outgoing RPCs",
+      problem_statement: "Custom per-RPC behavior metadata (used for things like request hash–based load balancing) seems to no longer be attached to outgoing RPCs. Routes that rely on this metadata to influence balancing decisions silently fall back to default behavior, as if the customization were never configured. Worked on v1.83.0-dev, broken on v1.84.0-dev.\n\nTrying to run the interop tests to validate:\n\n```\nFAIL\t./interop/xds [setup failed]\nFAIL\n\n# ./interop/xds\nmain module (google.golang.org/grpc) does not contain package google.golang.org/grpc/interop/xds\n```\n\nIt looks like the metadata that should be populated from route action configuration and forwarded through the picker is just missing entirely. The headers never show up on the server side, so any per-request routing or hashing logic gets quietly ignored. /cc @eshitachandwani",
+      patch: "diff --git a/interop/xds/custom_lb.go b/interop/xds/custom_lb.go\n--- a/interop/xds/custom_lb.go\n+++ b/interop/xds/custom_lb.go\n@@ -57,7 +57,7 @@\n \t\treturn nil\n \t}\n \tb.Balancer = rr\n-\treturn rr\n+\treturn b\n }\n \n func (rpcBehaviorBB) ParseConfig(s json.RawMessage) (serviceconfig.LoadBalancingConfig, error) {\n"
+    },
+    {
+      id: "grpc__grpc-go-8476",
+      summary: "Empty Node ID rejected in v1.74.2",
+      problem_statement: "Version `v1.74.2` Doesn't allow empty `Node ID` value anymore\n### What version of gRPC are you using?\n`v1.74.2`\n### What version of Go are you using (`go version`)?\n\ngo `1.24.4`\n\n### What operating system (Linux, Windows, …) and version?\nLinux\n\n### What did you do?\nWe are using an empty Node ID value in our bootstrap file!\n\n### What did you expect to see?\nUntil `v1.73.0`, this was working as expected.\n\n### What did you see instead?\n`xdsclient: node ID is empty (check that target is valid)\"`",
+      patch: "diff --git a/xds/internal/clients/xdsclient/xdsclient.go b/xds/internal/clients/xdsclient/xdsclient.go\nindex e8138198f6ec..93d26217480d 100644\n--- a/xds/internal/clients/xdsclient/xdsclient.go\n+++ b/xds/internal/clients/xdsclient/xdsclient.go\n@@ -101,8 +101,6 @@ type XDSClient struct {\n // New returns a new xDS Client configured with the provided config.\n func New(config Config) (*XDSClient, error) {\n \tswitch {\n-\tcase config.Node.ID == \"\":\n-\t\treturn nil, errors.New(\"xdsclient: node ID is empty\")\n \tcase config.ResourceTypes == nil:\n \t\treturn nil, errors.New(\"xdsclient: resource types map is nil\")\n \tcase config.TransportBuilder == nil:\n"
+    }
+  ];
+
+  function esc(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function renderIssueBody(text) {
+    var h = esc(text);
+    h = h.replace(/```\n([\s\S]*?)```/g, function(_,code) {
+      return '<pre><code>'+code+'</code></pre>';
+    });
+    h = h.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+    h = h.replace(/### ([^\n]+)/g, '<strong>$1</strong>');
+    h = h.replace(/(@\w+)/g, '<span style="color:var(--accent);font-weight:500">$1</span>');
+    h = h.replace(/\n\n/g, '</p><p>');
+    h = h.replace(/\n/g, '<br>');
+    return '<p>'+h+'</p>';
+  }
+
+  function parseDiff(patch) {
+    var lines = patch.split('\n');
+    var files = [];
+    var cur = null;
+    for (var i=0;i<lines.length;i++) {
+      var l = lines[i];
+      if (l.startsWith('diff --git')) {
+        var m = l.match(/diff --git a\/(.+?) b\//);
+        cur = {name: m ? m[1] : '?', rows: []};
+        files.push(cur);
+        continue;
+      }
+      if (!cur) continue;
+      if (l.startsWith('index ') || l.startsWith('--- ') || l.startsWith('+++ ')) continue;
+      if (l.startsWith('@@')) {
+        cur.rows.push({type:'hunk', text:l});
+      } else if (l.startsWith('+')) {
+        cur.rows.push({type:'add', text:l});
+      } else if (l.startsWith('-')) {
+        cur.rows.push({type:'del', text:l});
+      } else {
+        cur.rows.push({type:'ctx', text:l});
+      }
+    }
+    return files;
+  }
+
+  function renderDiff(patch) {
+    var files = parseDiff(patch);
+    var html = '';
+    for (var f=0; f<files.length; f++) {
+      html += '<div class="diff-file-header">'+esc(files[f].name)+'</div>';
+      html += '<table class="diff-table">';
+      for (var r=0; r<files[f].rows.length; r++) {
+        var row = files[f].rows[r];
+        var cls = row.type+'-row';
+        html += '<tr class="'+cls+'"><td class="ln"></td><td class="code">'+esc(row.text)+'</td></tr>';
+      }
+      html += '</table>';
+    }
+    return html;
+  }
+
+  function showInstance(idx) {
+    var inst = INSTANCES[idx];
+    document.querySelectorAll('.instance-pill').forEach(function(p,i){
+      p.classList.toggle('active', i===idx);
+    });
+    document.getElementById('issue-title').textContent = inst.summary;
+    var nFiles = (inst.patch.match(/diff --git/g)||[]).length;
+    document.getElementById('issue-meta').innerHTML =
+      '#'+inst.id.split('-').pop()+' <span class="label-badge label-bug">bug</span>';
+    document.getElementById('issue-body').innerHTML = renderIssueBody(inst.problem_statement);
+    document.getElementById('file-count').textContent = '('+nFiles+')';
+    document.getElementById('diff-body').innerHTML = renderDiff(inst.patch);
+  }
+
+  var picker = document.getElementById('instance-picker');
+  INSTANCES.forEach(function(inst, idx) {
+    var pill = document.createElement('button');
+    pill.className = 'instance-pill';
+    pill.textContent = inst.summary;
+    pill.addEventListener('click', function(){ showInstance(idx); });
+    picker.appendChild(pill);
+  });
+
+  showInstance(0);
+})();
+</script>
+
+</body>
+</html>
