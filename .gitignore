@@ -5,6 +5,9 @@ dist/
 build/
 .venv/
 .pytest_cache/
-output/
+output/*
+!output/synthetic/
+output/synthetic/*
+!output/synthetic/synthetic-go-instances.jsonl
 results/
 my_output/
