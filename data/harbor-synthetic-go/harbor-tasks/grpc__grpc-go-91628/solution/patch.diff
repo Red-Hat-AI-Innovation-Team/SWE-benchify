@@ -1,0 +1,21 @@
+diff --git a/internal/transport/http2_client.go b/internal/transport/http2_client.go
+--- a/internal/transport/http2_client.go
++++ b/internal/transport/http2_client.go
+@@ -244,7 +244,7 @@
+ 	// monitored (and to prevent the connection from ever being closed) after
+ 	// returning from this function.
+ 	ctxMonitorDone := grpcsync.NewEvent()
+-	newClientCtx, newClientDone := context.WithCancel(ctx)
++	newClientCtx, newClientDone := context.WithCancel(connectCtx)
+ 	defer func() {
+ 		newClientDone()         // Awaken the goroutine below if connectCtx hasn't expired.
+ 		<-ctxMonitorDone.Done() // Wait for the goroutine below to exit.
+@@ -252,7 +252,7 @@
+ 	go func(conn net.Conn) {
+ 		defer ctxMonitorDone.Fire() // Signal this goroutine has exited.
+ 		<-newClientCtx.Done()       // Block until connectCtx expires or the defer above executes.
+-		if err := ctx.Err(); err != nil {
++		if err := connectCtx.Err(); err != nil {
+ 			// connectCtx expired before exiting the function.  Hard close the connection.
+ 			if logger.V(logLevel) {
+ 				logger.Infof("Aborting due to connect deadline expiring: %v", err)

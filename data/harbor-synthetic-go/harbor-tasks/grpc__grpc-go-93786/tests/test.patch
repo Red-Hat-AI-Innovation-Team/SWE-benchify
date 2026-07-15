@@ -1,0 +1,28 @@
+diff --git a/internal/xds/clients/internal/buffer/unbounded_test.go b/internal/xds/clients/internal/buffer/unbounded_test.go
+--- a/internal/xds/clients/internal/buffer/unbounded_test.go
++++ b/internal/xds/clients/internal/buffer/unbounded_test.go
+@@ -83,6 +83,24 @@
+ 	if !cmp.Equal(reads, wantReads) {
+ 		t.Errorf("reads: %#v, wantReads: %#v", reads, wantReads)
+ 	}
++
++	closedBuf := NewUnbounded()
++	closedBuf.Close()
++	errAfterClose := closedBuf.Put(1)
++	if errAfterClose == nil {
++		t.Errorf("Put on closed buffer returned nil error, want non-nil")
++	}
++
++	openBuf := NewUnbounded()
++	errBeforeClose := openBuf.Put(42)
++	if errBeforeClose != nil {
++		t.Errorf("Put on open buffer returned error %v, want nil", errBeforeClose)
++	}
++	openBuf.Close()
++	errOnClosedAgain := openBuf.Put(99)
++	if errOnClosedAgain == nil {
++		t.Errorf("Put after Close returned nil, want non-nil error")
++	}
+ }
+ 
+ // TestMultipleWriters starts multiple writers and one reader goroutine and

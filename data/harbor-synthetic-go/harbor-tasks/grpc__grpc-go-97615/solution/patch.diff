@@ -1,0 +1,18 @@
+diff --git a/interop/xds/custom_lb.go b/interop/xds/custom_lb.go
+--- a/interop/xds/custom_lb.go
++++ b/interop/xds/custom_lb.go
+@@ -62,9 +62,12 @@
+ 
+ func (rpcBehaviorBB) ParseConfig(s json.RawMessage) (serviceconfig.LoadBalancingConfig, error) {
+ 	lbCfg := &lbConfig{}
+-	json.Unmarshal(s, lbCfg)
++	if err := json.Unmarshal(s, lbCfg); err != nil {
++		return nil, fmt.Errorf("rpc-behavior-lb: unable to marshal lbConfig: %s, error: %v", string(s), err)
++	}
+ 	return lbCfg, nil
+-	}
++
++}
+ 
+ func (rpcBehaviorBB) Name() string {
+ 	return name

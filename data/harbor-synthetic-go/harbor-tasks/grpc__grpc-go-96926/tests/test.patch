@@ -1,0 +1,15 @@
+diff --git a/internal/binarylog/env_config_test.go b/internal/binarylog/env_config_test.go
+--- a/internal/binarylog/env_config_test.go
++++ b/internal/binarylog/env_config_test.go
+@@ -63,6 +63,11 @@
+ 	} else {
+ 		t.Errorf("service/method{h;m} is not set")
+ 	}
++
++	emptyConfigResult := NewLoggerFromConfigString("")
++	if emptyConfigResult != nil {
++		t.Errorf("NewLoggerFromConfigString(\"\") = %v, want nil", emptyConfigResult)
++	}
+ }
+ 
+ func (s) TestNewLoggerFromConfigStringInvalid(t *testing.T) {

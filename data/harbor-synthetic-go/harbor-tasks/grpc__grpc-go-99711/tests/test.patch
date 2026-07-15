@@ -1,0 +1,30 @@
+diff --git a/internal/transport/handler_server_test.go b/internal/transport/handler_server_test.go
+--- a/internal/transport/handler_server_test.go
++++ b/internal/transport/handler_server_test.go
+@@ -226,6 +226,26 @@
+ 			}
+ 		}
+ 	}
++
++	http1Req := &http.Request{
++		ProtoMajor: 1,
++		ProtoMinor: 1,
++		Method:     "POST",
++		Header:     http.Header{"Content-Type": []string{"application/grpc"}},
++		URL:        &url.URL{Path: "/service/foo.bar"},
++	}
++	http1Rec := httptest.NewRecorder()
++	http1Rw := http.ResponseWriter(testHandlerResponseWriter{ResponseRecorder: http1Rec})
++	_, http1Err := NewServerHandlerTransport(http1Rw, http1Req, nil, mem.DefaultBufferPool())
++	if http1Err == nil {
++		t.Error("expected error for HTTP/1.1 request, got nil")
++	}
++	if http1Rec.Code != http.StatusHTTPVersionNotSupported {
++		t.Errorf("HTTP/1.1 request: response code = %d; want %d", http1Rec.Code, http.StatusHTTPVersionNotSupported)
++	}
++	if http1Err != nil && http1Err.Error() != "gRPC requires HTTP/2" {
++		t.Errorf("HTTP/1.1 request: error = %q; want %q", http1Err.Error(), "gRPC requires HTTP/2")
++	}
+ }
+ 
+ type testHandlerResponseWriter struct {

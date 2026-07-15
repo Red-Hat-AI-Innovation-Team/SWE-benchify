@@ -1,0 +1,31 @@
+diff --git a/internal/xds/clients/grpctransport/grpc_transport_test.go b/internal/xds/clients/grpctransport/grpc_transport_test.go
+--- a/internal/xds/clients/grpctransport/grpc_transport_test.go
++++ b/internal/xds/clients/grpctransport/grpc_transport_test.go
+@@ -172,6 +172,27 @@
+ 		t.Fatalf("Build(serverID3) call failed: %v", err)
+ 	}
+ 	defer tr3.Close()
++
++	freshBuilder := NewBuilder(configs)
++	freshServerID := clients.ServerIdentifier{
++		ServerURI:  "another-server",
++		Extensions: ServerIdentifierExtension{ConfigName: "insecure"},
++	}
++	freshTransport, freshErr := freshBuilder.Build(freshServerID)
++	if freshErr != nil {
++		t.Fatalf("Build with fresh builder failed: %v", freshErr)
++	}
++	defer freshTransport.Close()
++
++	reusedTransport, reusedErr := freshBuilder.Build(freshServerID)
++	if reusedErr != nil {
++		t.Fatalf("Build for reused connection failed: %v", reusedErr)
++	}
++	defer reusedTransport.Close()
++
++	if freshTransport != reusedTransport {
++		t.Fatal("Expected Build to return the same transport for identical server identifiers")
++	}
+ }
+ 
+ // TestBuild_Failure verifies that the Builder returns error when incorrect

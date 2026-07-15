@@ -1,0 +1,45 @@
+diff --git a/internal/transport/transport_test.go b/internal/transport/transport_test.go
+--- a/internal/transport/transport_test.go
++++ b/internal/transport/transport_test.go
+@@ -1501,6 +1501,41 @@
+ 		t.Fatalf("NewHTTP2Client() returned successfully; wanted error")
+ 	}
+ 	t.Logf("NewHTTP2Client() = _, %v", err)
++
++	deadlineLis, err := net.Listen("tcp", "localhost:0")
++	if err != nil {
++		t.Fatalf("Error while listening: %v", err)
++	}
++	defer deadlineLis.Close()
++	go func() {
++		sconn, err := deadlineLis.Accept()
++		if err != nil {
++			return
++		}
++		defer sconn.Close()
++		if _, err := io.ReadFull(sconn, make([]byte, len(clientPreface))); err != nil {
++			return
++		}
++		sfr := http2.NewFramer(sconn, sconn)
++		for {
++			if _, err := sfr.ReadFrame(); err != nil {
++				return
++			}
++		}
++	}()
++
++	shortDeadline := 200 * time.Millisecond
++	shortConnectCtx, shortCancel := context.WithTimeout(context.Background(), shortDeadline)
++	defer shortCancel()
++	timeBefore = time.Now()
++	_, shortErr := NewHTTP2Client(shortConnectCtx, ctx, resolver.Address{Addr: deadlineLis.Addr().String()}, copts, func(GoAwayInfo) {})
++	elapsed := time.Since(timeBefore)
++	if shortErr == nil {
++		t.Fatalf("NewHTTP2Client() with short connect deadline returned successfully; wanted error")
++	}
++	if elapsed > 2*time.Second {
++		t.Fatalf("NewHTTP2Client() with short connect context took %v; expected it to respect the connect deadline of %v", elapsed, shortDeadline)
++	}
+ }
+ 
+ func (s) TestClientWithMisbehavedServer(t *testing.T) {

@@ -1,0 +1,15 @@
+diff --git a/internal/xds/clients/grpctransport/grpc_transport.go b/internal/xds/clients/grpctransport/grpc_transport.go
+--- a/internal/xds/clients/grpctransport/grpc_transport.go
++++ b/internal/xds/clients/grpctransport/grpc_transport.go
+@@ -77,8 +77,9 @@
+ // credentials.Bundle.
+ func NewBuilder(configs map[string]Config) *Builder {
+ 	return &Builder{
+-		configs: configs,
+-		refs:    make(map[clients.ServerIdentifier]int),
++		configs:     configs,
++		connections: make(map[clients.ServerIdentifier]*grpc.ClientConn),
++		refs:        make(map[clients.ServerIdentifier]int),
+ 	}
+ }
+ 

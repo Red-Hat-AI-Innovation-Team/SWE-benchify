@@ -1,0 +1,47 @@
+diff --git a/internal/xds/clients/xdsclient/xdsclient_test.go b/internal/xds/clients/xdsclient/xdsclient_test.go
+--- a/internal/xds/clients/xdsclient/xdsclient_test.go
++++ b/internal/xds/clients/xdsclient/xdsclient_test.go
+@@ -108,6 +108,43 @@
+ 			}
+ 		})
+ 	}
++
++	serversOnlyConfig := Config{
++		Node:             clients.Node{ID: "node-id"},
++		ResourceTypes:    map[string]ResourceType{xdsresource.V3ListenerURL: listenerType},
++		TransportBuilder: grpctransport.NewBuilder(configs),
++		Servers:          []ServerConfig{{ServerIdentifier: clients.ServerIdentifier{ServerURI: "dummy-server"}}},
++	}
++	clientWithServersOnly, err := New(serversOnlyConfig)
++	if err != nil {
++		t.Fatalf("New(%+v) failed: %v", serversOnlyConfig, err)
++	}
++	defer clientWithServersOnly.Close()
++
++	authoritiesOnlyConfig := Config{
++		Node:             clients.Node{ID: "node-id"},
++		ResourceTypes:    map[string]ResourceType{xdsresource.V3ListenerURL: listenerType},
++		TransportBuilder: grpctransport.NewBuilder(configs),
++		Authorities:      map[string]Authority{"test-authority": {XDSServers: []ServerConfig{{ServerIdentifier: clients.ServerIdentifier{ServerURI: "dummy-server"}}}}},
++	}
++	clientWithAuthoritiesOnly, err := New(authoritiesOnlyConfig)
++	if err != nil {
++		t.Fatalf("New(%+v) failed: %v", authoritiesOnlyConfig, err)
++	}
++	clientWithAuthoritiesOnly.Close()
++
++	bothConfig := Config{
++		Node:             clients.Node{ID: "node-id"},
++		ResourceTypes:    map[string]ResourceType{xdsresource.V3ListenerURL: listenerType},
++		TransportBuilder: grpctransport.NewBuilder(configs),
++		Servers:          []ServerConfig{{ServerIdentifier: clients.ServerIdentifier{ServerURI: "dummy-server"}}},
++		Authorities:      map[string]Authority{"auth": {XDSServers: []ServerConfig{{ServerIdentifier: clients.ServerIdentifier{ServerURI: "dummy-server-2"}}}}},
++	}
++	clientWithBoth, err := New(bothConfig)
++	if err != nil {
++		t.Fatalf("New(%+v) failed: %v", bothConfig, err)
++	}
++	clientWithBoth.Close()
+ }
+ 
+ func (s) TestXDSClient_Close(t *testing.T) {
