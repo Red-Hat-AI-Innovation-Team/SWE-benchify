@@ -2651,7 +2651,7 @@ def test_bug_to_symptom_includes_file_context() -> None:
     async def fake_query(prompt: str, options: object = None):
         captured_prompts.append(prompt)
         msg = MagicMock(spec=_RM)
-        msg.content = [type("B", (), {"text": "logging breaks under heavy load"})()]
+        msg.result = "logging breaks under heavy load"
         yield msg
 
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
@@ -2681,7 +2681,7 @@ def test_bug_to_symptom_no_file_path() -> None:
     async def fake_query(prompt: str, options: object = None):
         captured_prompts.append(prompt)
         msg = MagicMock(spec=_RM)
-        msg.content = [type("B", (), {"text": "broken parsing"})()]
+        msg.result = "broken parsing"
         yield msg
 
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
