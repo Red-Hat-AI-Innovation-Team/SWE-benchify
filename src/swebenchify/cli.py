@@ -449,7 +449,11 @@ def _cmd_synthesize(args: argparse.Namespace) -> None:
         out_file = output_dir / f"{slug}-synthetic-candidates.jsonl"
         with open(out_file, "w") as f:
             for c in candidates:
-                f.write(json.dumps(asdict(c)) + "\n")
+                record = asdict(c)
+                enrichment = result.enrichment_data.get(c.instance_id)
+                if enrichment:
+                    record["_pipeline"] = enrichment
+                f.write(json.dumps(record) + "\n")
 
         print(f"\nGenerated {len(candidates)} synthetic instances -> {out_file}")
         for c in candidates:

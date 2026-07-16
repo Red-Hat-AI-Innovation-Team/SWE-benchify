@@ -2223,6 +2223,8 @@ IMPORTANT:
 
 def _extract_text_from_result(message: ResultMessage) -> str | None:
     """Extract text content from a ResultMessage."""
+    if hasattr(message, "result") and message.result:
+        return message.result
     if not hasattr(message, "content") or not message.content:
         return None
     parts: list[str] = []
