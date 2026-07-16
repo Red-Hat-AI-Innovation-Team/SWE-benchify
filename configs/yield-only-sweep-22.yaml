@@ -1,0 +1,64 @@
+# Phase 1: Yield-only sweep across 22 viable Go repos
+# Target: ~2000 raw yield-only instances (expect ~1000 after enrichment + Opus judging)
+# Quotas proportional to testable target count from survey
+#
+# Usage:
+#   python scripts/batch_synthesize.py --config configs/yield-only-sweep-22.yaml \
+#     --workdir /tmp/synth-sweep --yield-only
+
+concurrency: 5
+target_multiplier: 8
+model: sonnet
+
+repos:
+  # --- Top tier (300+ testable targets) ---
+  - slug: openshift/hypershift
+    max_mutations: 150
+  - slug: kubernetes/kubectl
+    max_mutations: 150
+  - slug: prometheus/prometheus
+    max_mutations: 140
+  - slug: argoproj/argo-cd
+    max_mutations: 140
+  - slug: operator-framework/operator-lifecycle-manager
+    max_mutations: 125
+  - slug: containers/image          # build fails but tests pass
+    max_mutations: 120
+
+  # --- Mid tier (200-300 testable targets) ---
+  - slug: kubernetes/kubernetes
+    max_mutations: 105
+  - slug: tektoncd/pipeline
+    max_mutations: 100
+  - slug: helm/helm
+    max_mutations: 100
+  - slug: etcd-io/etcd
+    max_mutations: 100
+  - slug: kubernetes/apimachinery
+    max_mutations: 95
+  - slug: grpc/grpc-go
+    max_mutations: 90
+  - slug: openshift/router
+    max_mutations: 85
+
+  # --- Lower tier (100-200 testable targets) ---
+  - slug: kubernetes-sigs/kustomize  # build fails but tests pass
+    max_mutations: 80
+  - slug: openshift/cluster-version-operator
+    max_mutations: 75
+  - slug: operator-framework/operator-sdk  # build fails but tests pass
+    max_mutations: 70
+  - slug: rook/rook
+    max_mutations: 70
+  - slug: containers/storage
+    max_mutations: 65
+  - slug: containers/podman          # build fails but tests pass
+    max_mutations: 60
+
+  # --- Thin tier (<100 testable targets) ---
+  - slug: openshift/machine-config-operator  # build fails but tests pass
+    max_mutations: 40
+  - slug: openshift/installer
+    max_mutations: 30
+  - slug: openshift/origin
+    max_mutations: 20

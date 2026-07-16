@@ -121,7 +121,8 @@ def main() -> None:
     elif args.config:
         with open(args.config) as f:
             config = yaml.safe_load(f)
-        slugs = config.get("go_repos", [r for r in config.get("repos", [])])
+        raw = config.get("go_repos", config.get("repos", []))
+        slugs = [r["slug"] if isinstance(r, dict) else r for r in raw]
     else:
         parser.error("Provide --config or --repos")
         return

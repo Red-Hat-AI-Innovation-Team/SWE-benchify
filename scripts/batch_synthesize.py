@@ -93,11 +93,14 @@ def _run_synthesis(
                 timeout=7200,
             )
 
-        out_file = output_dir / f"{safe_name}-synthetic-candidates.jsonl"
         count = 0
-        if out_file.exists():
-            with open(out_file) as f:
-                count = sum(1 for line in f if line.strip())
+        for pattern in [f"{safe_name}-synthetic-candidates.jsonl",
+                        f"local__{safe_name}-synthetic-candidates.jsonl"]:
+            out_file = output_dir / pattern
+            if out_file.exists():
+                with open(out_file) as f:
+                    count = sum(1 for line in f if line.strip())
+                break
 
         status = "ok" if result.returncode == 0 else f"exit={result.returncode}"
         print(f"[DONE]  {slug}: {count} instances ({status})")

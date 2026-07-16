@@ -27,13 +27,6 @@ logger = logging.getLogger(__name__)
 
 _TEMPLATES_DIR = Path(__file__).parent / "harbor_templates"
 
-_NETWORK_ALLOWLISTS: dict[str, list[str]] = {
-    "go": ["proxy.golang.org", "sum.golang.org", "storage.googleapis.com"],
-    "python": ["pypi.org", "files.pythonhosted.org"],
-    "java": ["repo1.maven.org", "plugins.gradle.org"],
-    "rust": ["crates.io", "static.crates.io"],
-}
-
 _DEFAULT_VERIFIER_TIMEOUT: dict[str, float] = {
     "go": 300.0,
     "python": 600.0,
@@ -51,13 +44,6 @@ _DEFAULT_AGENT_TIMEOUT: dict[str, float] = {
 
 def _load_template(name: str) -> str:
     return (_TEMPLATES_DIR / name).read_text()
-
-
-def _format_allowed_hosts(key: str, hosts: list[str]) -> str:
-    if not hosts:
-        return ""
-    items = ", ".join(f'"{h}"' for h in hosts)
-    return f"{key} = [{items}]"
 
 
 def _detect_language(instance: TaskInstance) -> str:
@@ -188,12 +174,6 @@ class HarborTaskGenerator:
         language: str,
         env_spec: AnyEnvironmentSpec | None,
     ) -> None:
-        allowed_hosts = _NETWORK_ALLOWLISTS.get(language, [])
-        verifier_hosts = _format_allowed_hosts("allowed_hosts", allowed_hosts)
-        agent_hosts = _format_allowed_hosts("allowed_hosts", allowed_hosts)
-
-        network_mode = "allowlist" if allowed_hosts else "public"
-
         if self.registry_url and instance.image_name:
             env_block = f'docker_image = "{instance.image_name}"'
         elif self.registry_url and instance.env_spec_hash:
@@ -217,11 +197,7 @@ class HarborTaskGenerator:
             difficulty=_get_difficulty(instance),
             version=instance.version or "unknown",
             verifier_timeout=_DEFAULT_VERIFIER_TIMEOUT.get(language, 300.0),
-            verifier_network_mode=network_mode,
-            verifier_allowed_hosts=verifier_hosts,
             agent_timeout=_DEFAULT_AGENT_TIMEOUT.get(language, 1800.0),
-            agent_network_mode=network_mode,
-            agent_allowed_hosts=agent_hosts,
             environment_block=env_block,
         )
         (task_dir / "task.toml").write_text(content)
