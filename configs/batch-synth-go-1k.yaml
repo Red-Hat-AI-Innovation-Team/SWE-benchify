@@ -1,0 +1,73 @@
+# Batch synthesis config: 1000 Go instances across Red Hat ecosystem
+#
+# Usage:
+#   python scripts/batch_synthesize.py --config configs/batch-synth-go-1k.yaml --workdir /tmp/synth-1k
+#   python scripts/batch_synthesize.py --config configs/batch-synth-go-1k.yaml --workdir /tmp/synth-1k --yield-only
+
+concurrency: 5
+target_multiplier: 25
+model: sonnet
+
+repos:
+  # --- Tier 1: Proven (250 total) ---
+  - slug: grpc/grpc-go
+    max_mutations: 150
+  - slug: containers/podman
+    max_mutations: 100
+
+  # --- Tier 2: Promising (400 total) ---
+  - slug: kubernetes/kubernetes
+    max_mutations: 100
+  - slug: openshift/hypershift
+    max_mutations: 60
+  - slug: etcd-io/etcd
+    max_mutations: 60
+  - slug: argoproj/argo-cd
+    max_mutations: 60
+  - slug: helm/helm
+    max_mutations: 60
+  - slug: prometheus/prometheus
+    max_mutations: 60
+
+  # --- Tier 3: Untested (350 total, 30 each) ---
+  # Run survey_repos.py first; remove repos classified as Broken/Thin
+  - slug: containers/buildah
+    max_mutations: 30
+  - slug: containers/storage
+    max_mutations: 30
+  - slug: containers/image
+    max_mutations: 30
+  - slug: containers/common
+    max_mutations: 30
+  - slug: kubernetes/kubectl
+    max_mutations: 30
+  - slug: kubernetes/apimachinery
+    max_mutations: 30
+  - slug: kubernetes-sigs/kustomize
+    max_mutations: 30
+  - slug: openshift/origin
+    max_mutations: 30
+  - slug: openshift/oc
+    max_mutations: 30
+  - slug: openshift/installer
+    max_mutations: 30
+  - slug: tektoncd/pipeline
+    max_mutations: 30
+  - slug: rook/rook
+    max_mutations: 30
+  - slug: kubevirt/kubevirt
+    max_mutations: 30
+  - slug: operator-framework/operator-sdk
+    max_mutations: 30
+  - slug: operator-framework/operator-lifecycle-manager
+    max_mutations: 30
+  - slug: openshift/router
+    max_mutations: 30
+  - slug: openshift/cluster-version-operator
+    max_mutations: 30
+  - slug: openshift/machine-config-operator
+    max_mutations: 30
+  - slug: openshift/microshift
+    max_mutations: 30
+  - slug: openshift/oc-mirror
+    max_mutations: 30

@@ -2223,6 +2223,8 @@ IMPORTANT:
 
 def _extract_text_from_result(message: ResultMessage) -> str | None:
     """Extract text content from a ResultMessage."""
+    if hasattr(message, "result") and message.result:
+        return message.result
     if not hasattr(message, "content") or not message.content:
         return None
     parts: list[str] = []
@@ -5627,6 +5629,9 @@ async def synthesize_repo(
     model: str = "sonnet",
     screen_instances: bool = True,
     yield_only: bool = False,
+    target_multiplier: int = 8,
+    max_files: int | None = None,
+    max_functions: int | None = None,
 ) -> RepoSynthesisResult:
     """Synthesize bug instances for a repository.
 
@@ -5643,6 +5648,9 @@ async def synthesize_repo(
         operators: Optional list of bug categories to use (unused, reserved
             for future filtering).
         model: Claude model shortname.
+        target_multiplier: How many targets to try per desired mutation.
+        max_files: Max source files to scan for targets (default scales with multiplier).
+        max_functions: Max functions per file to extract (default scales with multiplier).
 
     Returns:
         RepoSynthesisResult with candidates and mutation attempt count.
@@ -5656,7 +5664,9 @@ async def synthesize_repo(
     logger.info(
         "Finding mutation targets in %s (%s)", repo_path, language,
     )
-    all_targets = find_mutation_targets(repo_path, language)
+    _max_files = max_files if max_files is not None else (100 if target_multiplier > 8 else 20)
+    _max_functions = max_functions if max_functions is not None else (10 if target_multiplier > 8 else 5)
+    all_targets = find_mutation_targets(repo_path, language, max_files=_max_files, max_functions=_max_functions)
     with_tests = [
         t for t in all_targets
         if _find_existing_test_file(
@@ -5708,14 +5718,14 @@ async def synthesize_repo(
     seen_patches: set[str] = set()
     mutations_attempted = 0
 
-    for i, target in enumerate(targets[:max_mutations * 8]):
+    for i, target in enumerate(targets[:max_mutations * target_multiplier]):
         if len(candidates) >= max_mutations:
             break
 
         mutations_attempted += 1
 
         repo_short = repo_slug.split('/')[-1]
-        pfx = f'[{repo_short}] [{len(candidates)}/{max_mutations} yielded] [{mutations_attempted}/{min(len(targets), max_mutations * 8)}]'
+        pfx = f'[{repo_short}] [{len(candidates)}/{max_mutations} yielded] [{mutations_attempted}/{min(len(targets), max_mutations * target_multiplier)}]'
 
         logger.info(
             "%s Mutating %s:%s",
@@ -5732,15 +5742,12 @@ async def synthesize_repo(
             repo_path, target["file"], target["function_name"], language,
         )
 
-        if yield_only:
-            bug_plan = None
-        else:
-            bug_plan = await _plan_multi_file_mutation(
-                target["source"], related_files, model=model,
-                test_context=test_context,
-            )
-            if bug_plan:
-                logger.info("%s  Multi-file plan: %s", pfx, bug_plan.primary_description[:80])
+        bug_plan = await _plan_multi_file_mutation(
+            target["source"], related_files, model=model,
+            test_context=test_context,
+        )
+        if bug_plan:
+            logger.info("%s  Multi-file plan: %s", pfx, bug_plan.primary_description[:80])
 
         # H10: Try targeted mutation (assertion-aware, data-first pass rate)
         bug_spec = None
@@ -5922,7 +5929,7 @@ async def synthesize_repo(
                 buggy_files[sc.file] = sec_buggy
                 logger.info("%s  Secondary change in %s: %s", pfx, sc.file, sc.description)
 
-        if not yield_only and len(buggy_files) < 2 and related_files:
+        if len(buggy_files) < 2 and related_files:
             logger.info("%s  Only %d file changed, retrying with explicit multi-file instruction", pfx, len(buggy_files))
             retry_spec = await introduce_bug(
                 target, model=model, related_files=related_files,
@@ -5958,59 +5965,55 @@ async def synthesize_repo(
         ctx = _collect_repo_context(repo_path)
         real_issues = ctx.get("recent_issues", [])
 
-        if not yield_only:
-            incidentals = await _generate_incidental_changes(
-                repo_path, bug_spec, language, model=model,
-            )
-            for inc_path, inc_original, inc_modified in incidentals:
-                if inc_path in patched_files:
-                    logger.info("%s  Skipping duplicate incidental for %s", pfx, inc_path)
-                    continue
-                # Validate RST references in changelog files
-                if inc_path.lower().endswith((".rst", ".md")):
-                    inc_modified = _validate_rst_references(inc_modified, real_issues)
-                try:
-                    inc_file = Path(repo_path) / inc_path
-                    inc_content = inc_file.read_text(encoding="utf-8", errors="replace")
-                    if inc_original == "EMPTY":
-                        new_content = inc_content + "\n" + inc_modified
-                    else:
-                        new_content = inc_content.replace(inc_original, inc_modified, 1)
-                    if new_content != inc_content:
-                        # Reject CHANGES.rst edits that create duplicate version headers
-                        if Path(inc_path).name in (
-                            "CHANGES.rst", "CHANGELOG.rst", "CHANGELOG.md",
-                            "HISTORY.rst", "HISTORY.md",
-                        ):
-                            headers = re.findall(
-                                r"^(?:Version\s+\S+|#+\s+\S+)", new_content, re.MULTILINE,
+        incidentals = await _generate_incidental_changes(
+            repo_path, bug_spec, language, model=model,
+        )
+        for inc_path, inc_original, inc_modified in incidentals:
+            if inc_path in patched_files:
+                logger.info("%s  Skipping duplicate incidental for %s", pfx, inc_path)
+                continue
+            if inc_path.lower().endswith((".rst", ".md")):
+                inc_modified = _validate_rst_references(inc_modified, real_issues)
+            try:
+                inc_file = Path(repo_path) / inc_path
+                inc_content = inc_file.read_text(encoding="utf-8", errors="replace")
+                if inc_original == "EMPTY":
+                    new_content = inc_content + "\n" + inc_modified
+                else:
+                    new_content = inc_content.replace(inc_original, inc_modified, 1)
+                if new_content != inc_content:
+                    if Path(inc_path).name in (
+                        "CHANGES.rst", "CHANGELOG.rst", "CHANGELOG.md",
+                        "HISTORY.rst", "HISTORY.md",
+                    ):
+                        headers = re.findall(
+                            r"^(?:Version\s+\S+|#+\s+\S+)", new_content, re.MULTILINE,
+                        )
+                        if len(headers) != len(set(headers)):
+                            logger.debug(
+                                "Skipping %s — duplicate version header", inc_path,
                             )
-                            if len(headers) != len(set(headers)):
-                                logger.debug(
-                                    "Skipping %s — duplicate version header", inc_path,
-                                )
-                                continue
-                            # Reject edits where underline is separated from header by blank lines
-                            _orphaned = False
-                            nc_lines = new_content.split("\n")
-                            for i, nc_line in enumerate(nc_lines):
-                                if re.match(r"^Version\s+\S+", nc_line):
-                                    j = i + 1
-                                    while j < len(nc_lines) and nc_lines[j].strip() == "":
-                                        j += 1
-                                    if j < len(nc_lines) and re.match(r"^[-=~^]{3,}$", nc_lines[j].strip()):
-                                        if j != i + 1:
-                                            _orphaned = True
-                                            break
-                            if _orphaned:
-                                logger.debug(
-                                    "Skipping %s — orphaned underline after header", inc_path,
-                                )
-                                continue
-                        patch += generate_patch(new_content, inc_content, inc_path)
-                        patched_files.add(inc_path)
-                except OSError:
-                    continue
+                            continue
+                        _orphaned = False
+                        nc_lines = new_content.split("\n")
+                        for i, nc_line in enumerate(nc_lines):
+                            if re.match(r"^Version\s+\S+", nc_line):
+                                j = i + 1
+                                while j < len(nc_lines) and nc_lines[j].strip() == "":
+                                    j += 1
+                                if j < len(nc_lines) and re.match(r"^[-=~^]{3,}$", nc_lines[j].strip()):
+                                    if j != i + 1:
+                                        _orphaned = True
+                                        break
+                        if _orphaned:
+                            logger.debug(
+                                "Skipping %s — orphaned underline after header", inc_path,
+                            )
+                            continue
+                    patch += generate_patch(new_content, inc_content, inc_path)
+                    patched_files.add(inc_path)
+            except OSError:
+                continue
 
         buggy_commit = _create_buggy_commit_multi(
             repo_path, buggy_files, bug_spec.bug_description,

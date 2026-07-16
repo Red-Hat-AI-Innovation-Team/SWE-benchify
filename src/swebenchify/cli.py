@@ -432,6 +432,10 @@ def _cmd_synthesize(args: argparse.Namespace) -> None:
             language=args.language,
             max_mutations=args.max_mutations,
             model=args.model,
+            yield_only=args.yield_only,
+            target_multiplier=args.target_multiplier,
+            max_files=args.max_files,
+            max_functions=args.max_functions,
         )
 
         candidates = result.candidates
@@ -445,11 +449,69 @@ def _cmd_synthesize(args: argparse.Namespace) -> None:
         out_file = output_dir / f"{slug}-synthetic-candidates.jsonl"
         with open(out_file, "w") as f:
             for c in candidates:
-                f.write(json.dumps(asdict(c)) + "\n")
+                record = asdict(c)
+                enrichment = result.enrichment_data.get(c.instance_id)
+                if enrichment:
+                    record["_pipeline"] = enrichment
+                f.write(json.dumps(record) + "\n")
 
         print(f"\nGenerated {len(candidates)} synthetic instances -> {out_file}")
         for c in candidates:
             print(f"  {c.instance_id}: {(c.problem_statement or '')[:80]}...")
+
+    asyncio.run(run())
+
+
+def _cmd_enrich(args: argparse.Namespace) -> None:
+    """Enrich yield-only instances with issue text and screening."""
+    import asyncio
+    import json
+    from pathlib import Path
+
+    from swebenchify.synthesizer import enrich_instance
+
+    _setup_logging()
+
+    input_path = Path(args.input)
+    if not input_path.exists():
+        print(f"Input file not found: {input_path}", file=sys.stderr)
+        return
+
+    instances = []
+    with open(input_path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                instances.append(json.loads(line))
+
+    print(f"Loaded {len(instances)} yield-only instances from {input_path}")
+
+    output_path = Path(args.output) if args.output else input_path.with_name(
+        input_path.stem.replace("-yield", "") + "-enriched.jsonl",
+    )
+
+    async def run() -> None:
+        enriched = []
+        for i, inst in enumerate(instances, 1):
+            iid = inst.get("instance_id", "unknown")
+            print(f"[{i}/{len(instances)}] Enriching {iid}...")
+            try:
+                result = await enrich_instance(
+                    inst, repo_path=args.repo, model=args.model,
+                )
+                if result:
+                    enriched.append(result)
+                    print(f"  PASS ({len(enriched)} enriched so far)")
+                else:
+                    print("  FAIL (screening rejected)")
+            except Exception as e:
+                print(f"  ERROR: {e}")
+
+        with open(output_path, "w") as f:
+            for inst in enriched:
+                f.write(json.dumps(inst) + "\n")
+
+        print(f"\nEnriched {len(enriched)}/{len(instances)} instances -> {output_path}")
 
     asyncio.run(run())
 
@@ -655,6 +717,44 @@ def build_parser() -> argparse.ArgumentParser:
         "--model", default="sonnet",
         help="Claude model to use for bug generation (default: sonnet)",
     )
+    synth_parser.add_argument(
+        "--yield-only", action="store_true", default=False,
+        help="Skip issue generation and screening; find test-breaking mutations only",
+    )
+    synth_parser.add_argument(
+        "--target-multiplier", type=int, default=8,
+        help="Targets to try per desired mutation (default: 8, use 25-30 for large runs)",
+    )
+    synth_parser.add_argument(
+        "--max-files", type=int, default=None,
+        help="Max source files to scan for targets (default: 20, or 100 when multiplier > 8)",
+    )
+    synth_parser.add_argument(
+        "--max-functions", type=int, default=None,
+        help="Max functions per file to extract (default: 5, or 10 when multiplier > 8)",
+    )
+
+    # enrich
+    enrich_parser = subparsers.add_parser(
+        "enrich",
+        help="Enrich yield-only instances with issue text and screening",
+    )
+    enrich_parser.add_argument(
+        "--input", "-i", required=True,
+        help="Input JSONL file of yield-only instances",
+    )
+    enrich_parser.add_argument(
+        "--repo", required=True,
+        help="Path to the repository clone used during synthesis",
+    )
+    enrich_parser.add_argument(
+        "--output", "-o", default=None,
+        help="Output JSONL file (default: input stem + '-enriched.jsonl')",
+    )
+    enrich_parser.add_argument(
+        "--model", default="sonnet",
+        help="Claude model for issue generation (default: sonnet)",
+    )
 
     # eval
     eval_parser = subparsers.add_parser(
@@ -696,6 +796,7 @@ def main(argv: list[str] | None = None) -> int:
         "validate": _cmd_validate,
         "remote-validate": _cmd_remote_validate,
         "synthesize": _cmd_synthesize,
+        "enrich": _cmd_enrich,
         "emit": _cmd_emit,
         "harbor": _cmd_harbor,
         "eval": _cmd_eval,
