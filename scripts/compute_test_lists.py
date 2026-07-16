@@ -69,28 +69,63 @@ def _extract_test_command(test_sh: str) -> str:
     return "go test -v -count=1 ./..."
 
 
-def _make_f2p_script(test_command: str) -> str:
-    """Generate a script that runs tests pre-fix and post-fix."""
+def _make_f2p_script(test_command: str, has_test_patch: bool) -> str:
+    """Generate a script that runs tests pre-fix and post-fix.
+
+    Synthetic instances have Docker images built from a clean commit — the
+    mutation (bug) is NOT baked in.  We reverse-apply the gold patch first to
+    introduce the bug, then apply the test patch, run pre-fix tests, then
+    forward-apply the gold patch to fix it and run post-fix tests.
+    """
+    apply_test = ""
+    if has_test_patch:
+        apply_test = (
+            "# Apply test patch (adds tests that catch the bug)\n"
+            "git apply /tmp/test.patch 2>&1 || "
+            "git apply --3way /tmp/test.patch 2>&1 || true\n"
+        )
+
     return f"""set -uxo pipefail
 cd /testbed
 git config --global --add safe.directory /testbed
 
+# Introduce the bug by reverse-applying the gold patch.
+git apply --reverse /tmp/gold.patch 2>&1 \
+  || git apply --reverse --3way /tmp/gold.patch 2>&1 \
+  || {{ echo REVERSE_PATCH_FAILED; }}
+
+{apply_test}
 echo '{PHASE_SEP}_PRE'
 {test_command} 2>&1 || true
 
 echo '{PHASE_SEP}_POST'
-git apply --3way /tmp/gold.patch 2>&1 || git apply /tmp/gold.patch 2>&1 || {{ echo GOLD_PATCH_FAILED; exit 0; }}
+git apply /tmp/gold.patch 2>&1 || git apply --3way /tmp/gold.patch 2>&1 || {{ echo GOLD_PATCH_FAILED; exit 0; }}
 {test_command} 2>&1 || true
 """
 
 
 def _parse_go_test_results(output: str) -> dict[str, str]:
-    """Parse Go test verbose output into {test_name: 'passed'|'failed'}."""
+    """Parse Go test verbose output into {test_name: 'passed'|'failed'}.
+
+    Also detects panics — when a test panics, Go doesn't emit ``--- FAIL:``
+    but the overall package fails with ``FAIL\\tpkg``.  We attribute the panic
+    to the last ``=== RUN`` test name seen.
+    """
     results = {}
+    last_run = None
+    has_panic = False
     for line in output.splitlines():
         m = re.match(r"--- (PASS|FAIL): (\S+)", line)
         if m:
             results[m.group(2)] = "passed" if m.group(1) == "PASS" else "failed"
+            continue
+        run_m = re.match(r"=== RUN\s+(\S+)", line)
+        if run_m:
+            last_run = run_m.group(1)
+        if "panic:" in line or "runtime error:" in line:
+            has_panic = True
+    if has_panic and last_run and last_run not in results:
+        results[last_run] = "failed"
     return results
 
 
@@ -155,7 +190,7 @@ def compute_test_lists(task_dir: Path, timeout: int = 600) -> dict:
             "PASS_TO_FAIL": [],
         }
 
-    script = _make_f2p_script(test_command)
+    script = _make_f2p_script(test_command, has_test_patch=bool(test_patch.strip()))
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
@@ -166,16 +201,6 @@ def compute_test_lists(task_dir: Path, timeout: int = 600) -> dict:
         test_p = tmp / "test.patch"
         test_p.write_text(test_patch)
 
-        # Run in Docker: mount the script and patches, apply test patch first
-        # The test.patch needs to be applied before running pre-fix tests
-        # (the test patch adds tests that catch the bug)
-        apply_test_patch = ""
-        if test_patch.strip():
-            apply_test_patch = (
-                "git apply --3way /tmp/test.patch 2>&1 || "
-                "git apply /tmp/test.patch 2>&1 || true; "
-            )
-
         cmd = [
             DOCKER, "run", "--rm",
             "-v", f"{script_path}:/tmp/run.sh:ro",
@@ -183,9 +208,7 @@ def compute_test_lists(task_dir: Path, timeout: int = 600) -> dict:
             "-v", f"{test_p}:/tmp/test.patch:ro",
             docker_image,
             "bash", "-c",
-            f"cd /testbed && git config --global --add safe.directory /testbed && "
-            f"{apply_test_patch}"
-            f"bash /tmp/run.sh",
+            "cd /testbed && bash /tmp/run.sh",
         ]
 
         try:
@@ -202,6 +225,16 @@ def compute_test_lists(task_dir: Path, timeout: int = 600) -> dict:
                 "PASS_TO_PASS": [],
                 "PASS_TO_FAIL": [],
             }
+
+    if "REVERSE_PATCH_FAILED" in raw_output:
+        return {
+            "instance_id": instance_id,
+            "status": "error",
+            "error": "Reverse gold patch failed (can't introduce bug into image)",
+            "FAIL_TO_PASS": [],
+            "PASS_TO_PASS": [],
+            "PASS_TO_FAIL": [],
+        }
 
     if "GOLD_PATCH_FAILED" in raw_output:
         return {
