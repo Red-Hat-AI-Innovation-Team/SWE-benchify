@@ -26,7 +26,6 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
-import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -66,7 +65,7 @@ def _run_synthesis(
 ) -> dict:
     """Run swebenchify synthesize on a single repo. Returns a result summary."""
     cmd = [
-        sys.executable, "-m", "swebenchify",
+        "swebenchify",
         "synthesize",
         "--repo", str(clone_path),
         "--language", "go",

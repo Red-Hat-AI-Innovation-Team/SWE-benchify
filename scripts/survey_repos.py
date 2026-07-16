@@ -102,7 +102,7 @@ def _classify(targets: dict, build: dict, test: dict) -> str:
         return "Thin"
     if test["status"] == "timeout" or test["duration_s"] > 120:
         return "Slow"
-    if test["status"] in ("pass", "test_fail"):
+    if test["status"] in ("pass", "test_fail", "skipped"):
         return "Viable"
     return "Broken"
 
