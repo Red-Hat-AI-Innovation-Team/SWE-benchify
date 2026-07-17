@@ -1,7 +1,7 @@
 {
   "instance_id": "grpc__grpc-go-93786",
   "repo": "grpc/grpc-go",
-  "FAIL_TO_PASS": "[]",
+  "FAIL_TO_PASS": "[\"Test\", \"Test/Close\"]",
   "PASS_TO_PASS": "[]",
   "repo_language": "go"
 }

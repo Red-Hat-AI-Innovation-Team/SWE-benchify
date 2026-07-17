@@ -90,7 +90,7 @@ def _run_synthesis(
         with open(log_file, "w") as lf:
             result = subprocess.run(
                 cmd, stdout=lf, stderr=subprocess.STDOUT,
-                timeout=7200,
+                timeout=14400,
             )
 
         count = 0
@@ -107,7 +107,7 @@ def _run_synthesis(
         return {"slug": slug, "instances": count, "status": status, "log": str(log_file)}
 
     except subprocess.TimeoutExpired:
-        print(f"[TIMEOUT] {slug}: killed after 2h")
+        print(f"[TIMEOUT] {slug}: killed after 4h")
         return {"slug": slug, "instances": 0, "status": "timeout", "log": str(log_file)}
     except Exception as e:
         print(f"[ERROR] {slug}: {e}")

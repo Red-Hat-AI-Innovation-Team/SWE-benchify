@@ -1,7 +1,7 @@
 {
   "instance_id": "grpc__grpc-go-98713",
   "repo": "grpc/grpc-go",
-  "FAIL_TO_PASS": "[]",
-  "PASS_TO_PASS": "[]",
+  "FAIL_TO_PASS": "[\"Test\", \"Test/XDSClient_Close\"]",
+  "PASS_TO_PASS": "[\"Test/Channel_ADS_HandleResponseFromManagementServer\", \"Test/Channel_ADS_HandleResponseFromManagementServer/one_bad_resource_-_deserialization_failure\", \"Test/Channel_ADS_HandleResponseFromManagementServer/one_bad_resource_-_validation_failure\", \"Test/Channel_ADS_HandleResponseFromManagementServer/one_good_and_one_bad_-_deserialization_failure\", \"Test/Channel_ADS_HandleResponseFromManagementServer/one_good_and_one_bad_-_validation_failure\", \"Test/Channel_ADS_HandleResponseFromManagementServer/one_good_resource\", \"Test/Channel_ADS_HandleResponseFromManagementServer/two_bad_resources\", \"Test/Channel_ADS_HandleResponseFromManagementServer/two_good_resources\", \"Test/Channel_ADS_HandleResponseFromManagementServer/two_resources_when_we_requested_one\", \"Test/Channel_ADS_HandleResponseWatchExpiry\", \"Test/Channel_ADS_ResourceUnsubscribe\", \"Test/Channel_ADS_StreamFailure\", \"Test/Channel_New_FailureCases\", \"Test/Channel_New_FailureCases/emptyCConfig\", \"Test/Channel_New_FailureCases/emptyEventHandler\", \"Test/Channel_New_FailureCases/emptyServerConfig\", \"Test/Channel_New_FailureCases/emptyTransport\", \"Test/DecodeResponse_PanicRecoveryDisabled\", \"Test/DecodeResponse_PanicRecoveryEnabled\"]",
   "repo_language": "go"
 }

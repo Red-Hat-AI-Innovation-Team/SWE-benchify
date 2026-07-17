@@ -1,7 +1,7 @@
 {
   "instance_id": "grpc__grpc-go-96965",
   "repo": "grpc/grpc-go",
-  "FAIL_TO_PASS": "[]",
-  "PASS_TO_PASS": "[]",
+  "FAIL_TO_PASS": "[\"Test\", \"Test/Build_Multiple\", \"Test/Build_Single\", \"Test/Build_Success\", \"Test/NewStream_Error\", \"Test/NewStream_Success\", \"Test/NewStream_Success_WithCustomGRPCNewClient\", \"Test/Stream_SendAndRecv\"]",
+  "PASS_TO_PASS": "[\"ExampleServerIdentifierExtension\", \"Test/Build_Failure\", \"Test/Build_Failure/Extensions_is_nil\", \"Test/Build_Failure/Extensions_is_not_a_ServerIdentifierExtension\", \"Test/Build_Failure/ServerIdentifierExtension_ConfigName_is_not_present\", \"Test/Build_Failure/ServerIdentifierExtension_ConfigName_maps_to_nil_credentials\", \"Test/Build_Failure/ServerIdentifierExtension_is_added_as_pointer\", \"Test/Build_Failure/ServerIdentifierExtension_without_ConfigName\", \"Test/Build_Failure/ServerURI_is_empty\"]",
   "repo_language": "go"
 }

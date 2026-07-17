@@ -1,7 +1,7 @@
 {
   "instance_id": "grpc__grpc-go-96926",
   "repo": "grpc/grpc-go",
-  "FAIL_TO_PASS": "[]",
-  "PASS_TO_PASS": "[]",
+  "FAIL_TO_PASS": "[\"Test\", \"Test/NewLoggerFromConfigString\", \"Test/NewLoggerFromConfigStringInvalid\"]",
+  "PASS_TO_PASS": "[\"Test/FillMethodLoggerWithConfigStringBlacklist\", \"Test/FillMethodLoggerWithConfigStringGlobal\", \"Test/FillMethodLoggerWithConfigStringInvalid\", \"Test/FillMethodLoggerWithConfigStringPerMethod\", \"Test/FillMethodLoggerWithConfigStringPerService\", \"Test/GetMethodLogger\", \"Test/GetMethodLoggerOff\", \"Test/HeaderConfigRegexp\", \"Test/HeaderMessageConfigRegexp\", \"Test/Log\", \"Test/LongMethodConfigRegexp\", \"Test/MessageConfigRegexp\", \"Test/ParseHeaderMessageLengthConfig\", \"Test/ParseHeaderMessageLengthConfigInvalid\", \"Test/ParseMethodConfigAndSuffix\", \"Test/ParseMethodConfigAndSuffixInvalid\", \"Test/TruncateMessageNotTruncated\", \"Test/TruncateMessageTruncated\", \"Test/TruncateMetadataNotTruncated\", \"Test/TruncateMetadataTruncated\"]",
   "repo_language": "go"
 }
