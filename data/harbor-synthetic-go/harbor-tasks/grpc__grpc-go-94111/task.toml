@@ -16,14 +16,10 @@ version = "0.0"
 
 [verifier]
 timeout_sec = 300.0
-network_mode = "allowlist"
-allowed_hosts = ["proxy.golang.org", "sum.golang.org", "storage.googleapis.com"]
 
 [agent]
 timeout_sec = 1800.0
 user = "root"
-network_mode = "allowlist"
-allowed_hosts = ["proxy.golang.org", "sum.golang.org", "storage.googleapis.com"]
 
 artifacts = ["/logs/artifacts/candidate_patch.diff", "/logs/artifacts/patch_stat.txt", "/logs/verifier/report.json"]
 

@@ -16,14 +16,10 @@ version = "$version"
 
 [verifier]
 timeout_sec = $verifier_timeout
-network_mode = "$verifier_network_mode"
-$verifier_allowed_hosts
 
 [agent]
 timeout_sec = $agent_timeout
 user = "root"
-network_mode = "$agent_network_mode"
-$agent_allowed_hosts
 
 artifacts = ["/logs/artifacts/candidate_patch.diff", "/logs/artifacts/patch_stat.txt", "/logs/verifier/report.json"]
 

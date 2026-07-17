@@ -1,7 +1,7 @@
 {
   "instance_id": "grpc__grpc-go-90897",
   "repo": "grpc/grpc-go",
-  "FAIL_TO_PASS": "[]",
-  "PASS_TO_PASS": "[]",
+  "FAIL_TO_PASS": "[\"TestBalancerConfigUnmarshalJSON\", \"TestBalancerConfigUnmarshalJSON/empty_json\", \"TestDuration_MarshalUnmarshal\"]",
+  "PASS_TO_PASS": "[\"TestBalancerConfigMarshalJSON\", \"TestBalancerConfigMarshalJSON/OK\", \"TestBalancerConfigMarshalJSON/OK_config_is_nil\", \"TestBalancerConfigUnmarshalJSON/OK\", \"TestBalancerConfigUnmarshalJSON/balancer_registered_but_builder_not_parser\", \"TestBalancerConfigUnmarshalJSON/first_balancer_not_registered\", \"TestBalancerConfigUnmarshalJSON/more_than_one_entry_for_a_map\", \"TestBalancerConfigUnmarshalJSON/no_balancer_registered\"]",
   "repo_language": "go"
 }

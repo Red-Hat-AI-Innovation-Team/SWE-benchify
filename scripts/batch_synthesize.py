@@ -90,21 +90,24 @@ def _run_synthesis(
         with open(log_file, "w") as lf:
             result = subprocess.run(
                 cmd, stdout=lf, stderr=subprocess.STDOUT,
-                timeout=7200,
+                timeout=14400,
             )
 
-        out_file = output_dir / f"{safe_name}-synthetic-candidates.jsonl"
         count = 0
-        if out_file.exists():
-            with open(out_file) as f:
-                count = sum(1 for line in f if line.strip())
+        for pattern in [f"{safe_name}-synthetic-candidates.jsonl",
+                        f"local__{safe_name}-synthetic-candidates.jsonl"]:
+            out_file = output_dir / pattern
+            if out_file.exists():
+                with open(out_file) as f:
+                    count = sum(1 for line in f if line.strip())
+                break
 
         status = "ok" if result.returncode == 0 else f"exit={result.returncode}"
         print(f"[DONE]  {slug}: {count} instances ({status})")
         return {"slug": slug, "instances": count, "status": status, "log": str(log_file)}
 
     except subprocess.TimeoutExpired:
-        print(f"[TIMEOUT] {slug}: killed after 2h")
+        print(f"[TIMEOUT] {slug}: killed after 4h")
         return {"slug": slug, "instances": 0, "status": "timeout", "log": str(log_file)}
     except Exception as e:
         print(f"[ERROR] {slug}: {e}")
