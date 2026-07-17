@@ -115,7 +115,7 @@ def _parse_go_test_results(output: str) -> dict[str, str]:
     last_run = None
     has_panic = False
     for line in output.splitlines():
-        m = re.match(r"--- (PASS|FAIL): (\S+)", line)
+        m = re.search(r"--- (PASS|FAIL): (\S+)", line)
         if m:
             results[m.group(2)] = "passed" if m.group(1) == "PASS" else "failed"
             continue
