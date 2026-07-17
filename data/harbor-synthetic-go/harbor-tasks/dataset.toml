@@ -1,6 +1,6 @@
 [dataset]
 name = "swebenchify"
 source = "swebenchify"
-task_count = 21
+task_count = 11
 languages = ["go"]
-repos = ["containers/podman", "grpc/grpc-go"]
+repos = ["grpc/grpc-go"]
