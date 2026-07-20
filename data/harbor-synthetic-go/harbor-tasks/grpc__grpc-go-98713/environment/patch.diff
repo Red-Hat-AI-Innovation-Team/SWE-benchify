@@ -1,0 +1,32 @@
+diff --git a/internal/xds/clients/xdsclient/xdsclient.go b/internal/xds/clients/xdsclient/xdsclient.go
+--- a/internal/xds/clients/xdsclient/xdsclient.go
++++ b/internal/xds/clients/xdsclient/xdsclient.go
+@@ -149,7 +149,7 @@
+ 		if len(cfg.XDSServers) >= 1 {
+ 			serverCfg = cfg.XDSServers
+ 		}
+-		a := newAuthority(authorityBuildOptions{
++		c.authorities[name] = newAuthority(authorityBuildOptions{
+ 			serverConfigs:    serverCfg,
+ 			name:             name,
+ 			serializer:       c.serializer,
+@@ -158,9 +158,16 @@
+ 			target:           target,
+ 			metricsReporter:  c.metricsReporter,
+ 		})
+-		c.authorities[name] = a
+-		c.topLevelAuthority = a
+-	}
++	}
++	c.topLevelAuthority = newAuthority(authorityBuildOptions{
++		serverConfigs:    config.Servers,
++		name:             "",
++		serializer:       c.serializer,
++		getChannelForADS: c.getChannelForADS,
++		logPrefix:        clientPrefix(c),
++		target:           target,
++		metricsReporter:  c.metricsReporter,
++	})
+ 	c.logger = prefixLogger(c)
+ 
+ 	return c, nil

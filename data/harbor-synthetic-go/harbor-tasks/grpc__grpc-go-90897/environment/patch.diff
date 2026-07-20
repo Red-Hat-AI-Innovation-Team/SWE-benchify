@@ -1,0 +1,48 @@
+diff --git a/internal/serviceconfig/duration.go b/internal/serviceconfig/duration.go
+--- a/internal/serviceconfig/duration.go
++++ b/internal/serviceconfig/duration.go
+@@ -75,6 +75,9 @@
+ 	if len(ss) > 2 {
+ 		return fmt.Errorf("malformed duration %q: too many decimals", s)
+ 	}
++	// hasDigits is set if either the whole or fractional part of the number is
++	// present, since both are optional but one is required.
++	hasDigits := false
+ 	var sec, ns int64
+ 	if len(ss[0]) > 0 {
+ 		var err error
+@@ -86,6 +89,7 @@
+ 		if sec > maxProtoSeconds {
+ 			return fmt.Errorf("out of range: %q", s)
+ 		}
++		hasDigits = true
+ 	}
+ 	if len(ss) == 2 && len(ss[1]) > 0 {
+ 		if len(ss[1]) > 9 {
+@@ -95,11 +99,12 @@
+ 		if ns, err = strconv.ParseInt(ss[1], 10, 64); err != nil {
+ 			return fmt.Errorf("malformed duration %q: %v", s, err)
+ 		}
+-		for i := 10; i > len(ss[1]); i-- {
++		for i := 9; i > len(ss[1]); i-- {
+ 			ns *= 10
+ 		}
++		hasDigits = true
+ 	}
+-	if sec == 0 && ns == 0 && len(ss[0]) == 0 && (len(ss) < 2 || len(ss[1]) == 0) {
++	if !hasDigits {
+ 		return fmt.Errorf("malformed duration %q: contains no numbers", s)
+ 	}
+ 
+diff --git a/internal/serviceconfig/serviceconfig.go b/internal/serviceconfig/serviceconfig.go
+--- a/internal/serviceconfig/serviceconfig.go
++++ b/internal/serviceconfig/serviceconfig.go
+@@ -75,7 +75,7 @@
+ 	var ir intermediateBalancerConfig
+ 	err := json.Unmarshal(b, &ir)
+ 	if err != nil {
+-		return nil
++		return err
+ 	}
+ 
+ 	var names []string
