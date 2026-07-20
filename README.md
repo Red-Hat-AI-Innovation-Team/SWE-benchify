@@ -357,6 +357,189 @@ python3 scripts/eval_synthesizer.py           # Full eval with F2P + judge
 python3 scripts/eval_synthesizer.py --quick   # Fast mode, no F2P/judge
 ```
 
+## Cluster Deployment (OpenShift / Kubernetes)
+
+The synthesis pipeline can run at scale on an OpenShift or Kubernetes cluster,
+parallelizing yield-only synthesis across many repos simultaneously. This is
+the recommended approach for generating 1000+ instances across a large repo
+ecosystem.
+
+### Prerequisites
+
+- An OpenShift/Kubernetes cluster with `oc` or `kubectl` configured
+- A container registry (e.g. `ghcr.io`) accessible from the cluster
+- Google Cloud Vertex AI credentials (or an Anthropic API key)
+
+### Building the container image
+
+The `Dockerfile.synthesis` packages the synthesizer with Go 1.22, Node.js 20
+(required by `claude-code`), and all Python dependencies:
+
+```bash
+# Build for amd64 (required for most clusters, even when building on ARM Macs)
+docker buildx build --platform linux/amd64 \
+  -t ghcr.io/<org>/swebenchify-synthesis:latest \
+  -f Dockerfile.synthesis .
+
+# Push to registry
+docker push ghcr.io/<org>/swebenchify-synthesis:latest
+```
+
+If using GHCR, ensure the package visibility is set to **Public** (or configure
+an image pull secret) so cluster nodes can pull the image.
+
+### Credential setup
+
+**Vertex AI (recommended):**
+
+Create a GCP service account with Vertex AI access and store the key as a
+Kubernetes secret:
+
+```bash
+# Create service account and grant Vertex AI permissions
+gcloud iam service-accounts create swebenchify-synth \
+  --project=<PROJECT_ID>
+gcloud projects add-iam-policy-binding <PROJECT_ID> \
+  --member="serviceAccount:swebenchify-synth@<PROJECT_ID>.iam.gserviceaccount.com" \
+  --role="roles/aiplatform.user"
+
+# Download key and create K8s secret
+gcloud iam service-accounts keys create /tmp/sa-key.json \
+  --iam-account=swebenchify-synth@<PROJECT_ID>.iam.gserviceaccount.com
+oc create secret generic vertex-credentials \
+  --from-file=key.json=/tmp/sa-key.json \
+  -n <namespace>
+rm /tmp/sa-key.json
+```
+
+The job template mounts this secret at `/var/secrets/gcp/key.json` and sets
+`GOOGLE_APPLICATION_CREDENTIALS` accordingly.
+
+**Direct Anthropic API:**
+
+```bash
+oc create secret generic anthropic-api-key \
+  --from-literal=key=sk-ant-... \
+  -n <namespace>
+```
+
+Then update `synthesis-job.yaml` to mount and reference this secret instead of
+the Vertex credentials.
+
+### Job template
+
+`k8s/synthesis-job.yaml` defines a Kubernetes Job that:
+
+1. Clones a GitHub repo to `/tmp/repo`
+2. Runs `swebenchify synthesize --yield-only` with configurable limits
+3. Prints JSONL results to stdout (captured via `oc logs`)
+
+The template uses `envsubst` variables (`${REPO_FULL}`, `${REPO_SLUG}`,
+`${IMAGE}`) filled in by the launch script.
+
+**OpenShift-specific workarounds** baked into the template:
+
+| Constraint | Workaround |
+|------------|------------|
+| Non-root random UID | Clone to `/tmp/repo`, not `/repo` |
+| No `~/.gitconfig` writable | `GIT_AUTHOR_NAME`/`GIT_COMMITTER_NAME` env vars |
+| No `/go` writable | `GOPATH=/tmp/go GOMODCACHE=/tmp/go/mod HOME=/tmp` |
+
+### Launching jobs
+
+```bash
+# Launch synthesis across all 22 repos
+bash k8s/launch-all.sh
+
+# Or set a custom image:
+IMAGE=ghcr.io/<org>/swebenchify-synthesis:v2 bash k8s/launch-all.sh
+```
+
+Edit the `REPOS` array in `k8s/launch-all.sh` to add or remove target repos.
+
+### Monitoring
+
+```bash
+# Job status overview
+oc get jobs -n swebenchify
+
+# Stream logs from all pods
+oc logs -l app=swebenchify --prefix --max-log-requests=25 -n swebenchify -f
+
+# Check yield counts
+oc logs -l app=swebenchify --prefix --max-log-requests=25 -n swebenchify \
+  | grep "=== YIELD"
+
+# Single repo logs
+oc logs job/synth-kubernetes-kubernetes -n swebenchify
+```
+
+### Collecting results
+
+Yield-only results are printed to stdout. Extract them after jobs complete:
+
+```bash
+for job in $(oc get jobs -n swebenchify -o name); do
+  slug=$(echo "$job" | sed 's|job.batch/synth-||')
+  oc logs "$job" -n swebenchify \
+    | sed -n '/=== RESULTS ===/,$p' \
+    | tail -n +2 \
+    > "output/${slug}-synthetic-candidates.jsonl"
+done
+```
+
+### Batch enrichment
+
+After collecting yield-only instances, enrich them locally with
+`scripts/batch_enrich.py`, which adds problem statements, test patches,
+and self-screening:
+
+```bash
+python3 scripts/batch_enrich.py \
+  --input-dir data/yield-sweep-22/output \
+  --clone-dir data/yield-sweep-22/clones \
+  --output-dir data/yield-sweep-22/enriched \
+  --concurrency 3 \
+  --model sonnet
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--input-dir` | required | Directory with yield-only JSONL files |
+| `--clone-dir` | required | Directory with repo clones |
+| `--output-dir` | required | Output directory for enriched JSONL |
+| `--concurrency` | `5` | Parallel repo workers |
+| `--model` | `sonnet` | Claude model for enrichment |
+| `--repo` | all | Filter to a single repo slug |
+
+Each enrichment takes 4-5 LLM calls (happy path) up to ~20 with screening
+retries. The script produces per-repo `*-enriched.jsonl` files and a merged
+`enriched-all.jsonl`.
+
+### Synthesis parameters
+
+The job template passes these flags to `swebenchify synthesize`:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--max-mutations` | `200` | Maximum bugs to attempt per repo |
+| `--max-files` | `500` | Maximum source files to scan |
+| `--max-functions` | `20` | Maximum functions to consider per file |
+| `--target-multiplier` | `25` | Scan N x max-mutations functions for coverage |
+| `--yield-only` | — | Skip enrichment (issue text, screening) |
+
+Adjust these in `k8s/synthesis-job.yaml` to trade breadth for depth.
+
+### Environment variables
+
+| Variable | Description |
+|----------|-------------|
+| `CLAUDE_CODE_USE_VERTEX` | Set to `1` to use Vertex AI instead of direct Anthropic API |
+| `CLOUD_ML_REGION` | Vertex AI region (use `global` for Claude) |
+| `ANTHROPIC_VERTEX_PROJECT_ID` | GCP project ID with Vertex AI enabled |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL` | Override Sonnet model name for Vertex (default: `claude-sonnet-4-6`) |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to GCP service account key JSON |
+
 ## Architecture
 
 SWE-benchify is a **harness**, not an agent framework. It uses the [Claude Code Agent SDK](https://pypi.org/project/claude-code-sdk/) to dispatch Claude Code sessions and collects structured JSON output from each session.
