@@ -1,0 +1,70 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: synth-${REPO_SLUG}
+  labels:
+    app: swebenchify
+    component: synthesis
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 14400
+  template:
+    metadata:
+      labels:
+        app: swebenchify
+        component: synthesis
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: synthesizer
+          image: ${IMAGE}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              export GIT_AUTHOR_NAME=swebenchify GIT_AUTHOR_EMAIL=swebenchify@noreply
+              export GIT_COMMITTER_NAME=swebenchify GIT_COMMITTER_EMAIL=swebenchify@noreply
+              export GOPATH=/tmp/go GOMODCACHE=/tmp/go/mod HOME=/tmp
+              git clone --depth=1 https://github.com/${REPO_FULL}.git /tmp/repo
+              swebenchify synthesize \
+                --repo /tmp/repo \
+                --language go \
+                --output-dir /output \
+                --model sonnet \
+                --yield-only \
+                --max-mutations 200 \
+                --max-files 500 \
+                --max-functions 20 \
+                --target-multiplier 25
+              echo "=== RESULTS ==="
+              cat /output/*-synthetic-candidates.jsonl
+          env:
+            - name: CLAUDE_CODE_USE_VERTEX
+              value: "1"
+            - name: CLOUD_ML_REGION
+              value: "global"
+            - name: ANTHROPIC_VERTEX_PROJECT_ID
+              value: "itpc-gcp-ai-eng-claude"
+            - name: ANTHROPIC_DEFAULT_SONNET_MODEL
+              value: "claude-sonnet-4-6"
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: "/var/secrets/gcp/key.json"
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: output
+              mountPath: /output
+            - name: gcp-creds
+              mountPath: /var/secrets/gcp
+              readOnly: true
+      volumes:
+        - name: output
+          emptyDir: {}
+        - name: gcp-creds
+          secret:
+            secretName: vertex-credentials
