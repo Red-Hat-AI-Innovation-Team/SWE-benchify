@@ -1,0 +1,31 @@
+diff --git a/internal/binarylog/env_config.go b/internal/binarylog/env_config.go
+--- a/internal/binarylog/env_config.go
++++ b/internal/binarylog/env_config.go
+@@ -43,10 +43,10 @@
+ // If two configs exist for one certain method or service, the one specified
+ // later overrides the previous config.
+ func NewLoggerFromConfigString(s string) Logger {
++	if s == "" {
++		return nil
++	}
+ 	l := newEmptyLogger()
+-	if s == "" {
+-		return l
+-	}
+ 	methods := strings.Split(s, ",")
+ 	for _, method := range methods {
+ 		if err := l.fillMethodLoggerWithConfigString(method); err != nil {
+diff --git a/internal/binarylog/binarylog.go b/internal/binarylog/binarylog.go
+--- a/internal/binarylog/binarylog.go
++++ b/internal/binarylog/binarylog.go
+@@ -75,9 +75,7 @@
+ func init() {
+ 	const envStr = "GRPC_BINARY_LOG_FILTER"
+ 	configStr := os.Getenv(envStr)
+-	if configStr != "" {
+-		binLogger = NewLoggerFromConfigString(configStr)
+-	}
++	binLogger = NewLoggerFromConfigString(configStr)
+ }
+ 
+ // MethodLoggerConfig contains the setting for logging behavior of a method

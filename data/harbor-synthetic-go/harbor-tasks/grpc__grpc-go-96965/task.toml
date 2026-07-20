@@ -24,7 +24,6 @@ user = "root"
 artifacts = ["/logs/artifacts/candidate_patch.diff", "/logs/artifacts/patch_stat.txt", "/logs/verifier/report.json"]
 
 [environment]
-docker_image = "ghcr.io/red-hat-ai-innovation-team/swe-benchify/grpc-go:a481b8f755bc"
 cpus = 2
 memory_mb = 4096
 storage_mb = 10240

@@ -1,0 +1,14 @@
+diff --git a/interop/orcalb.go b/interop/orcalb.go
+--- a/interop/orcalb.go
++++ b/interop/orcalb.go
+@@ -49,7 +49,9 @@
+ 	b := &orcab{
+ 		ClientConn:       cc,
+ 		stopOOBListeners: make(map[balancer.SubConn]func()),
+-		oobState: &oobState{},
++		oobState: &oobState{
++			reports: make(map[balancer.SubConn]*v3orcapb.OrcaLoadReport),
++		},
+ 	}
+ 	b.logger = internalgrpclog.NewPrefixLogger(orcaLogger, fmt.Sprintf("[%p] ", b))
+ 	b.child = endpointsharding.NewBalancer(b, bOpts, balancer.Get(pickfirst.Name).Build, endpointsharding.Options{})

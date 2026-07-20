@@ -1,0 +1,15 @@
+diff --git a/internal/transport/handler_server.go b/internal/transport/handler_server.go
+--- a/internal/transport/handler_server.go
++++ b/internal/transport/handler_server.go
+@@ -65,6 +65,11 @@
+ 		http.Error(w, msg, http.StatusUnsupportedMediaType)
+ 		return nil, errors.New(msg)
+ 	}
++	if r.ProtoMajor != 2 {
++		msg := "gRPC requires HTTP/2"
++		http.Error(w, msg, http.StatusHTTPVersionNotSupported)
++		return nil, errors.New(msg)
++	}
+ 	if _, ok := w.(http.Flusher); !ok {
+ 		msg := "gRPC requires a ResponseWriter supporting http.Flusher"
+ 		http.Error(w, msg, http.StatusInternalServerError)
