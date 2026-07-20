@@ -9,6 +9,7 @@ detection (not AST parsing).
 from __future__ import annotations
 
 import ast
+import asyncio
 import dataclasses
 import difflib
 import hashlib
@@ -21,17 +22,53 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
 try:
-    from claude_code_sdk import ClaudeCodeOptions, ResultMessage, query
+    from claude_code_sdk import ClaudeCodeOptions, ResultMessage
+    from claude_code_sdk import query as _raw_query
 except ModuleNotFoundError:  # allow import for tests without the SDK installed
     ClaudeCodeOptions = None  # type: ignore[assignment,misc]
     ResultMessage = None  # type: ignore[assignment,misc]
-    query = None  # type: ignore[assignment]
+    _raw_query = None  # type: ignore[assignment]
 
 from swebenchify.models import CandidateInstance
+
+
+async def query(*, prompt: str, options: "ClaudeCodeOptions"):
+    """Wrap claude_code_sdk.query to isolate each call in its own event loop.
+
+    The SDK uses anyio cancel scopes internally. When multiple queries run
+    sequentially in the same event loop, the first query's async-generator
+    cleanup can leave a stale cancel scope that poisons subsequent calls
+    (RuntimeError: "Attempted to exit cancel scope in a different task").
+    Running each query in a throwaway event loop on a worker thread avoids
+    this entirely.
+    """
+    messages: list = []
+    error: BaseException | None = None
+
+    def _run() -> None:
+        nonlocal error
+        async def _inner() -> None:
+            async for msg in _raw_query(prompt=prompt, options=options):
+                messages.append(msg)
+        try:
+            asyncio.run(_inner())
+        except BaseException as exc:
+            error = exc
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    thread.join()
+
+    if error is not None:
+        raise error
+
+    for msg in messages:
+        yield msg
 
 logger = logging.getLogger(__name__)
 
@@ -98,11 +135,18 @@ _FUNC_PATTERNS: dict[str, re.Pattern[str]] = {
     ),
 }
 
-MODEL_MAP: dict[str, str] = {
-    "sonnet": "claude-sonnet-4-20250514",
-    "haiku": "claude-haiku-4-5-20251001",
-    "opus": "claude-opus-4-20250514",
-}
+if os.environ.get("CLAUDE_CODE_USE_VERTEX") == "1":
+    MODEL_MAP: dict[str, str] = {
+        "sonnet": os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-6"),
+        "haiku": os.environ.get("ANTHROPIC_DEFAULT_HAIKU_MODEL", "claude-haiku-4-5"),
+        "opus": os.environ.get("ANTHROPIC_DEFAULT_OPUS_MODEL", "claude-opus-4-6"),
+    }
+else:
+    MODEL_MAP: dict[str, str] = {
+        "sonnet": "claude-sonnet-4-20250514",
+        "haiku": "claude-haiku-4-5-20251001",
+        "opus": "claude-opus-4-20250514",
+    }
 
 DATASET_PATH = os.environ.get(
     "SWEBENCHIFY_DATASET",
@@ -2310,7 +2354,7 @@ async def _self_screen_instance(candidate: CandidateInstance) -> bool:
     classification = classification_match.group(1)
     confidence = confidence_match.group(1) if confidence_match else "LOW"
 
-    if classification == "SYNTHETIC" and confidence in ("HIGH", "MEDIUM"):
+    if classification == "SYNTHETIC" and confidence == "HIGH":
         logger.info("  Self-screen REJECTED candidate (SYNTHETIC, %s confidence)", confidence)
         return False
 
