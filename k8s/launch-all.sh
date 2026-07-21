@@ -36,21 +36,6 @@ echo
 
 oc project "$NAMESPACE" 2>/dev/null || oc new-project "$NAMESPACE"
 
-# Create PVC for output if it doesn't exist
-oc get pvc synth-output -n "$NAMESPACE" 2>/dev/null || \
-  oc create -f - <<EOF
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: synth-output
-  namespace: $NAMESPACE
-spec:
-  accessModes: [ReadWriteMany]
-  resources:
-    requests:
-      storage: 10Gi
-EOF
-
 for repo in "${REPOS[@]}"; do
   slug="${repo//\//-}"
   echo "Launching: $repo -> $slug"

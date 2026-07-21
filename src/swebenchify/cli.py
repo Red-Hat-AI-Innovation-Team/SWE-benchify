@@ -425,18 +425,32 @@ def _cmd_synthesize(args: argparse.Namespace) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     async def run() -> None:
-        result = await synthesize_repo(
-            repo_path=abs_path,
-            repo_slug=repo_slug,
-            base_commit=base_commit,
-            language=args.language,
-            max_mutations=args.max_mutations,
-            model=args.model,
-            yield_only=args.yield_only,
-            target_multiplier=args.target_multiplier,
-            max_files=args.max_files,
-            max_functions=args.max_functions,
-        )
+        slug = repo_slug.replace("/", "__")
+        out_file = output_dir / f"{slug}-synthetic-candidates.jsonl"
+
+        with open(out_file, "w") as f:
+            def _on_candidate(c, enrichment, _f=f):
+                record = asdict(c)
+                if enrichment:
+                    record["_pipeline"] = enrichment
+                line = json.dumps(record)
+                _f.write(line + "\n")
+                _f.flush()
+                print(line, flush=True)
+
+            result = await synthesize_repo(
+                repo_path=abs_path,
+                repo_slug=repo_slug,
+                base_commit=base_commit,
+                language=args.language,
+                max_mutations=args.max_mutations,
+                model=args.model,
+                yield_only=args.yield_only,
+                target_multiplier=args.target_multiplier,
+                max_files=args.max_files,
+                max_functions=args.max_functions,
+                on_candidate=_on_candidate,
+            )
 
         candidates = result.candidates
         print(f"Yield: {len(candidates)}/{result.mutations_attempted}")
@@ -444,16 +458,6 @@ def _cmd_synthesize(args: argparse.Namespace) -> None:
         if not candidates:
             print("No synthetic instances generated")
             return
-
-        slug = repo_slug.replace("/", "__")
-        out_file = output_dir / f"{slug}-synthetic-candidates.jsonl"
-        with open(out_file, "w") as f:
-            for c in candidates:
-                record = asdict(c)
-                enrichment = result.enrichment_data.get(c.instance_id)
-                if enrichment:
-                    record["_pipeline"] = enrichment
-                f.write(json.dumps(record) + "\n")
 
         print(f"\nGenerated {len(candidates)} synthetic instances -> {out_file}")
         for c in candidates:
@@ -491,27 +495,29 @@ def _cmd_enrich(args: argparse.Namespace) -> None:
     )
 
     async def run() -> None:
-        enriched = []
-        for i, inst in enumerate(instances, 1):
-            iid = inst.get("instance_id", "unknown")
-            print(f"[{i}/{len(instances)}] Enriching {iid}...")
-            try:
-                result = await enrich_instance(
-                    inst, repo_path=args.repo, model=args.model,
-                )
-                if result:
-                    enriched.append(result)
-                    print(f"  PASS ({len(enriched)} enriched so far)")
-                else:
-                    print("  FAIL (screening rejected)")
-            except Exception as e:
-                print(f"  ERROR: {e}")
-
+        enriched_count = 0
         with open(output_path, "w") as f:
-            for inst in enriched:
-                f.write(json.dumps(inst) + "\n")
+            for i, inst in enumerate(instances, 1):
+                iid = inst.get("instance_id", "unknown")
+                print(f"[{i}/{len(instances)}] Enriching {iid}...", file=sys.stderr)
+                try:
+                    result = await enrich_instance(
+                        inst, repo_path=args.repo, model=args.model,
+                    )
+                    if result:
+                        enriched_count += 1
+                        line = json.dumps(result)
+                        f.write(line + "\n")
+                        f.flush()
+                        print(line, flush=True)
+                        print(f"  PASS ({enriched_count} enriched so far)", file=sys.stderr)
+                    else:
+                        print("  FAIL (screening rejected)", file=sys.stderr)
+                except Exception as e:
+                    print(f"  ERROR: {e}", file=sys.stderr)
 
-        print(f"\nEnriched {len(enriched)}/{len(instances)} instances -> {output_path}")
+        print(f"\nEnriched {enriched_count}/{len(instances)} instances -> {output_path}",
+              file=sys.stderr)
 
     asyncio.run(run())
 
