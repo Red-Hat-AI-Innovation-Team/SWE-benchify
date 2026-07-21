@@ -1,0 +1,53 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: validate-${INSTANCE_SLUG}
+  labels:
+    app: swebenchify
+    component: validation
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 3600
+  template:
+    metadata:
+      labels:
+        app: swebenchify
+        component: validation
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: validator
+          image: ${IMAGE}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              export HOME=/tmp
+              git clone --depth=50 https://github.com/${REPO_FULL}.git /tmp/testbed || \
+                git clone https://github.com/${REPO_FULL}.git /tmp/testbed
+              python scripts/validate_and_prepare.py \
+                --input /input/instance.jsonl \
+                --output /output \
+                --repo-dir /tmp/testbed \
+                --language ${LANGUAGE} \
+                --test-timeout 300
+              echo "=== VALIDATION COMPLETE ==="
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: input
+              mountPath: /input
+              readOnly: true
+            - name: output
+              mountPath: /output
+      volumes:
+        - name: input
+          configMap:
+            name: validate-input-${INSTANCE_SLUG}
+        - name: output
+          emptyDir: {}
