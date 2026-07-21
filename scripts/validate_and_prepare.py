@@ -156,38 +156,73 @@ def validate_instance(
         print("  Installing Go dependencies...", flush=True)
         _run(["go", "mod", "download"], cwd=repo_dir, timeout=120)
 
-    # Phase 1: Introduce the bug (if not already present)
-    if bug_baked_in:
-        print("  Bug already baked in at base_commit (synthetic instance)",
-              flush=True)
-    else:
-        print("  Reverse-applying gold patch...", flush=True)
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".patch",
-                                         delete=False) as f:
-            f.write(patch)
-            patch_file = f.name
-        r = _run(["git", "apply", "--reverse", patch_file], cwd=repo_dir)
-        if r.returncode != 0:
-            r = _run(["git", "apply", "--reverse", "--3way", patch_file],
-                      cwd=repo_dir)
-        os.unlink(patch_file)
-        if r.returncode != 0:
-            return {"instance_id": instance_id, "status": "error",
-                    "error": f"Reverse gold patch failed: {r.stderr[-300:]}"}
-
-    # Apply test patch if present
+    # Write patches to temp files for reuse across phases
+    patch_file = None
+    tp_file = None
+    if patch.strip():
+        f = tempfile.NamedTemporaryFile(mode="w", suffix=".patch", delete=False)
+        f.write(patch)
+        f.close()
+        patch_file = f.name
     if test_patch.strip():
-        print("  Applying test patch...", flush=True)
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".patch",
-                                         delete=False) as f:
-            f.write(test_patch)
-            tp_file = f.name
-        r = _run(["git", "apply", tp_file], cwd=repo_dir)
-        if r.returncode != 0:
-            _run(["git", "apply", "--3way", tp_file], cwd=repo_dir)
-        os.unlink(tp_file)
+        f = tempfile.NamedTemporaryFile(mode="w", suffix=".patch", delete=False)
+        f.write(test_patch)
+        f.close()
+        tp_file = f.name
 
-    # Phase 2: Run tests (pre-fix — bug is present)
+    last_patch_error = ""
+
+    def _apply_patch(pfile: str, label: str, reverse: bool = False) -> bool:
+        nonlocal last_patch_error
+        args = ["git", "apply"]
+        if reverse:
+            args.append("--reverse")
+        args.append(pfile)
+        r = _run(args, cwd=repo_dir)
+        if r.returncode != 0:
+            args_3way = ["git", "apply", "--3way"]
+            if reverse:
+                args_3way.append("--reverse")
+            args_3way.append(pfile)
+            r = _run(args_3way, cwd=repo_dir)
+        if r.returncode != 0:
+            last_patch_error = (r.stderr or "")[-300:]
+            print(f"  WARNING: {label} patch failed: {last_patch_error}",
+                  flush=True)
+        return r.returncode == 0
+
+    # === PRE-FIX PHASE: run tests with bug present ===
+    # Auto-detect: try reverse-apply to introduce bug. If it succeeds, the
+    # code was in the fixed state. If it fails, the bug may already be present.
+    print("  Introducing bug (reverse-applying gold patch)...", flush=True)
+    reverse_ok = _apply_patch(patch_file, "reverse gold", reverse=True)
+    if reverse_ok:
+        bug_baked_in = False
+        print("  Reverse-apply succeeded — bug introduced", flush=True)
+    else:
+        # Check if the forward patch applies (code is already buggy)
+        forward_ok = _apply_patch(patch_file, "forward gold (probe)")
+        if forward_ok:
+            bug_baked_in = True
+            print("  Reverse-apply failed but forward-apply works — "
+                  "bug already baked in", flush=True)
+            # Undo the probe: reset back to buggy state
+            _run(["git", "checkout", "."], cwd=repo_dir)
+            _run(["git", "clean", "-fd"], cwd=repo_dir)
+        else:
+            if patch_file:
+                os.unlink(patch_file)
+            if tp_file:
+                os.unlink(tp_file)
+            return {"instance_id": instance_id, "status": "error",
+                    "error": f"Gold patch incompatible: {last_patch_error}"}
+
+    # Phase 1b: Apply test patch
+    if tp_file:
+        print("  Applying test patch...", flush=True)
+        _apply_patch(tp_file, "test patch")
+
+    # Phase 1c: Run pre-fix tests
     print(f"  Running pre-fix tests: {test_command}", flush=True)
     r = _run(["bash", "-c", f"cd {repo_dir} && {test_command}"],
              timeout=test_timeout)
@@ -198,22 +233,25 @@ def validate_instance(
           f"{sum(1 for v in pre_results.values() if v == 'passed')} passed)",
           flush=True)
 
-    # Phase 3: Apply gold patch (fix the bug)
-    print("  Applying gold patch...", flush=True)
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".patch",
-                                     delete=False) as f:
-        f.write(patch)
-        patch_file = f.name
-    r = _run(["git", "apply", patch_file], cwd=repo_dir)
-    if r.returncode != 0:
-        r = _run(["git", "apply", "--3way", patch_file], cwd=repo_dir)
-        if r.returncode != 0:
-            os.unlink(patch_file)
-            return {"instance_id": instance_id, "status": "error",
-                    "error": f"Gold patch failed: {r.stderr[-300:]}"}
-    os.unlink(patch_file)
+    # === POST-FIX PHASE: reset, apply gold patch, re-apply test patch ===
+    print("  Resetting repo for post-fix phase...", flush=True)
+    _run(["git", "checkout", "."], cwd=repo_dir)
+    _run(["git", "clean", "-fd"], cwd=repo_dir)
 
-    # Phase 4: Run tests (post-fix — bug is fixed)
+    if bug_baked_in:
+        print("  Applying gold patch (fixing bug)...", flush=True)
+        if not _apply_patch(patch_file, "gold patch"):
+            os.unlink(patch_file)
+            if tp_file:
+                os.unlink(tp_file)
+            return {"instance_id": instance_id, "status": "error",
+                    "error": f"Gold patch failed: {last_patch_error}"}
+    # For non-baked-in: reset already restored the original (fixed) code
+
+    if tp_file:
+        print("  Re-applying test patch...", flush=True)
+        _apply_patch(tp_file, "test patch (post-fix)")
+
     print(f"  Running post-fix tests: {test_command}", flush=True)
     r = _run(["bash", "-c", f"cd {repo_dir} && {test_command}"],
              timeout=test_timeout)
@@ -223,6 +261,12 @@ def validate_instance(
           f"({sum(1 for v in post_results.values() if v == 'failed')} failed, "
           f"{sum(1 for v in post_results.values() if v == 'passed')} passed)",
           flush=True)
+
+    # Clean up temp files
+    if patch_file:
+        os.unlink(patch_file)
+    if tp_file:
+        os.unlink(tp_file)
 
     # Phase 5: Compute F2P / P2P / P2F
     pre_failed = {t for t, s in pre_results.items() if s == "failed"}
@@ -292,15 +336,11 @@ def main() -> None:
 
     # Determine repo directory
     if args.repo_dir:
-        source_repo = Path(args.repo_dir)
-        if not source_repo.exists():
-            print(f"Error: repo dir {source_repo} not found", file=sys.stderr)
+        repo_dir = Path(args.repo_dir)
+        if not repo_dir.exists():
+            print(f"Error: repo dir {repo_dir} not found", file=sys.stderr)
             sys.exit(1)
-        # Copy to a temp directory so we don't modify the source
-        repo_dir = Path(tempfile.mkdtemp(prefix="val-repo-"))
-        print(f"  Copying repo to {repo_dir}...", flush=True)
-        shutil.copytree(source_repo, repo_dir, dirs_exist_ok=True)
-        # Checkout the base commit
+        print(f"  Checking out {instance['base_commit'][:12]}...", flush=True)
         _run(["git", "checkout", instance["base_commit"]], cwd=repo_dir)
     elif args.repo_url or "/" in repo:
         repo_url = args.repo_url or repo
@@ -320,14 +360,10 @@ def main() -> None:
         print("Error: provide --repo-dir or --repo-url", file=sys.stderr)
         sys.exit(1)
 
-    # Synthetic instances have the bug baked in at base_commit
-    bug_baked_in = instance.get("provenance") == "synthetic"
-
-    # Run validation
+    # Run validation (auto-detects whether bug is baked in)
     result = validate_instance(
         instance, repo_dir, language=language,
         test_timeout=args.test_timeout,
-        bug_baked_in=bug_baked_in,
     )
 
     print(f"\nValidation result: {result['status']}", flush=True)
