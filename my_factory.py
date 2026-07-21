@@ -134,8 +134,11 @@ class SwebenchFactoryCeo(BaseInstalledAgent):
             "CLAUDE_CONFIG_DIR": "/logs/agent/sessions",
         }
 
-        if self.model_name:
-            env["ANTHROPIC_MODEL"] = self.model_name.split("/")[-1]
+        model_id = self.model_name.split("/")[-1] if self.model_name else ""
+        if model_id:
+            env["ANTHROPIC_MODEL"] = model_id
+            env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model_id
+            env["CLAUDE_CODE_SUBAGENT_MODEL"] = model_id
 
         for var in COMMON_ENV_VARS:
             val = self._get_env(var) or os.environ.get(var)
