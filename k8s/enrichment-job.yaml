@@ -1,0 +1,69 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: enrich-${INSTANCE_SLUG}
+  labels:
+    app: swebenchify
+    component: enrichment
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 86400
+  template:
+    metadata:
+      labels:
+        app: swebenchify
+        component: enrichment
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: enricher
+          image: ${IMAGE}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              export HOME=/tmp
+              git clone --depth=50 https://github.com/${REPO_FULL}.git /tmp/repo
+              swebenchify enrich \
+                --input /input/instances.jsonl \
+                --repo /tmp/repo \
+                --output /output/enriched.jsonl \
+                --model sonnet
+              echo "=== RESULTS ==="
+              cat /output/enriched.jsonl
+          env:
+            - name: CLAUDE_CODE_USE_VERTEX
+              value: "1"
+            - name: CLOUD_ML_REGION
+              value: "global"
+            - name: ANTHROPIC_VERTEX_PROJECT_ID
+              value: "itpc-gcp-ai-eng-claude"
+            - name: ANTHROPIC_DEFAULT_SONNET_MODEL
+              value: "claude-sonnet-4-6"
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: "/var/secrets/gcp/key.json"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: input
+              mountPath: /input
+              readOnly: true
+            - name: output
+              mountPath: /output
+            - name: gcp-creds
+              mountPath: /var/secrets/gcp
+              readOnly: true
+      volumes:
+        - name: input
+          configMap:
+            name: enrich-input-${INSTANCE_SLUG}
+        - name: output
+          emptyDir: {}
+        - name: gcp-creds
+          secret:
+            secretName: vertex-credentials
