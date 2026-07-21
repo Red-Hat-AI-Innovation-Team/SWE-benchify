@@ -23,6 +23,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -5676,6 +5677,7 @@ async def synthesize_repo(
     target_multiplier: int = 8,
     max_files: int | None = None,
     max_functions: int | None = None,
+    on_candidate: Callable[[CandidateInstance, dict], None] | None = None,
 ) -> RepoSynthesisResult:
     """Synthesize bug instances for a repository.
 
@@ -6106,11 +6108,14 @@ async def synthesize_repo(
             candidate.merge_commit = base_commit
             synthesis_result.instance_id = candidate.instance_id
             candidates.append(candidate)
-            enrichment_data[candidate.instance_id] = {
+            edata = {
                 'bug_spec': dataclasses.asdict(bug_spec),
                 'test_output': test_output or '',
                 'language': language,
             }
+            enrichment_data[candidate.instance_id] = edata
+            if on_candidate:
+                on_candidate(candidate, edata)
             logger.info('%s  Generated (yield-only): %s (%s)', pfx, candidate.instance_id, bug_spec.bug_category)
             logger.info('%s  === YIELD %d/%d (rate: %.0f%%) ===', pfx, len(candidates), max_mutations, 100 * len(candidates) / mutations_attempted)
             continue
@@ -6189,11 +6194,14 @@ async def synthesize_repo(
             continue
 
         candidates.append(candidate)
-        enrichment_data[candidate.instance_id] = {
+        edata = {
             'bug_spec': dataclasses.asdict(bug_spec),
             'test_output': test_output or '',
             'language': language,
         }
+        enrichment_data[candidate.instance_id] = edata
+        if on_candidate:
+            on_candidate(candidate, edata)
 
         logger.info(
             "%s  Generated: %s (%s)", pfx, candidate.instance_id, bug_spec.bug_category,
