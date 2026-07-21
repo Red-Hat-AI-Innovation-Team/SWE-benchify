@@ -1,0 +1,9 @@
+services:
+  main:
+    volumes:
+      - /home/lab/.config/gcloud/application_default_credentials.json:/tmp/gcp-creds.json:ro
+    environment:
+      - CLAUDE_CODE_USE_VERTEX=1
+      - GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcp-creds.json
+      - ANTHROPIC_VERTEX_PROJECT_ID=$ANTHROPIC_VERTEX_PROJECT_ID
+      - CLOUD_ML_REGION=global
