@@ -20,5 +20,6 @@ RUN pip install --no-cache-dir -e .
 
 COPY scripts/batch_synthesize.py scripts/
 COPY scripts/batch_enrich.py scripts/
+COPY scripts/validate_and_prepare.py scripts/
 
 ENTRYPOINT ["swebenchify"]
