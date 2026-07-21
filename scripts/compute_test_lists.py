@@ -69,13 +69,16 @@ def _extract_test_command(test_sh: str) -> str:
     return "go test -v -count=1 ./..."
 
 
-def _make_f2p_script(test_command: str, has_test_patch: bool) -> str:
+def _make_f2p_script(test_command: str, has_test_patch: bool,
+                     bug_baked_in: bool = False) -> str:
     """Generate a script that runs tests pre-fix and post-fix.
 
-    Synthetic instances have Docker images built from a clean commit — the
-    mutation (bug) is NOT baked in.  We reverse-apply the gold patch first to
-    introduce the bug, then apply the test patch, run pre-fix tests, then
-    forward-apply the gold patch to fix it and run post-fix tests.
+    When bug_baked_in=False (docker_image tasks): reverse-apply the gold patch
+    to introduce the bug, then forward-apply to fix it.
+
+    When bug_baked_in=True (Dockerfile tasks that already reverse-applied the
+    patch during build): skip the reverse-apply, just run pre-fix tests on the
+    image as-is, then forward-apply the gold patch for post-fix.
     """
     apply_test = ""
     if has_test_patch:
@@ -85,14 +88,21 @@ def _make_f2p_script(test_command: str, has_test_patch: bool) -> str:
             "git apply --3way /tmp/test.patch 2>&1 || true\n"
         )
 
+    if bug_baked_in:
+        introduce_bug = "# Bug already baked into image (Dockerfile reverse-applied the patch)"
+    else:
+        introduce_bug = (
+            "# Introduce the bug by reverse-applying the gold patch.\n"
+            "git apply --reverse /tmp/gold.patch 2>&1 \\\n"
+            "  || git apply --reverse --3way /tmp/gold.patch 2>&1 \\\n"
+            "  || { echo REVERSE_PATCH_FAILED; }"
+        )
+
     return f"""set -uxo pipefail
 cd /testbed
 git config --global --add safe.directory /testbed
 
-# Introduce the bug by reverse-applying the gold patch.
-git apply --reverse /tmp/gold.patch 2>&1 \
-  || git apply --reverse --3way /tmp/gold.patch 2>&1 \
-  || {{ echo REVERSE_PATCH_FAILED; }}
+{introduce_bug}
 
 {apply_test}
 echo '{PHASE_SEP}_PRE'
@@ -142,7 +152,7 @@ def _extract_section(text: str, start: str, end: str | None) -> str:
     return text[idx:]
 
 
-def compute_test_lists(task_dir: Path, timeout: int = 600) -> dict:
+def compute_test_lists(task_dir: Path, timeout: int = 600, cleanup: bool = False) -> dict:
     """Compute F2P/P2P for a single Harbor task.
 
     Returns a dict with keys: instance_id, FAIL_TO_PASS, PASS_TO_PASS,
@@ -152,15 +162,43 @@ def compute_test_lists(task_dir: Path, timeout: int = 600) -> dict:
     instance_id = task_info.get("instance_id", task_dir.name)
     docker_image = task_info.get("docker_image")
 
+    built_image = False
     if not docker_image:
-        return {
-            "instance_id": instance_id,
-            "status": "error",
-            "error": "No docker_image in task.toml",
-            "FAIL_TO_PASS": [],
-            "PASS_TO_PASS": [],
-            "PASS_TO_FAIL": [],
-        }
+        dockerfile_dir = task_dir / "environment"
+        if not (dockerfile_dir / "Dockerfile").exists():
+            return {
+                "instance_id": instance_id,
+                "status": "error",
+                "error": "No docker_image in task.toml and no environment/Dockerfile",
+                "FAIL_TO_PASS": [],
+                "PASS_TO_PASS": [],
+                "PASS_TO_FAIL": [],
+            }
+        docker_image = f"swebenchify-f2p-{instance_id}".lower()
+        try:
+            r = subprocess.run(
+                [DOCKER, "build", "-t", docker_image, str(dockerfile_dir)],
+                capture_output=True, text=True, timeout=timeout,
+            )
+            if r.returncode != 0:
+                return {
+                    "instance_id": instance_id,
+                    "status": "error",
+                    "error": f"Dockerfile build failed: {r.stderr[-500:]}",
+                    "FAIL_TO_PASS": [],
+                    "PASS_TO_PASS": [],
+                    "PASS_TO_FAIL": [],
+                }
+            built_image = True
+        except subprocess.TimeoutExpired:
+            return {
+                "instance_id": instance_id,
+                "status": "error",
+                "error": f"Dockerfile build timed out after {timeout}s",
+                "FAIL_TO_PASS": [],
+                "PASS_TO_PASS": [],
+                "PASS_TO_FAIL": [],
+            }
 
     test_sh_path = task_dir / "tests" / "test.sh"
     gold_patch_path = task_dir / "solution" / "patch.diff"
@@ -190,7 +228,11 @@ def compute_test_lists(task_dir: Path, timeout: int = 600) -> dict:
             "PASS_TO_FAIL": [],
         }
 
-    script = _make_f2p_script(test_command, has_test_patch=bool(test_patch.strip()))
+    script = _make_f2p_script(
+        test_command,
+        has_test_patch=bool(test_patch.strip()),
+        bug_baked_in=built_image,
+    )
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
@@ -276,6 +318,11 @@ def compute_test_lists(task_dir: Path, timeout: int = 600) -> dict:
     if pass_to_fail:
         status = "regression"
 
+    if built_image and cleanup:
+        subprocess.run(
+            [DOCKER, "rmi", docker_image], capture_output=True, timeout=30,
+        )
+
     return {
         "instance_id": instance_id,
         "status": status,
@@ -304,6 +351,8 @@ def main() -> None:
     parser.add_argument("--update", action="store_true", help="Write results to config.json")
     parser.add_argument("--oracle", action="store_true",
                         help="Verify that applying gold patch yields reward=1")
+    parser.add_argument("--cleanup", action="store_true",
+                        help="Remove Docker images built from Dockerfiles after validation")
     args = parser.parse_args()
 
     if not _docker_available():
@@ -331,7 +380,7 @@ def main() -> None:
     results = []
     for i, task_dir in enumerate(task_dirs, 1):
         print(f"[{i}/{len(task_dirs)}] {task_dir.name}...", end=" ", flush=True)
-        result = compute_test_lists(task_dir, timeout=args.timeout)
+        result = compute_test_lists(task_dir, timeout=args.timeout, cleanup=args.cleanup)
         results.append(result)
 
         status = result["status"]
