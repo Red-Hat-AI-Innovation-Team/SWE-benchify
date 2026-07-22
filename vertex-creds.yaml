@@ -2,7 +2,7 @@ services:
   main:
     volumes:
       - /home/lab/.config/gcloud/application_default_credentials.json:/tmp/gcp-creds.json:ro
-      - ./my_swebench.py:/tmp/my_swebench.py:ro
+      - /home/lab/rawhad/SWE-benchify/my_swebench.py:/tmp/my_swebench.py:ro
     environment:
       - CLAUDE_CODE_USE_VERTEX=1
       - GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcp-creds.json
