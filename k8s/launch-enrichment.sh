@@ -38,32 +38,29 @@ SLUG_TO_REPO=(
   [thanos-io-thanos]="thanos-io/thanos"
 )
 
-# Extract instances from each pod, tagging with real repo info
-for pod in $(oc get pods -l component=synthesis -n "$NAMESPACE" --no-headers -o custom-columns=NAME:.metadata.name | sort); do
-  # Derive repo slug from pod name: synth-<slug>-<hash>
-  slug=$(echo "$pod" | sed 's/^synth-//; s/-[a-z0-9]*$//')
-  repo_full="${SLUG_TO_REPO[$slug]:-}"
-  if [ -z "$repo_full" ]; then
-    echo "WARN: unknown slug '$slug' from pod $pod, skipping"
-    continue
-  fi
+# Collect synthesis results (survives pod GC)
+bash k8s/collect-results.sh synthesis "$TMPDIR/raw-synth.jsonl"
 
-  # Extract JSON lines, fix repo and instance_id fields
-  oc logs "$pod" -n "$NAMESPACE" 2>/dev/null | grep '^{' | python3 -c "
+# Fix repo and instance_id fields (synthesis outputs "local/repo" as repo)
+for job in $(oc get jobs -l component=synthesis -n "$NAMESPACE" --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null | sort); do
+  slug="${job#synth-}"
+  repo_full="${SLUG_TO_REPO[$slug]:-}"
+  [ -z "$repo_full" ] && continue
+
+  oc logs "job/$job" -n "$NAMESPACE" 2>/dev/null | grep '^{' | python3 -c "
 import json, sys
 repo_full = '$repo_full'
 repo_slug = '$slug'
 for line in sys.stdin:
     line = line.strip()
-    if not line:
-        continue
-    d = json.loads(line)
-    # Fix repo field
+    if not line: continue
+    try: d = json.loads(line)
+    except: continue
     d['repo'] = repo_full
-    # Fix instance_id: replace local__repo with real slug
     old_id = d.get('instance_id', '')
-    num = old_id.rsplit('-', 1)[-1] if '-' in old_id else old_id
-    d['instance_id'] = f'{repo_slug}-{num}'
+    if old_id.startswith('local__'):
+        num = old_id.rsplit('-', 1)[-1] if '-' in old_id else old_id
+        d['instance_id'] = f'{repo_slug}-{num}'
     print(json.dumps(d))
 " >> "$TMPDIR/all-instances.jsonl" 2>/dev/null || true
 done

@@ -8,58 +8,12 @@ LANGUAGE="${LANGUAGE:-go}"
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
-echo "=== Extracting enriched instances from completed enrichment pods ==="
+echo "=== Collecting enriched instances ==="
 
 oc project "$NAMESPACE" 2>/dev/null || true
 
-# Map pod slug -> repo full name (same as enrichment)
-declare -A SLUG_TO_REPO
-SLUG_TO_REPO=(
-  [argoproj-argo-cd]="argoproj/argo-cd"
-  [containers-image]="containers/image"
-  [containers-podman]="containers/podman"
-  [containers-storage]="containers/storage"
-  [coreos-go-oidc]="coreos/go-oidc"
-  [cri-o-cri-o]="cri-o/cri-o"
-  [grpc-grpc-go]="grpc/grpc-go"
-  [kubernetes-kubernetes]="kubernetes/kubernetes"
-  [moby-moby]="moby/moby"
-  [open-telemetry-opentelemetry-go]="open-telemetry/opentelemetry-go"
-  [openshift-cluster-version-operator]="openshift/cluster-version-operator"
-  [openshift-installer]="openshift/installer"
-  [openshift-oc]="openshift/oc"
-  [openshift-origin]="openshift/origin"
-  [openshift-router]="openshift/router"
-  [operator-framework-operator-lifecycle-manager]="operator-framework/operator-lifecycle-manager"
-  [operator-framework-operator-registry]="operator-framework/operator-registry"
-  [prometheus-prometheus]="prometheus/prometheus"
-  [rook-rook]="rook/rook"
-  [stolostron-hypershift]="stolostron/hypershift"
-  [tektoncd-pipeline]="tektoncd/pipeline"
-  [thanos-io-thanos]="thanos-io/thanos"
-)
-
-# Find completed enrichment pods and extract their output
-enrichment_pods=$(oc get pods -l component=enrichment -n "$NAMESPACE" \
-  --field-selector=status.phase=Succeeded \
-  --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null | sort || true)
-
-if [ -z "$enrichment_pods" ]; then
-  # Fall back to extracting from enrichment job logs (completed jobs)
-  echo "No succeeded enrichment pods found, trying job logs..."
-  enrichment_pods=$(oc get pods -l component=enrichment -n "$NAMESPACE" \
-    --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null | sort || true)
-fi
-
-extracted=0
-for pod in $enrichment_pods; do
-  # Extract enriched instance from logs (the enrichment job cats the output)
-  oc logs "$pod" -n "$NAMESPACE" 2>/dev/null \
-    | sed -n '/=== RESULTS ===/,$ p' \
-    | tail -n +2 \
-    | grep '^{' >> "$TMPDIR/all-enriched.jsonl" 2>/dev/null || true
-  extracted=$((extracted + 1))
-done
+# Collect enrichment results (handles pod GC by grabbing logs early)
+bash k8s/collect-results.sh enrichment "$TMPDIR/all-enriched.jsonl"
 
 if [ ! -f "$TMPDIR/all-enriched.jsonl" ] || [ ! -s "$TMPDIR/all-enriched.jsonl" ]; then
   echo "No enriched instances found. Are enrichment jobs complete?"
@@ -86,7 +40,7 @@ with open('$TMPDIR/all-enriched.jsonl') as f:
 " > "$TMPDIR/deduped.jsonl" 2>/dev/null || true
 
 total=$(wc -l < "$TMPDIR/deduped.jsonl" | tr -d ' ')
-echo "Found $total unique enriched instances (from $extracted pods)"
+echo "Found $total unique enriched instances"
 
 # Get existing validation jobs to skip
 existing=$(oc get jobs -l component=validation -n "$NAMESPACE" \
