@@ -94,6 +94,7 @@ class SwebenchFactoryCeo(BaseInstalledAgent):
 
         # Factory CLI via uv — install from the current commit when
         # FACTORY_GIT_REF is set (CI passes the PR sha), otherwise main.
+        # TODO (rohan): rollback to main branch once PR 1040 on remote-factory goes in
         await self.exec_as_agent(
             environment,
             command=(
@@ -106,7 +107,7 @@ class SwebenchFactoryCeo(BaseInstalledAgent):
                 '  uv tool install "remote-factory @ git+https://github.com/akashgit/remote-factory.git@${REF}"; '
                 "else "
                 "  uv tool install "
-                "'remote-factory @ git+https://github.com/akashgit/remote-factory.git'; "
+                "'remote-factory @ git+https://github.com/akashgit/remote-factory.git@ra/fix-1037/workflow-discovery'; "
                 "fi && "
                 "which factory"
             ),
