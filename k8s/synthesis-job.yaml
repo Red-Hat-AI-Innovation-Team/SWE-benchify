@@ -30,7 +30,7 @@ spec:
                 --repo /tmp/repo \
                 --language go \
                 --output-dir /output \
-                --model sonnet \
+                --model opus \
                 --yield-only \
                 --max-mutations 200 \
                 --max-files 500 \
@@ -45,8 +45,8 @@ spec:
               value: "global"
             - name: ANTHROPIC_VERTEX_PROJECT_ID
               value: "itpc-gcp-ai-eng-claude"
-            - name: ANTHROPIC_DEFAULT_SONNET_MODEL
-              value: "claude-sonnet-4-6"
+            - name: ANTHROPIC_DEFAULT_OPUS_MODEL
+              value: "claude-opus-4-6"
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: "/var/secrets/gcp/key.json"
           resources:
