@@ -145,6 +145,10 @@ class SwebenchFactoryCeo(BaseInstalledAgent):
             if val and var not in env:
                 env[var] = val
 
+        # When creds file is mounted into the container, point at the mounted path
+        if env.get("CLAUDE_CODE_USE_VERTEX") and not env.get("GOOGLE_APPLICATION_CREDENTIALS"):
+            env["GOOGLE_APPLICATION_CREDENTIALS"] = "/tmp/gcp-creds.json"
+
         env = {k: v for k, v in env.items() if v}
 
         # Create Claude Code config directories
@@ -202,6 +206,16 @@ class SwebenchFactoryCeo(BaseInstalledAgent):
             env=env,
         )
 
+        # Copy custom workflow into factory's discovery path
+        await self.exec_as_agent(
+            environment,
+            command=(
+                "mkdir -p ~/.factory/workflows && "
+                "cp /tmp/my_swebench.py ~/.factory/workflows/my_swebench.py"
+            ),
+            env=env,
+        )
+
         # Write task instruction to a file
         await self.exec_as_agent(
             environment,
@@ -214,7 +228,7 @@ class SwebenchFactoryCeo(BaseInstalledAgent):
             environment,
             command=(
                 'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"; '
-                'factory workflow run swebench . '
+                'factory workflow run my_swebench . '
                 '2>&1 </dev/null | tee /logs/agent/factory-ceo.txt'
                 '; exit 0'
             ),

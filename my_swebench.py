@@ -24,7 +24,7 @@ from factory.workflow.primitives import (
 )
 
 meta = {
-    "name": "swebench",
+    "name": "my_swebench",
     "description": (
         "SWE-bench benchmark mode — minimal 4-node pipeline for solving "
         "GitHub issues in containerized evaluation. study → builder → "
