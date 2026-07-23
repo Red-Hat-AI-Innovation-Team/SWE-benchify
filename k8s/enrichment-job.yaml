@@ -31,6 +31,16 @@ spec:
                 --model opus
               echo "=== RESULTS ==="
               cat /output/enriched.jsonl
+              RESULT=$(cat /output/enriched.jsonl | head -1)
+              if [ -n "$RESULT" ]; then
+                TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+                ESCAPED=$(echo "$RESULT" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read().strip()))")
+                curl -sk -X PATCH \
+                  -H "Authorization: Bearer $TOKEN" \
+                  -H "Content-Type: application/merge-patch+json" \
+                  -d "{\"metadata\":{\"annotations\":{\"result\":$ESCAPED}}}" \
+                  "https://kubernetes.default.svc/apis/batch/v1/namespaces/${NAMESPACE}/jobs/enrich-${INSTANCE_SLUG}"
+              fi
           env:
             - name: CLAUDE_CODE_USE_VERTEX
               value: "1"

@@ -101,8 +101,8 @@ print(d.get('instance_id', ''), d.get('repo', ''))
     -n "$NAMESPACE"
 
   # Launch validation job
-  export REPO_FULL="$repo_full" INSTANCE_SLUG="$instance_slug" IMAGE="$IMAGE" LANGUAGE="$LANGUAGE"
-  envsubst < k8s/validation-job.yaml | oc apply -n "$NAMESPACE" -f -
+  export REPO_FULL="$repo_full" INSTANCE_SLUG="$instance_slug" IMAGE="$IMAGE" LANGUAGE="$LANGUAGE" NAMESPACE="$NAMESPACE"
+  envsubst '${REPO_FULL} ${INSTANCE_SLUG} ${IMAGE} ${LANGUAGE} ${NAMESPACE}' < k8s/validation-job.yaml | oc apply -n "$NAMESPACE" -f -
   launched=$((launched + 1))
   echo "Launched: validate-$instance_slug ($repo_full)"
 

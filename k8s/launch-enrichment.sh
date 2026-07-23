@@ -124,8 +124,8 @@ print(d['instance_id'], d['repo'])
     -n "$NAMESPACE"
 
   # Launch enrichment job
-  export REPO_FULL="$repo_full" INSTANCE_SLUG="$instance_slug" IMAGE="$IMAGE"
-  envsubst < k8s/enrichment-job.yaml | oc apply -n "$NAMESPACE" -f -
+  export REPO_FULL="$repo_full" INSTANCE_SLUG="$instance_slug" IMAGE="$IMAGE" NAMESPACE="$NAMESPACE"
+  envsubst '${REPO_FULL} ${INSTANCE_SLUG} ${IMAGE} ${NAMESPACE}' < k8s/enrichment-job.yaml | oc apply -n "$NAMESPACE" -f -
   launched=$((launched + 1))
   echo "Launched: enrich-$instance_slug ($repo_full)"
 
