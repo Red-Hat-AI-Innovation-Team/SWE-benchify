@@ -141,12 +141,14 @@ if os.environ.get("CLAUDE_CODE_USE_VERTEX") == "1":
         "sonnet": os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-6"),
         "haiku": os.environ.get("ANTHROPIC_DEFAULT_HAIKU_MODEL", "claude-haiku-4-5"),
         "opus": os.environ.get("ANTHROPIC_DEFAULT_OPUS_MODEL", "claude-opus-4-6"),
+        "fable": os.environ.get("ANTHROPIC_DEFAULT_FABLE_MODEL", "claude-fable-5"),
     }
 else:
     MODEL_MAP: dict[str, str] = {
         "sonnet": "claude-sonnet-4-20250514",
         "haiku": "claude-haiku-4-5-20251001",
         "opus": "claude-opus-4-20250514",
+        "fable": "claude-fable-5-20250514",
     }
 
 DATASET_PATH = os.environ.get(

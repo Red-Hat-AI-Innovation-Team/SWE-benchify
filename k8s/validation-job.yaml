@@ -31,7 +31,17 @@ spec:
                 --output /output \
                 --repo-dir /tmp/testbed \
                 --language ${LANGUAGE} \
-                --test-timeout 300
+                --test-timeout 300 2>&1 | tee /tmp/validation.log
+              RESULT_LINE=$(grep '^RESULT: ' /tmp/validation.log | tail -1 | sed 's/^RESULT: //')
+              if [ -n "$RESULT_LINE" ]; then
+                TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+                ESCAPED=$(echo "$RESULT_LINE" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read().strip()))")
+                curl -sk -X PATCH \
+                  -H "Authorization: Bearer $TOKEN" \
+                  -H "Content-Type: application/merge-patch+json" \
+                  -d "{\"metadata\":{\"annotations\":{\"result\":$ESCAPED}}}" \
+                  "https://kubernetes.default.svc/apis/batch/v1/namespaces/${NAMESPACE}/jobs/validate-${INSTANCE_SLUG}"
+              fi
               echo "=== VALIDATION COMPLETE ==="
           resources:
             requests:
