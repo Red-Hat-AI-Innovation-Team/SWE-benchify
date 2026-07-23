@@ -1,0 +1,301 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: eval-${INSTANCE_SLUG}
+  labels:
+    app: swebenchify
+    component: eval
+    model: ${MODEL}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  template:
+    metadata:
+      labels:
+        app: swebenchify
+        component: eval
+        model: ${MODEL}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: evaluator
+          image: ${IMAGE}
+          imagePullPolicy: Always
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -eo pipefail
+              export HOME=/tmp GOPATH=/tmp/go GOMODCACHE=/tmp/go/mod
+
+              python3 << 'EVALSCRIPT'
+              import json, subprocess, re, os, sys, shlex
+              from pathlib import Path
+
+              inst = json.loads(open('/input/instance.jsonl').read())
+              repo = inst['repo']
+              base_commit = inst['base_commit']
+              instance_id = inst['instance_id']
+              problem = inst['problem_statement']
+              gold_patch = inst['patch']
+              test_patch = inst['test_patch']
+              f2p = inst['FAIL_TO_PASS']
+              p2p = inst['PASS_TO_PASS']
+              if isinstance(f2p, str): f2p = json.loads(f2p)
+              if isinstance(p2p, str): p2p = json.loads(p2p)
+
+              # Derive test command from test_patch
+              seen = {}
+              for line in test_patch.splitlines():
+                  if not line.startswith('diff --git'): continue
+                  parts = line.split()
+                  if len(parts) < 4: continue
+                  p = parts[3]
+                  p = p[2:] if p.startswith('b/') else p
+                  pp = Path(p).parts
+                  if len(pp) <= 1:
+                      top, pkg = '.', './...'
+                  else:
+                      top = pp[0]
+                      rel = str(Path(*pp[1:-1])) if len(pp) > 2 else '.'
+                      pkg = f'./{rel}' if rel != '.' else './...'
+                  seen.setdefault(top, [])
+                  if pkg not in seen[top]: seen[top].append(pkg)
+              if not seen:
+                  test_cmd = 'go test -v -count=1 -timeout 300s ./...'
+              else:
+                  cmds = []
+                  for root, pkgs in seen.items():
+                      ps = ' '.join(pkgs)
+                      if root == '.':
+                          cmds.append(f'go test -v -count=1 -timeout 300s {ps}')
+                      else:
+                          cmds.append(f'(cd {shlex.quote(root)} && go test -v -count=1 -timeout 300s {ps})')
+                  test_cmd = ' && '.join(cmds)
+
+              print(f'Instance: {instance_id}', flush=True)
+              print(f'Repo: {repo}', flush=True)
+              print(f'Test command: {test_cmd}', flush=True)
+
+              def run(cmd, **kw):
+                  return subprocess.run(cmd, shell=True, capture_output=True, text=True, **kw)
+
+              # --- Phase 1: Clone and set up ---
+              # base_commit is synthetic (created locally during synthesis) — use merge_commit
+              # which is the real repo commit in the fixed state, then reverse-apply to introduce bug
+              merge_commit = inst.get('merge_commit', '')
+              checkout_ref = merge_commit if merge_commit else base_commit
+
+              r = run(f'git clone https://github.com/{repo}.git /tmp/testbed', timeout=600)
+              if r.returncode != 0:
+                  print(f'FATAL: clone failed: {r.stderr[:200]}', flush=True)
+                  sys.exit(1)
+              r = run(f'git checkout {checkout_ref}', cwd='/tmp/testbed')
+              if r.returncode != 0:
+                  # Fallback: try base_commit, then default branch
+                  r = run(f'git checkout {base_commit}', cwd='/tmp/testbed')
+                  if r.returncode != 0:
+                      print(f'WARNING: checkout failed for both {checkout_ref[:12]} and {base_commit[:12]}, using default branch', flush=True)
+              run('git config --global --add safe.directory /tmp/testbed')
+
+              # Introduce the bug (reverse-apply gold patch)
+              with open('/tmp/gold.patch', 'w') as f: f.write(gold_patch)
+              r = run('git apply --reverse /tmp/gold.patch', cwd='/tmp/testbed')
+              if r.returncode == 0:
+                  print('Bug introduced via reverse-apply', flush=True)
+              else:
+                  r = run('git apply --reverse --3way /tmp/gold.patch', cwd='/tmp/testbed')
+                  if r.returncode == 0:
+                      print('Bug introduced via reverse-apply --3way', flush=True)
+                  else:
+                      # Bug might already be baked in — probe with forward apply
+                      r2 = run('git apply /tmp/gold.patch', cwd='/tmp/testbed')
+                      if r2.returncode == 0:
+                          print('Bug already baked in, resetting...', flush=True)
+                          run('git checkout .', cwd='/tmp/testbed')
+                          run('git clean -fd', cwd='/tmp/testbed')
+                      else:
+                          print(f'WARNING: Could not introduce bug: {r.stderr[:200]}', flush=True)
+
+              run('go mod download', cwd='/tmp/testbed', timeout=300)
+
+              # Save pre-agent state for later diff
+              # Use subprocess directly for reliability
+              subprocess.run(['git', 'add', '-A'], cwd='/tmp/testbed', capture_output=True)
+              subprocess.run(['git', 'commit', '-m', 'pre-agent buggy state', '--allow-empty'],
+                           cwd='/tmp/testbed', capture_output=True,
+                           env={**os.environ, 'GIT_AUTHOR_NAME': 'eval', 'GIT_AUTHOR_EMAIL': 'eval@test',
+                                'GIT_COMMITTER_NAME': 'eval', 'GIT_COMMITTER_EMAIL': 'eval@test'})
+              r = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd='/tmp/testbed', capture_output=True, text=True)
+              pre_agent_ref = r.stdout.strip()
+              print(f'Pre-agent ref: {pre_agent_ref[:12]}', flush=True)
+              # Verify no unstaged changes remain
+              r = subprocess.run(['git', 'status', '--short'], cwd='/tmp/testbed', capture_output=True, text=True)
+              if r.stdout.strip():
+                  print(f'WARNING: uncommitted after pre-agent commit: {r.stdout.strip()[:200]}', flush=True)
+              else:
+                  print('Pre-agent state committed cleanly', flush=True)
+
+              # --- Phase 2: Run agent ---
+              prompt = f"""You are a software engineer fixing a bug in {repo}.
+
+              The repository is checked out at /tmp/testbed. There are failing tests that demonstrate the bug.
+
+              ## Problem
+              {problem}
+
+              ## Instructions
+              1. Read and understand the problem described above.
+              2. Find the relevant source code (do NOT modify test files).
+              3. Fix the bug so the failing tests pass.
+              4. Verify your fix by running: {test_cmd}
+
+              Do NOT modify any files in test directories or any files ending in _test.go.
+              Focus on making the minimal change needed to fix the described issue."""
+
+              with open('/tmp/agent_prompt.txt', 'w') as f: f.write(prompt)
+
+              print('=== AGENT START ===', flush=True)
+              with open('/tmp/agent.log', 'w') as logf:
+                  proc = subprocess.Popen(
+                      'cat /tmp/agent_prompt.txt | claude --model claude-haiku-4-5 --print '
+                      '--max-turns 30 '
+                      '--allowedTools "Bash(description:*),Read,Edit,Write" '
+                      '--allow-dangerously-skip-permissions',
+                      shell=True, cwd='/tmp/testbed',
+                      stdout=logf, stderr=subprocess.STDOUT
+                  )
+                  try:
+                      proc.wait(timeout=1800)
+                  except subprocess.TimeoutExpired:
+                      proc.kill()
+                      print('Agent timed out after 1800s', flush=True)
+              agent_output = open('/tmp/agent.log').read()
+              print(agent_output[-2000:], flush=True)
+              print('=== AGENT END ===', flush=True)
+
+              # --- Phase 3: Capture agent patch ---
+              # Capture all changes since pre-agent state (working tree + staged + committed)
+              # First add any unstaged changes
+              run('git add -A', cwd='/tmp/testbed')
+              r = run(f'git diff --cached {pre_agent_ref}', cwd='/tmp/testbed')
+              agent_patch = r.stdout or ''
+              if not agent_patch.strip():
+                  # Check committed changes too
+                  r = run(f'git diff {pre_agent_ref}..HEAD', cwd='/tmp/testbed')
+                  agent_patch = r.stdout or ''
+              with open('/tmp/agent_patch.diff', 'w') as f: f.write(agent_patch)
+              print(f'Agent patch: {len(agent_patch.splitlines())} lines', flush=True)
+
+              # --- Phase 4: Grade ---
+              # Anti-reward-hacking: revert test file modifications
+              test_patterns = [r'_test\.go$', r'(^|/)tests?/', r'(^|/)e2e/', r'(^|/)testing/', r'(^|/)testdata/']
+              combined = re.compile('|'.join(test_patterns))
+              r = run('git diff --name-only', cwd='/tmp/testbed')
+              for f in r.stdout.strip().split('\n'):
+                  if f and combined.search(f):
+                      run(f'git checkout -- {shlex.quote(f)}', cwd='/tmp/testbed')
+              r = run('git ls-files --others --exclude-standard', cwd='/tmp/testbed')
+              for f in r.stdout.strip().split('\n'):
+                  if f and combined.search(f):
+                      try: os.remove(os.path.join('/tmp/testbed', f))
+                      except: pass
+
+              # Apply test patch
+              with open('/tmp/test.patch', 'w') as f: f.write(test_patch)
+              r = run('git apply --3way /tmp/test.patch', cwd='/tmp/testbed')
+              if r.returncode != 0:
+                  run('git apply /tmp/test.patch', cwd='/tmp/testbed')
+
+              # Run tests
+              r = run(test_cmd, cwd='/tmp/testbed', timeout=300)
+              test_output = r.stdout + '\n' + r.stderr
+              with open('/tmp/test_output.log', 'w') as f: f.write(test_output)
+
+              # Parse results — handle Go subtests with spaces/special chars
+              # Go format: "--- PASS: TestName (0.00s)" or "    --- PASS: TestName/SubTest (0.00s)"
+              results = {}
+              for line in test_output.split('\n'):
+                  m = re.match(r'\s*--- (PASS|FAIL): (.+?)\s+\(', line)
+                  if m:
+                      results[m.group(2)] = m.group(1).lower()
+
+              all_pass = True
+              for t in f2p:
+                  if results.get(t) != 'pass':
+                      all_pass = False
+                      break
+              if all_pass:
+                  for t in p2p:
+                      if results.get(t) == 'fail':
+                          all_pass = False
+                          break
+
+              resolved = all_pass and len(f2p) > 0
+              reward = 1 if resolved else 0
+
+              result = {
+                  'instance_id': instance_id,
+                  'model': 'haiku',
+                  'resolved': resolved,
+                  'reward': reward,
+                  'agent_patch': agent_patch,
+                  'test_results': results,
+                  'f2p_expected': f2p,
+                  'p2p_expected': p2p,
+                  'tests_passed': sum(1 for v in results.values() if v == 'pass'),
+                  'tests_failed': sum(1 for v in results.values() if v == 'fail'),
+              }
+              with open('/tmp/eval_result.json', 'w') as f:
+                  json.dump(result, f, ensure_ascii=True)
+
+              print(f'EVAL_RESULT: {json.dumps(result)}', flush=True)
+
+              # --- Phase 5: Persist as job annotation ---
+              token = open('/var/run/secrets/kubernetes.io/serviceaccount/token').read().strip()
+              slug = re.sub(r'[^a-z0-9-]', '-', instance_id.lower().replace('_', '-'))[:63].rstrip('-')
+              body = json.dumps({"metadata": {"annotations": {"result": json.dumps(result)}}})
+              with open('/tmp/annotation_body.json', 'w') as f: f.write(body)
+              r = run(
+                  f'curl -sk -X PATCH '
+                  f'-H "Authorization: Bearer {token}" '
+                  f'-H "Content-Type: application/merge-patch+json" '
+                  f'-d @/tmp/annotation_body.json '
+                  f'"https://kubernetes.default.svc/apis/batch/v1/namespaces/swebenchify/jobs/eval-{slug}"',
+                  timeout=30
+              )
+              if r.returncode != 0:
+                  print(f'Annotation write failed: {r.stderr[:200]}', flush=True)
+              print('=== EVAL COMPLETE ===', flush=True)
+              EVALSCRIPT
+          env:
+            - name: CLAUDE_CODE_USE_VERTEX
+              value: "1"
+            - name: CLOUD_ML_REGION
+              value: "global"
+            - name: ANTHROPIC_VERTEX_PROJECT_ID
+              value: "itpc-gcp-ai-eng-claude"
+            - name: ANTHROPIC_DEFAULT_HAIKU_MODEL
+              value: "claude-haiku-4-5"
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: "/var/secrets/gcp/key.json"
+          resources:
+            requests:
+              cpu: "1"
+              memory: 4Gi
+            limits:
+              cpu: "2"
+              memory: 8Gi
+          volumeMounts:
+            - name: input
+              mountPath: /input
+              readOnly: true
+            - name: gcp-creds
+              mountPath: /var/secrets/gcp
+              readOnly: true
+      volumes:
+        - name: input
+          configMap:
+            name: eval-input-${INSTANCE_SLUG}
+        - name: gcp-creds
+          secret:
+            secretName: vertex-credentials
