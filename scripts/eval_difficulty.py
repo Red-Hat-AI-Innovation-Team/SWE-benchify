@@ -186,6 +186,13 @@ async def _enrich_one(instance: dict, model: str) -> dict | None:
         log.warning("[local-enrich] %s — clone failed, skipping", iid)
         return None
 
+    # Save validated fields that enrich_instance() may clobber
+    preserved_fields = {}
+    for key in ("patch", "test_patch", "base_commit", "merge_commit",
+                "FAIL_TO_PASS", "PASS_TO_PASS"):
+        if key in instance:
+            preserved_fields[key] = instance[key]
+
     log.info("[local-enrich] %s — running enrichment (model=%s)", iid, model)
     try:
         result = await enrich_instance(instance, repo_path, model=model)
@@ -196,6 +203,10 @@ async def _enrich_one(instance: dict, model: str) -> dict | None:
     if result is None:
         log.warning("[local-enrich] %s — enrichment returned None (screening failed)", iid)
         return None
+
+    # Restore original validated fields — only keep the new problem_statement
+    for key, value in preserved_fields.items():
+        result[key] = value
 
     log.info("[local-enrich] %s — enrichment succeeded", iid)
     return result
