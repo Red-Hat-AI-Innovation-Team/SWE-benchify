@@ -3201,33 +3201,16 @@ async def _bug_to_symptom(
     bug_description: str,
     file_path: str = '',
     model: str = "sonnet",
-    difficulty: str = 'normal',
 ) -> str:
     """Convert a code-level bug description to a user-facing symptom.
 
     Strips technical details (operator names, variable names, condition
     specifics) and returns only what a user would observe.
-
-    When difficulty='misdirect', the symptom includes plausible-but-wrong
-    specifics that send the solver toward the wrong code path.
     """
     file_context = ''
     if file_path:
         module = Path(file_path).stem
         file_context = f'\nContext: this affects the {module} area. Do NOT use the word "{module}", any filename, or any package name in the symptom — describe user-observable behavior only.'
-
-    misdirection_rule = ''
-    if difficulty == 'misdirect' and file_path:
-        fp = Path(file_path)
-        actual_module = fp.stem
-        parent_pkg = fp.parent.name if fp.parent.name else ''
-        misdirection_rule = f"""- MISDIRECTION (important): Include 1-2 plausible-but-wrong specifics to make the report sound authoritative but misleading:
-  (a) Name a plausible-but-WRONG function or component as the suspected cause. Pick something that sounds related to the bug area but is NOT where the fix goes. For example, if the bug is in serialize(), mention "I think this is in deserialize()" or "the issue seems to be in the validation layer". Do NOT name the actual buggy function/module "{actual_module}".
-  (b) Suggest a plausible-but-INCORRECT root cause theory, like "this might be related to a recent refactor of the caching layer" or "possibly a race condition in the connection pool" — something that sounds reasonable but points away from the real bug (a logic error).
-  (c) Mention one true-but-IRRELEVANT observation as a red herring, like "I also noticed that debug logging is more verbose than usual" or "the config reload seems slower lately" — something real but unrelated to the actual bug.
-  The misdirection should point AWAY from the {parent_pkg}/{actual_module} area — toward sibling modules, upstream/downstream components, or infrastructure concerns.
-  Make it sound like a confident developer's educated guess that happens to be wrong.
-"""
 
     prompt = f"""Convert this developer-level bug description into a symptom that a user filing a bug report would describe. The reporter does NOT know which function or file is broken — they only know what behavior they observed.
 
@@ -3240,7 +3223,7 @@ Rules:
 - Do NOT describe the code mechanism — describe what the system does wrong
 - Prefer framing as a violated expectation or semantic inconsistency: "X should reject Y but doesn't", "A happens when B is expected", "Z silently does nothing"
 - Add one level of indirection: instead of "function returns wrong type", write "processing Y produces incorrect output" or "operation silently fails"
-{misdirection_rule}
+
 Examples:
 - "split() instead of rsplit() in custom Sphinx role parser" → "certain cross-reference links fail to render in projects that use them"
 - "timedelta(minutes=value) should be timedelta(seconds=value)" → "operations that should time out quickly take much longer than expected, or vice versa"
@@ -4978,7 +4961,6 @@ async def _generate_incidental_changes(
     bug_spec: BugSpec,
     language: str,
     model: str = "sonnet",
-    cross_file: bool = False,
 ) -> list[tuple[str, str, str]]:
     """Generate small incidental changes a developer would naturally include."""
     root = Path(repo_path)
@@ -4996,15 +4978,8 @@ async def _generate_incidental_changes(
     if recent_issues:
         issues_note = f"\nReal issue/PR numbers from this repo's git history (use ONLY these if you reference any): {', '.join(recent_issues)}"
 
-    cross_file_note = ""
-    if cross_file:
-        bug_dir = str(Path(bug_spec.file).parent)
-        cross_file_note = f"""
-You MAY also suggest changes in sibling files within the same package/directory ({bug_dir}/). A developer fixing a bug often touches related files — updating a caller, adjusting a shared constant, or fixing a related edge case in a sibling module. At least one change SHOULD be in a different file from {bug_spec.file} if possible.
-"""
-
     prompt = f"""A bug fix is being applied to {bug_spec.file} in a {language} project. The fix addresses: {bug_spec.bug_description}
-{cross_file_note}
+
 Suggest 1-2 incidental changes that a developer would naturally include in the same commit. At least ONE must be FUNCTIONALLY RELEVANT — not just cosmetic. Examples ranked by preference:
 
 PREFERRED (functionally relevant):
@@ -5082,17 +5057,8 @@ Only suggest changes to files that actually exist in the repo. Keep changes smal
     for filepath, original, modified in changes:
         basename = Path(filepath).name
         if filepath != bug_file and basename not in _PROJECT_LEVEL:
-            if cross_file and _is_same_package(bug_file, filepath, language):
-                if any(excl in filepath for excl in _EXCLUDE_SUBSTR):
-                    logger.debug("Skipping cross-file incidental in excluded path %s", filepath)
-                    continue
-                exclude_patterns = _LANGUAGE_EXCLUDE_PATTERNS.get(language, [])
-                if any(pat.search(filepath) for pat in exclude_patterns):
-                    logger.debug("Skipping cross-file incidental in test/excluded file %s", filepath)
-                    continue
-            else:
-                logger.debug("Skipping incidental in unrelated file %s", filepath)
-                continue
+            logger.debug("Skipping incidental in unrelated file %s", filepath)
+            continue
         # Validate changelog entries describe the actual bug fix
         if basename in _PROJECT_LEVEL and bug_keywords:
             mod_words = {w.lower() for w in re.findall(r"[a-zA-Z_]\w{2,}", modified)}
@@ -5183,14 +5149,8 @@ async def enrich_instance(
     social_artifacts = _mine_social_artifacts(repo_path)
     social_context = _build_social_context(social_artifacts)
 
-    iid = instance.get('instance_id', 'unknown')
-    iid_hash = int(hashlib.sha256(iid.encode()).hexdigest()[:8], 16)
-    use_misdirect = (iid_hash % 100) < 40
-    symptom_difficulty = 'misdirect' if use_misdirect else 'normal'
-
     symptom = await _bug_to_symptom(
         bug_spec.bug_description, file_path=bug_spec.file, model=model,
-        difficulty=symptom_difficulty,
     )
     style_examples = _mine_issue_style_examples(repo_path)
     ctx = _collect_repo_context(repo_path)
@@ -5220,6 +5180,7 @@ async def enrich_instance(
             exc_info=True,
         )
 
+    iid = instance.get('instance_id', 'unknown')
     max_screen_attempts = 5
     for screen_attempt in range(max_screen_attempts):
         social_context = _build_social_context(social_artifacts)
@@ -5252,36 +5213,6 @@ async def enrich_instance(
     else:
         logger.info('  screening failed all %d attempts (independence or self-screen), discarding', max_screen_attempts)
         return None
-
-    patch = instance.get('patch', '')
-    patch_file_count = patch.count('diff --git ')
-    if patch_file_count == 1:
-        incidentals = await _generate_incidental_changes(
-            repo_path, bug_spec, pipeline['language'], model=model,
-            cross_file=True,
-        )
-        patched_files: set[str] = {bug_spec.file}
-        ctx = _collect_repo_context(repo_path)
-        real_issues = ctx.get("recent_issues", [])
-        root = Path(repo_path)
-        for inc_path, inc_original, inc_modified in incidentals:
-            if inc_path in patched_files:
-                continue
-            if inc_path.lower().endswith((".rst", ".md")):
-                inc_modified = _validate_rst_references(inc_modified, real_issues)
-            try:
-                inc_file = root / inc_path
-                inc_content = inc_file.read_text(encoding="utf-8", errors="replace")
-                if inc_original == "EMPTY":
-                    new_content = inc_content + "\n" + inc_modified
-                else:
-                    new_content = inc_content.replace(inc_original, inc_modified, 1)
-                if new_content != inc_content:
-                    patch += generate_patch(new_content, inc_content, inc_path)
-                    patched_files.add(inc_path)
-            except OSError:
-                continue
-        instance['patch'] = patch
 
     instance['problem_statement'] = problem_statement
     instance['test_patch'] = test_patch
