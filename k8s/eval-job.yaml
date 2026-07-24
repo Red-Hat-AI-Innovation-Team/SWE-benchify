@@ -252,15 +252,17 @@ spec:
 
               # --- Phase 5: Persist as job annotation ---
               token = open('/var/run/secrets/kubernetes.io/serviceaccount/token').read().strip()
-              slug = re.sub(r'[^a-z0-9-]', '-', instance_id.lower().replace('_', '-'))[:63].rstrip('-')
-              body = json.dumps({"metadata": {"annotations": {"result": json.dumps(result)}}})
+              job_name = 'eval-${INSTANCE_SLUG}'
+              ns = '${NAMESPACE}'
+              body = json.dumps({"metadata": {"annotations": {"result": json.dumps(result, ensure_ascii=True)}}})
               with open('/tmp/annotation_body.json', 'w') as f: f.write(body)
+              url = f'https://kubernetes.default.svc/apis/batch/v1/namespaces/{ns}/jobs/{job_name}'
               r = run(
                   f'curl -sk -X PATCH '
                   f'-H "Authorization: Bearer {token}" '
                   f'-H "Content-Type: application/merge-patch+json" '
                   f'-d @/tmp/annotation_body.json '
-                  f'"https://kubernetes.default.svc/apis/batch/v1/namespaces/swebenchify/jobs/eval-{slug}"',
+                  f'"{url}"',
                   timeout=30
               )
               if r.returncode != 0:
