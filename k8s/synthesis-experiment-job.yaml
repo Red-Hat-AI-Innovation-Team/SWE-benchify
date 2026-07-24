@@ -1,0 +1,81 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: synth-exp-${REPO_SLUG}
+  labels:
+    app: swebenchify
+    component: synthesis-exp
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  template:
+    metadata:
+      labels:
+        app: swebenchify
+        component: synthesis-exp
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: synthesizer
+          image: ${IMAGE}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              export GIT_AUTHOR_NAME=swebenchify GIT_AUTHOR_EMAIL=swebenchify@noreply
+              export GIT_COMMITTER_NAME=swebenchify GIT_COMMITTER_EMAIL=swebenchify@noreply
+              export GOPATH=/tmp/go GOMODCACHE=/tmp/go/mod HOME=/tmp
+              git clone --depth=1 https://github.com/${REPO_FULL}.git /tmp/repo
+              swebenchify synthesize \
+                --repo /tmp/repo \
+                --language go \
+                --output-dir /output \
+                --model opus \
+                --yield-only \
+                --max-mutations ${MAX_MUTATIONS} \
+                --max-files 20 \
+                --max-functions 5 \
+                --target-multiplier 8
+              echo "=== RESULTS ==="
+              cat /output/*-synthetic-candidates.jsonl
+              RESULTS=$(cat /output/*-synthetic-candidates.jsonl)
+              if [ -n "$RESULTS" ]; then
+                TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+                ESCAPED=$(echo "$RESULTS" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read().strip()))")
+                curl -sk -X PATCH \
+                  -H "Authorization: Bearer $TOKEN" \
+                  -H "Content-Type: application/merge-patch+json" \
+                  -d "{\"metadata\":{\"annotations\":{\"result\":$ESCAPED}}}" \
+                  "https://kubernetes.default.svc/apis/batch/v1/namespaces/${NAMESPACE}/jobs/synth-exp-${REPO_SLUG}"
+              fi
+              echo "=== SYNTHESIS COMPLETE ==="
+          env:
+            - name: CLAUDE_CODE_USE_VERTEX
+              value: "1"
+            - name: CLOUD_ML_REGION
+              value: "global"
+            - name: ANTHROPIC_VERTEX_PROJECT_ID
+              value: "itpc-gcp-ai-eng-claude"
+            - name: ANTHROPIC_DEFAULT_OPUS_MODEL
+              value: "claude-opus-4-6"
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: "/var/secrets/gcp/key.json"
+          resources:
+            requests:
+              cpu: "1"
+              memory: 4Gi
+            limits:
+              cpu: "2"
+              memory: 8Gi
+          volumeMounts:
+            - name: output
+              mountPath: /output
+            - name: gcp-creds
+              mountPath: /var/secrets/gcp
+              readOnly: true
+      volumes:
+        - name: output
+          emptyDir: {}
+        - name: gcp-creds
+          secret:
+            secretName: vertex-credentials

@@ -1,13 +1,16 @@
-"""Difficulty eval — re-enrich + eval existing instances, measure Haiku failure rate.
+"""Difficulty eval — synthesize + enrich + validate + eval on OpenShift.
 
-Used by the remote-factory difficulty workflow via factory.md. Takes existing
-validated instances, re-enriches on OpenShift (injecting local synthesizer.py
-changes via ConfigMap overlay), then evals with Haiku on OpenShift.
+Used by remote-factory via factory.md. Runs the full pipeline on the cluster
+with a ConfigMap code overlay so synthesizer.py changes take effect without
+rebuilding the image.
+
+Pipeline: synthesis → enrichment → validation → eval (Haiku)
+Score = 0.7 × haiku_failure + 0.15 × diversity + 0.15 × 0.5
 
 Usage:
-    python3 scripts/eval_difficulty.py                    # 20 instances
+    python3 scripts/eval_difficulty.py                    # 10 instances, 1 repo
     python3 scripts/eval_difficulty.py --quick             # 5 instances
-    python3 scripts/eval_difficulty.py --n-instances 50    # Custom count
+    python3 scripts/eval_difficulty.py --n-instances 20    # Custom count
 """
 
 from __future__ import annotations
@@ -16,7 +19,6 @@ import argparse
 import json
 import logging
 import os
-import random
 import re
 import subprocess
 import sys
@@ -26,8 +28,11 @@ import time
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NAMESPACE = "swebenchify"
 IMAGE = "ghcr.io/red-hat-ai-innovation-team/swe-benchify/swebenchify-synthesis:streaming"
-INSTANCES_FILE = os.path.join(PROJECT_ROOT, "data/opus-final-valid.jsonl")
 SYNTHESIZER_PATH = os.path.join(PROJECT_ROOT, "src/swebenchify/synthesizer.py")
+
+EVAL_REPOS = [
+    {"slug": "grpc/grpc-go", "url": "https://github.com/grpc/grpc-go.git", "language": "go"},
+]
 
 log = logging.getLogger("eval_difficulty")
 log.setLevel(logging.DEBUG)
@@ -38,130 +43,69 @@ log.addHandler(_handler)
 
 # ── Cluster helpers ──────────────────────────────────────────────
 
-
 def oc(*args, timeout=120):
     r = subprocess.run(["oc"] + list(args), capture_output=True, text=True, timeout=timeout)
     return r
 
 
 def push_code_overlay(prefix):
-    """Upload local synthesizer.py as a ConfigMap so enrichment pods use modified code."""
     cm_name = f"synth-code-{prefix}"
     oc("delete", "configmap", cm_name, "-n", NAMESPACE)
     r = oc("create", "configmap", cm_name,
-           f"--from-file=synthesizer.py={SYNTHESIZER_PATH}",
-           "-n", NAMESPACE)
+           f"--from-file=synthesizer.py={SYNTHESIZER_PATH}", "-n", NAMESPACE)
     if r.returncode != 0:
-        log.error("Failed to create code overlay ConfigMap: %s", r.stderr[:200])
+        log.error("Failed to create code overlay: %s", r.stderr[:200])
         return None
     log.info("Pushed synthesizer.py as ConfigMap %s (%d bytes)",
              cm_name, os.path.getsize(SYNTHESIZER_PATH))
     return cm_name
 
 
-def launch_enrichment_jobs(instances, prefix="diff", code_cm=None):
-    """Launch enrichment jobs with optional code overlay."""
-    launched = 0
-    job_yaml = os.path.join(PROJECT_ROOT, "k8s/enrichment-job.yaml")
-
-    for inst in instances:
-        iid = inst.get("instance_id", "")
-        repo = inst.get("repo", "")
-        slug = re.sub(r"[^a-z0-9-]", "-", iid.lower().replace("_", "-"))[:40].rstrip("-")
-        job_slug = f"{prefix}-{slug}"
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
-            f.write(json.dumps(inst) + "\n")
-            tmpf = f.name
-
-        cm_name = f"enrich-input-{job_slug}"
-        oc("delete", "configmap", cm_name, "-n", NAMESPACE)
-        oc("create", "configmap", cm_name, f"--from-file=instances.jsonl={tmpf}", "-n", NAMESPACE)
-        os.unlink(tmpf)
-
-        env = os.environ.copy()
-        env["REPO_FULL"] = repo
-        env["INSTANCE_SLUG"] = job_slug
-        env["IMAGE"] = IMAGE
-        env["NAMESPACE"] = NAMESPACE
-
-        envsubst_vars = "${REPO_FULL} ${INSTANCE_SLUG} ${IMAGE} ${NAMESPACE}"
-
-        if code_cm:
-            # Render the YAML, then patch in the code overlay volume
-            r = subprocess.run(
-                f"envsubst '{envsubst_vars}' < {job_yaml}",
-                shell=True, capture_output=True, text=True, env=env,
-            )
-            patched = r.stdout
-            # Add volume mount for code overlay
-            patched = patched.replace(
-                "            - name: input\n              mountPath: /input\n              readOnly: true",
-                "            - name: input\n              mountPath: /input\n              readOnly: true\n"
-                "            - name: code-overlay\n              mountPath: /app/src/swebenchify/synthesizer.py\n"
-                "              subPath: synthesizer.py\n              readOnly: true",
-            )
-            patched = patched.replace(
-                "        - name: input\n          configMap:\n            name: enrich-input-",
-                f"        - name: code-overlay\n          configMap:\n            name: {code_cm}\n"
-                "        - name: input\n          configMap:\n            name: enrich-input-",
-            )
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as yf:
-                yf.write(patched)
-                yaml_path = yf.name
-            subprocess.run(f"oc apply -n {NAMESPACE} -f {yaml_path}",
-                          shell=True, capture_output=True)
-            os.unlink(yaml_path)
-        else:
-            subprocess.run(
-                f"envsubst '{envsubst_vars}' < {job_yaml} | oc apply -n {NAMESPACE} -f -",
-                shell=True, capture_output=True, env=env,
-            )
-        launched += 1
-
-    log.info("Launched %d enrichment jobs (prefix=%s, code_overlay=%s)",
-             launched, prefix, bool(code_cm))
-    return launched
+def inject_code_overlay(yaml_text, code_cm):
+    if not code_cm:
+        return yaml_text
+    overlay_mount = (
+        "            - name: code-overlay\n"
+        "              mountPath: /app/src/swebenchify/synthesizer.py\n"
+        "              subPath: synthesizer.py\n"
+        "              readOnly: true\n"
+    )
+    overlay_volume = (
+        f"        - name: code-overlay\n"
+        f"          configMap:\n"
+        f"            name: {code_cm}\n"
+    )
+    # Insert mount after the first volumeMounts entry
+    yaml_text = yaml_text.replace(
+        "          volumeMounts:\n",
+        f"          volumeMounts:\n{overlay_mount}",
+        1,
+    )
+    # Insert volume at the start of volumes list
+    yaml_text = yaml_text.replace(
+        "      volumes:\n",
+        f"      volumes:\n{overlay_volume}",
+        1,
+    )
+    return yaml_text
 
 
-def launch_eval_jobs(instances, prefix="diff"):
-    launched = 0
-    job_yaml = os.path.join(PROJECT_ROOT, "k8s/eval-job.yaml")
-    for inst in instances:
-        iid = inst.get("instance_id", "")
-        repo = inst.get("repo", "")
-        slug = re.sub(r"[^a-z0-9-]", "-", iid.lower().replace("_", "-"))[:40].rstrip("-")
-        job_slug = f"{prefix}-{slug}"
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
-            f.write(json.dumps(inst) + "\n")
-            tmpf = f.name
-
-        cm_name = f"eval-input-{job_slug}"
-        oc("delete", "configmap", cm_name, "-n", NAMESPACE)
-        oc("create", "configmap", cm_name, f"--from-file=instance.jsonl={tmpf}", "-n", NAMESPACE)
-        os.unlink(tmpf)
-
-        env = os.environ.copy()
-        env["REPO_FULL"] = repo
-        env["INSTANCE_SLUG"] = job_slug
-        env["IMAGE"] = IMAGE
-        env["NAMESPACE"] = NAMESPACE
-        env["LANGUAGE"] = "go"
-        env["MODEL"] = "haiku"
-
-        envsubst_vars = "${REPO_FULL} ${INSTANCE_SLUG} ${IMAGE} ${NAMESPACE} ${LANGUAGE} ${MODEL}"
-        subprocess.run(
-            f"envsubst '{envsubst_vars}' < {job_yaml} | oc apply -n {NAMESPACE} -f -",
-            shell=True, capture_output=True, env=env,
-        )
-        launched += 1
-
-    log.info("Launched %d eval jobs (prefix=%s)", launched, prefix)
-    return launched
+def launch_job(yaml_path, env_vars, code_cm=None):
+    envsubst_vars = " ".join(f"${{{k}}}" for k in env_vars)
+    env = {**os.environ, **env_vars}
+    r = subprocess.run(
+        f"envsubst '{envsubst_vars}' < {yaml_path}",
+        shell=True, capture_output=True, text=True, env=env,
+    )
+    rendered = inject_code_overlay(r.stdout, code_cm)
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        f.write(rendered)
+        tmp = f.name
+    subprocess.run(f"oc apply -n {NAMESPACE} -f {tmp}", shell=True, capture_output=True)
+    os.unlink(tmp)
 
 
-def wait_for_jobs(component, prefix="diff", timeout=1800):
+def wait_for_jobs(component, prefix, timeout=1800):
     deadline = time.time() + timeout
     while time.time() < deadline:
         r = oc("get", "jobs", "-l", f"component={component}", "-n", NAMESPACE, "--no-headers")
@@ -177,7 +121,7 @@ def wait_for_jobs(component, prefix="diff", timeout=1800):
         time.sleep(30)
 
 
-def collect_annotations(component, prefix="diff"):
+def collect_annotations(component, prefix):
     r = oc("get", "jobs", "-l", f"component={component}", "-n", NAMESPACE,
            "-o", "json", timeout=120)
     if r.returncode != 0:
@@ -189,76 +133,144 @@ def collect_annotations(component, prefix="diff"):
         if prefix not in name:
             continue
         result_str = job.get("metadata", {}).get("annotations", {}).get("result", "")
-        if result_str:
+        if not result_str:
+            continue
+        # Synthesis annotations are multi-line JSONL; enrichment/eval are single JSON
+        for line in result_str.strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
             try:
-                results.append(json.loads(result_str, strict=False))
+                results.append(json.loads(line, strict=False))
             except json.JSONDecodeError:
-                pass
+                continue
     return results
 
 
-def cleanup_jobs(component, prefix="diff"):
-    r = oc("get", "jobs", "-l", f"component={component}", "-n", NAMESPACE,
-           "--no-headers", "-o", "custom-columns=NAME:.metadata.name")
-    cm_prefix = "enrich" if component == "enrichment" else "eval"
-    for name in r.stdout.strip().split("\n"):
-        name = name.strip()
-        if name and prefix in name:
-            oc("delete", "job", name, "-n", NAMESPACE, "--wait=false")
-            job_suffix = name.replace(f"{cm_prefix.split('-')[0]}-", "", 1)
-            oc("delete", "configmap", f"{cm_prefix}-input-{job_suffix}", "-n", NAMESPACE)
+def cleanup_all(prefix, code_cm=None):
+    for component in ("synthesis-exp", "enrichment", "validation", "eval"):
+        r = oc("get", "jobs", "-l", f"component={component}", "-n", NAMESPACE,
+               "--no-headers", "-o", "custom-columns=NAME:.metadata.name")
+        for name in r.stdout.strip().split("\n"):
+            name = name.strip()
+            if name and prefix in name:
+                oc("delete", "job", name, "-n", NAMESPACE, "--wait=false")
+    r = oc("get", "configmaps", "-n", NAMESPACE, "--no-headers",
+           "-o", "custom-columns=NAME:.metadata.name")
+    for cm in r.stdout.strip().split("\n"):
+        cm = cm.strip()
+        if cm and prefix in cm:
+            oc("delete", "configmap", cm, "-n", NAMESPACE)
+    if code_cm:
+        oc("delete", "configmap", code_cm, "-n", NAMESPACE)
+
+
+def make_slug(instance_id, prefix, max_len=40):
+    slug = re.sub(r"[^a-z0-9-]", "-", instance_id.lower().replace("_", "-"))[:max_len].rstrip("-")
+    return f"{prefix}-{slug}"
 
 
 # ── Main eval ────────────────────────────────────────────────────
 
 
-def run_eval(n_instances=20, seed=None):
+def run_eval(n_instances=10, seed=None, repos=None):
+    repos = repos or EVAL_REPOS
     round_id = f"r{int(time.time()) % 100000}"
-    prefix = f"diff-{round_id}"
+    prefix = f"exp-{round_id}"
 
-    # ── Step 1: Load existing validated instances ──
-    if not os.path.isfile(INSTANCES_FILE):
-        print(json.dumps({"score": 0.0, "details": f"Missing {INSTANCES_FILE}"}))
+    # ── Step 1: Push code overlay ──
+    code_cm = push_code_overlay(prefix)
+
+    # ── Step 2: Synthesis on cluster ──
+    synth_yaml = os.path.join(PROJECT_ROOT, "k8s/synthesis-experiment-job.yaml")
+    for repo_cfg in repos:
+        repo_slug = repo_cfg["slug"]
+        repo_slug_k8s = repo_slug.replace("/", "-")
+        log.info("Launching synthesis for %s (%d mutations)...", repo_slug, n_instances)
+        launch_job(synth_yaml, {
+            "REPO_FULL": repo_slug,
+            "REPO_SLUG": f"{prefix}-{repo_slug_k8s}",
+            "IMAGE": IMAGE,
+            "NAMESPACE": NAMESPACE,
+            "MAX_MUTATIONS": str(n_instances),
+        }, code_cm)
+
+    wait_for_jobs("synthesis-exp", prefix, timeout=3600)
+    synth_results = collect_annotations("synthesis-exp", prefix)
+
+    # Fix repo/instance_id fields (synthesis outputs local/repo)
+    for d in synth_results:
+        old_repo = d.get("repo", "")
+        if old_repo == "local/repo" or "local" in old_repo:
+            d["repo"] = repos[0]["slug"]
+        old_id = d.get("instance_id", "")
+        if old_id.startswith("local__"):
+            num = old_id.rsplit("-", 1)[-1] if "-" in old_id else old_id
+            d["instance_id"] = f"{d['repo'].replace('/', '-')}-{num}"
+
+    log.info("Synthesis: %d yields", len(synth_results))
+    if not synth_results:
+        cleanup_all(prefix, code_cm)
+        print(json.dumps({"score": 0.0, "details": "No synthesis yields"}))
         return
 
-    all_instances = []
-    for line in open(INSTANCES_FILE):
-        try:
-            all_instances.append(json.loads(line.strip()))
-        except json.JSONDecodeError:
-            continue
+    # ── Step 3: Enrichment on cluster ──
+    log.info("Launching enrichment (%d instances)...", len(synth_results))
+    enrich_yaml = os.path.join(PROJECT_ROOT, "k8s/enrichment-job.yaml")
+    for inst in synth_results:
+        job_slug = make_slug(inst["instance_id"], prefix)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write(json.dumps(inst) + "\n")
+            tmpf = f.name
+        oc("delete", "configmap", f"enrich-input-{job_slug}", "-n", NAMESPACE)
+        oc("create", "configmap", f"enrich-input-{job_slug}",
+           f"--from-file=instances.jsonl={tmpf}", "-n", NAMESPACE)
+        os.unlink(tmpf)
+        launch_job(enrich_yaml, {
+            "REPO_FULL": inst["repo"],
+            "INSTANCE_SLUG": job_slug,
+            "IMAGE": IMAGE,
+            "NAMESPACE": NAMESPACE,
+        }, code_cm)
 
-    log.info("Loaded %d validated instances from %s", len(all_instances), INSTANCES_FILE)
-
-    rng = random.Random(seed)
-    sample = rng.sample(all_instances, min(n_instances, len(all_instances)))
-    log.info("Sampled %d instances for this round", len(sample))
-
-    # ── Step 2: Push code overlay and launch enrichment on cluster ──
-    code_cm = push_code_overlay(prefix)
-    log.info("Launching enrichment on cluster (%d instances)...", len(sample))
-    launch_enrichment_jobs(sample, prefix=prefix, code_cm=code_cm)
-    wait_for_jobs("enrichment", prefix=prefix, timeout=1800)
-    enrich_results = collect_annotations("enrichment", prefix=prefix)
-    log.info("Enrichment: %d/%d returned results", len(enrich_results), len(sample))
-
+    wait_for_jobs("enrichment", prefix, timeout=1800)
+    enrich_results = collect_annotations("enrichment", prefix)
+    log.info("Enrichment: %d/%d returned results", len(enrich_results), len(synth_results))
     if not enrich_results:
-        cleanup_jobs("enrichment", prefix=prefix)
-        if code_cm:
-            oc("delete", "configmap", code_cm, "-n", NAMESPACE)
+        cleanup_all(prefix, code_cm)
         print(json.dumps({"score": 0.0, "details": "No enrichment results"}))
         return
 
-    # ── Step 3: Prep enriched instances for eval ──
-    # Restore original patches/commits from the source instances (enrichment may change them)
-    original_by_id = {inst["instance_id"]: inst for inst in sample}
+    # ── Step 4: Validation on cluster ──
+    log.info("Launching validation (%d instances)...", len(enrich_results))
+    val_yaml = os.path.join(PROJECT_ROOT, "k8s/validation-job.yaml")
+    for inst in enrich_results:
+        job_slug = make_slug(inst.get("instance_id", ""), prefix)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write(json.dumps(inst) + "\n")
+            tmpf = f.name
+        oc("delete", "configmap", f"validate-input-{job_slug}", "-n", NAMESPACE)
+        oc("create", "configmap", f"validate-input-{job_slug}",
+           f"--from-file=instance.jsonl={tmpf}", "-n", NAMESPACE)
+        os.unlink(tmpf)
+        launch_job(val_yaml, {
+            "REPO_FULL": inst.get("repo", ""),
+            "INSTANCE_SLUG": job_slug,
+            "IMAGE": IMAGE,
+            "NAMESPACE": NAMESPACE,
+            "LANGUAGE": "go",
+        })
+
+    wait_for_jobs("validation", prefix, timeout=1800)
+    val_results = collect_annotations("validation", prefix)
+    valid_ids = {r["instance_id"] for r in val_results if r.get("status") == "valid"}
+    log.info("Validation: %d/%d valid", len(valid_ids), len(enrich_results))
+
+    # ── Step 5: Eval on cluster (Haiku) ──
     eval_instances = []
     for inst in enrich_results:
-        iid = inst.get("instance_id", "")
-        orig = original_by_id.get(iid, {})
-        for key in ("patch", "test_patch", "base_commit", "merge_commit", "FAIL_TO_PASS", "PASS_TO_PASS"):
-            if key in orig:
-                inst[key] = orig[key]
+        if inst.get("instance_id") not in valid_ids:
+            continue
         inst["version"] = "1.0"
         inst["repo_language"] = "go"
         if isinstance(inst.get("FAIL_TO_PASS"), list):
@@ -269,14 +281,36 @@ def run_eval(n_instances=20, seed=None):
             inst["hints_text"] = ""
         eval_instances.append(inst)
 
-    # ── Step 4: Launch eval on cluster ──
-    log.info("Launching eval on cluster (%d instances)...", len(eval_instances))
-    launch_eval_jobs(eval_instances, prefix=prefix)
-    wait_for_jobs("eval", prefix=prefix, timeout=3600)
-    eval_results = collect_annotations("eval", prefix=prefix)
+    if not eval_instances:
+        cleanup_all(prefix, code_cm)
+        print(json.dumps({"score": 0.0, "details": f"No valid instances (0/{len(enrich_results)})"}))
+        return
+
+    log.info("Launching eval (%d valid instances)...", len(eval_instances))
+    eval_yaml = os.path.join(PROJECT_ROOT, "k8s/eval-job.yaml")
+    for inst in eval_instances:
+        job_slug = make_slug(inst["instance_id"], prefix)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write(json.dumps(inst) + "\n")
+            tmpf = f.name
+        oc("delete", "configmap", f"eval-input-{job_slug}", "-n", NAMESPACE)
+        oc("create", "configmap", f"eval-input-{job_slug}",
+           f"--from-file=instance.jsonl={tmpf}", "-n", NAMESPACE)
+        os.unlink(tmpf)
+        launch_job(eval_yaml, {
+            "REPO_FULL": inst["repo"],
+            "INSTANCE_SLUG": job_slug,
+            "IMAGE": IMAGE,
+            "NAMESPACE": NAMESPACE,
+            "LANGUAGE": "go",
+            "MODEL": "haiku",
+        })
+
+    wait_for_jobs("eval", prefix, timeout=3600)
+    eval_results = collect_annotations("eval", prefix)
     log.info("Eval: %d/%d returned results", len(eval_results), len(eval_instances))
 
-    # ── Step 5: Compute scores ──
+    # ── Step 6: Compute scores ──
     n_eval = len(eval_results)
     n_resolved = sum(1 for r in eval_results if r.get("resolved"))
     haiku_failure = (n_eval - n_resolved) / n_eval if n_eval > 0 else 0.0
@@ -285,33 +319,26 @@ def run_eval(n_instances=20, seed=None):
     for inst in enrich_results:
         cat = inst.get("_pipeline", {}).get("bug_spec", {}).get("bug_category", "unknown")
         categories[cat] = categories.get(cat, 0) + 1
-    n_categories = len(categories)
-    diversity = min(1.0, n_categories / 5.0) if enrich_results else 0.0
+    diversity = min(1.0, len(categories) / 5.0) if enrich_results else 0.0
 
     score = 0.7 * haiku_failure + 0.15 * diversity + 0.15 * 0.5
 
-    # ── Step 6: Cleanup ──
-    cleanup_jobs("enrichment", prefix=prefix)
-    cleanup_jobs("eval", prefix=prefix)
-    if code_cm:
-        oc("delete", "configmap", code_cm, "-n", NAMESPACE)
+    # ── Step 7: Cleanup ──
+    cleanup_all(prefix, code_cm)
 
-    # ── Output ──
     result = {
         "score": round(score, 4),
         "haiku_failure": round(haiku_failure, 4),
         "diversity": round(diversity, 4),
-        "n_sampled": len(sample),
+        "n_yields": len(synth_results),
         "n_enriched": len(enrich_results),
+        "n_valid": len(valid_ids),
         "n_eval": n_eval,
         "n_resolved": n_resolved,
         "categories": categories,
         "per_instance": [
-            {
-                "instance_id": r.get("instance_id"),
-                "resolved": r.get("resolved"),
-                "patch_lines": len(r.get("agent_patch", "").strip().splitlines()),
-            }
+            {"instance_id": r.get("instance_id"), "resolved": r.get("resolved"),
+             "patch_lines": len(r.get("agent_patch", "").strip().splitlines())}
             for r in eval_results
         ],
     }
@@ -328,13 +355,18 @@ def run_eval(n_instances=20, seed=None):
 def main():
     parser = argparse.ArgumentParser(description="Difficulty eval for remote-factory")
     parser.add_argument("--quick", action="store_true", help="Quick mode (5 instances)")
-    parser.add_argument("--n-instances", type=int, default=20)
-    parser.add_argument("--seed", type=int, default=None, help="Random seed for sampling")
-    parser.add_argument("--role", type=str, default="generator", help="generator or discriminator")
+    parser.add_argument("--n-instances", type=int, default=10)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--repo", type=str, default=None)
+    parser.add_argument("--role", type=str, default="generator")
     args = parser.parse_args()
 
     n = 5 if args.quick else args.n_instances
-    run_eval(n_instances=n, seed=args.seed)
+    repos = EVAL_REPOS
+    if args.repo:
+        repos = [{"slug": args.repo, "url": f"https://github.com/{args.repo}.git", "language": "go"}]
+
+    run_eval(n_instances=n, seed=args.seed, repos=repos)
 
 
 if __name__ == "__main__":
