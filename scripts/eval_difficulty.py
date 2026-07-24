@@ -151,10 +151,15 @@ def _clone_repo(repo: str, base_commit: str) -> str | None:
             return repo_path
         subprocess.run(["rm", "-rf", repo_path], capture_output=True)
 
-    r = subprocess.run(
-        ["git", "clone", "--quiet", url, repo_path],
-        capture_output=True, text=True, timeout=300,
-    )
+    try:
+        r = subprocess.run(
+            ["git", "clone", "--quiet", url, repo_path],
+            capture_output=True, text=True, timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        log.warning("Clone timed out for %s, skipping", repo)
+        subprocess.run(["rm", "-rf", repo_path], capture_output=True)
+        return None
     if r.returncode != 0:
         log.error("Failed to clone %s: %s", repo, r.stderr.strip())
         return None
@@ -164,8 +169,7 @@ def _clone_repo(repo: str, base_commit: str) -> str | None:
         capture_output=True, text=True,
     )
     if r.returncode != 0:
-        log.error("Failed to checkout %s in %s: %s", base_commit, repo, r.stderr.strip())
-        return None
+        log.warning("base_commit %s unreachable in %s, using HEAD", base_commit, repo)
     return repo_path
 
 
