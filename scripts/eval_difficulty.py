@@ -181,19 +181,20 @@ def run_eval(n_instances=10, seed=None, repos=None):
     # ── Step 1: Push code overlay ──
     code_cm = push_code_overlay(prefix)
 
-    # ── Step 2: Synthesis on cluster ──
+    # ── Step 2: Synthesis on cluster (parallel — 1 mutation per job) ──
     synth_yaml = os.path.join(PROJECT_ROOT, "k8s/synthesis-experiment-job.yaml")
     for repo_cfg in repos:
         repo_slug = repo_cfg["slug"]
         repo_slug_k8s = repo_slug.replace("/", "-")
-        log.info("Launching synthesis for %s (%d mutations)...", repo_slug, n_instances)
-        launch_job(synth_yaml, {
-            "REPO_FULL": repo_slug,
-            "REPO_SLUG": f"{prefix}-{repo_slug_k8s}",
-            "IMAGE": IMAGE,
-            "NAMESPACE": NAMESPACE,
-            "MAX_MUTATIONS": str(n_instances),
-        }, code_cm)
+        log.info("Launching %d parallel synthesis jobs for %s...", n_instances, repo_slug)
+        for j in range(n_instances):
+            launch_job(synth_yaml, {
+                "REPO_FULL": repo_slug,
+                "REPO_SLUG": f"{prefix}-{repo_slug_k8s}-{j}",
+                "IMAGE": IMAGE,
+                "NAMESPACE": NAMESPACE,
+                "MAX_MUTATIONS": "1",
+            }, code_cm)
 
     wait_for_jobs("synthesis-exp", prefix, timeout=3600)
     synth_results = collect_annotations("synthesis-exp", prefix)

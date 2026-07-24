@@ -35,7 +35,7 @@ spec:
                 --max-mutations ${MAX_MUTATIONS} \
                 --max-files 20 \
                 --max-functions 5 \
-                --target-multiplier 8
+                --target-multiplier 3
               echo "=== RESULTS ==="
               cat /output/*-synthetic-candidates.jsonl
               RESULTS=$(cat /output/*-synthetic-candidates.jsonl)
