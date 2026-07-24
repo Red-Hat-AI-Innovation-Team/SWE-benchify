@@ -4,13 +4,9 @@ Transform GitHub repositories into SWE-bench-compatible benchmarks. Mines real p
 
 ## Goal
 
-Generate synthetic SWE-bench instances that:
-1. Pass structural validation (non-empty patches, test patches, and issue text with ≥2 changed lines)
-2. Produce patches that apply cleanly and pass F2P/P2P Docker validation (tests fail before fix, pass after)
-3. Are textually indistinguishable from real instances (Opus 4.6 judge evasion rate >50%)
-4. Exhibit diversity in bug types, affected files, and patch complexity across repos and languages (Python, Go, Java, Rust)
+Make synthetic SWE-bench instances HARDER for Claude Haiku to solve. We have 504 validated Go instances where Haiku currently resolves 79% — too easy. Iterate on the enrichment logic (problem statement generation, hints, framing) to increase the Haiku failure rate above 50% while keeping instances valid and realistic.
 
-Score = 0.7 × judge_evasion + 0.3 × diversity. Structural, F2P, and diversity failures gate the score to 0.0.
+Score = 0.7 × haiku_failure_rate + 0.15 × diversity + 0.15 × judge_evasion. Target: haiku_failure > 0.5.
 
 ## Language
 
@@ -37,12 +33,12 @@ python -m mypy ./
 
 ## Project Eval
 
-- name: synthetic_detectability
-  command: python3 scripts/eval_synthesizer.py
+- name: difficulty
+  command: python3 scripts/eval_difficulty.py
   parse: json
   weight: 1.0
   timeout: 3600
-  description: Multi-language eval (Python, Go, Java, Rust). Gates: structural → patch applies → diversity → F2P/P2P Docker → judge. Score = 0.7 × judge_evasion + 0.3 × diversity.
+  description: Re-enriches a sample of 20 existing Go instances on OpenShift, evals with Haiku, measures failure rate. Score = 0.7 × haiku_failure + 0.15 × diversity + 0.15 × judge_evasion.
 
 ## Eval Weights
 
@@ -52,15 +48,15 @@ python -m mypy ./
 
 ## adversarial
 
-- generator.eval_command: python3 scripts/eval_synthesizer.py --role generator
-- generator.metric_name: judge_evasion_score
-- generator.threshold: 0.4
-- generator.scope: src/swebenchify/, tests/
+- generator.eval_command: python3 scripts/eval_difficulty.py --role generator
+- generator.metric_name: haiku_failure
+- generator.threshold: 0.5
+- generator.scope: src/swebenchify/synthesizer.py
 - generator.timeout: 3600
-- discriminator.eval_command: python3 scripts/eval_synthesizer.py --role discriminator
-- discriminator.metric_name: detection_recall
-- discriminator.threshold: 0.8
-- discriminator.scope: scripts/eval_synthesizer.py
+- discriminator.eval_command: python3 scripts/eval_difficulty.py --role discriminator
+- discriminator.metric_name: haiku_failure
+- discriminator.threshold: 0.5
+- discriminator.scope: src/swebenchify/synthesizer.py
 - discriminator.timeout: 3600
 - hysteresis: 2
 - max_rounds: 30
