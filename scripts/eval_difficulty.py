@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -50,7 +51,9 @@ def launch_jobs(instances, component, job_yaml, prefix="diff"):
     for inst in instances:
         iid = inst.get("instance_id", "")
         repo = inst.get("repo", "")
-        slug = re.sub(r"[^a-z0-9-]", "-", iid.lower().replace("_", "-"))[:40].rstrip("-")
+        raw = re.sub(r"[^a-z0-9-]", "-", iid.lower().replace("_", "-"))
+        h = hashlib.sha256(iid.encode()).hexdigest()[:6]
+        slug = raw[:33].rstrip("-") + "-" + h
         job_slug = f"{prefix}-{slug}"
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
