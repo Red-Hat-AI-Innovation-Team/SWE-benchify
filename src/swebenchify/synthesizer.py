@@ -3208,17 +3208,25 @@ async def _bug_to_symptom(
     Strips technical details (operator names, variable names, condition
     specifics) and returns only what a user would observe.
 
-    When difficulty='hard', the symptom is described as manifesting in a
-    different layer/component than the fix location (symptom displacement).
+    When difficulty='misdirect', the symptom includes plausible-but-wrong
+    specifics that send the solver toward the wrong code path.
     """
     file_context = ''
     if file_path:
         module = Path(file_path).stem
         file_context = f'\nContext: this affects the {module} area. Do NOT use the word "{module}", any filename, or any package name in the symptom — describe user-observable behavior only.'
 
-    displacement_rule = ''
-    if difficulty == 'hard':
-        displacement_rule = """- CRITICAL: Describe the symptom as it appears to a user of a DIFFERENT module or feature that DEPENDS on the broken code — the reporter would not know which internal component is at fault. For example, if the bug is in serialization, describe the symptom as it appears in the HTTP response layer; if the bug is in a parser, describe how downstream consumers see corrupted data.
+    misdirection_rule = ''
+    if difficulty == 'misdirect' and file_path:
+        fp = Path(file_path)
+        actual_module = fp.stem
+        parent_pkg = fp.parent.name if fp.parent.name else ''
+        misdirection_rule = f"""- MISDIRECTION (important): Include 1-2 plausible-but-wrong specifics to make the report sound authoritative but misleading:
+  (a) Name a plausible-but-WRONG function or component as the suspected cause. Pick something that sounds related to the bug area but is NOT where the fix goes. For example, if the bug is in serialize(), mention "I think this is in deserialize()" or "the issue seems to be in the validation layer". Do NOT name the actual buggy function/module "{actual_module}".
+  (b) Suggest a plausible-but-INCORRECT root cause theory, like "this might be related to a recent refactor of the caching layer" or "possibly a race condition in the connection pool" — something that sounds reasonable but points away from the real bug (a logic error).
+  (c) Mention one true-but-IRRELEVANT observation as a red herring, like "I also noticed that debug logging is more verbose than usual" or "the config reload seems slower lately" — something real but unrelated to the actual bug.
+  The misdirection should point AWAY from the {parent_pkg}/{actual_module} area — toward sibling modules, upstream/downstream components, or infrastructure concerns.
+  Make it sound like a confident developer's educated guess that happens to be wrong.
 """
 
     prompt = f"""Convert this developer-level bug description into a symptom that a user filing a bug report would describe. The reporter does NOT know which function or file is broken — they only know what behavior they observed.
@@ -3232,7 +3240,7 @@ Rules:
 - Do NOT describe the code mechanism — describe what the system does wrong
 - Prefer framing as a violated expectation or semantic inconsistency: "X should reject Y but doesn't", "A happens when B is expected", "Z silently does nothing"
 - Add one level of indirection: instead of "function returns wrong type", write "processing Y produces incorrect output" or "operation silently fails"
-{displacement_rule}
+{misdirection_rule}
 Examples:
 - "split() instead of rsplit() in custom Sphinx role parser" → "certain cross-reference links fail to render in projects that use them"
 - "timedelta(minutes=value) should be timedelta(seconds=value)" → "operations that should time out quickly take much longer than expected, or vice versa"
@@ -5177,8 +5185,8 @@ async def enrich_instance(
 
     iid = instance.get('instance_id', 'unknown')
     iid_hash = int(hashlib.sha256(iid.encode()).hexdigest()[:8], 16)
-    use_displacement = (iid_hash % 100) < 30
-    symptom_difficulty = 'hard' if use_displacement else 'normal'
+    use_misdirect = (iid_hash % 100) < 40
+    symptom_difficulty = 'misdirect' if use_misdirect else 'normal'
 
     symptom = await _bug_to_symptom(
         bug_spec.bug_description, file_path=bug_spec.file, model=model,
