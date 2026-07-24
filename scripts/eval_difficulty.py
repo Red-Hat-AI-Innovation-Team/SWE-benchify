@@ -4,17 +4,20 @@ Used by the remote-factory difficulty workflow. Takes existing validated
 instances (data/opus-final-valid.jsonl), launches enrichment on OpenShift
 (picking up any code changes via rebuilt image), then evals with Haiku.
 
-Everything runs on the cluster — no local LLM calls.
+Everything runs on the cluster — no local LLM calls (unless --local-enrich).
 
 Usage:
     python3 scripts/eval_difficulty.py                    # 20 instances
     python3 scripts/eval_difficulty.py --quick             # 5 instances
     python3 scripts/eval_difficulty.py --n-instances 50    # Custom count
+    python3 scripts/eval_difficulty.py --local-enrich      # Enrich locally, eval on cluster
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -50,7 +53,9 @@ def launch_jobs(instances, component, job_yaml, prefix="diff"):
     for inst in instances:
         iid = inst.get("instance_id", "")
         repo = inst.get("repo", "")
-        slug = re.sub(r"[^a-z0-9-]", "-", iid.lower().replace("_", "-"))[:40].rstrip("-")
+        raw = re.sub(r"[^a-z0-9-]", "-", iid.lower().replace("_", "-"))
+        h = hashlib.sha256(iid.encode()).hexdigest()[:6]
+        slug = raw[:33].rstrip("-") + "-" + h
         job_slug = f"{prefix}-{slug}"
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
@@ -130,10 +135,100 @@ def cleanup_jobs(component, prefix="diff"):
             oc("delete", "configmap", f"{cm_prefix}-input-{job_suffix}", "-n", NAMESPACE)
 
 
+# ── Local enrichment ────────────────────────────────────────────
+
+
+def _clone_repo(repo: str, base_commit: str) -> str | None:
+    slug = repo.replace("/", "-")
+    repo_path = os.path.join("/tmp", slug)
+    url = f"https://github.com/{repo}.git"
+    if os.path.isdir(repo_path):
+        r = subprocess.run(
+            ["git", "-C", repo_path, "checkout", base_commit],
+            capture_output=True, text=True,
+        )
+        if r.returncode == 0:
+            return repo_path
+        subprocess.run(["rm", "-rf", repo_path], capture_output=True)
+
+    try:
+        r = subprocess.run(
+            ["git", "clone", "--quiet", url, repo_path],
+            capture_output=True, text=True, timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        log.warning("Clone timed out for %s, skipping", repo)
+        subprocess.run(["rm", "-rf", repo_path], capture_output=True)
+        return None
+    if r.returncode != 0:
+        log.error("Failed to clone %s: %s", repo, r.stderr.strip())
+        return None
+
+    r = subprocess.run(
+        ["git", "-C", repo_path, "checkout", base_commit],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        log.warning("base_commit %s unreachable in %s, using HEAD", base_commit, repo)
+    return repo_path
+
+
+async def _enrich_one(instance: dict, model: str) -> dict | None:
+    from swebenchify.synthesizer import enrich_instance
+
+    iid = instance.get("instance_id", "unknown")
+    repo = instance.get("repo", "")
+    base_commit = instance.get("base_commit", "")
+
+    log.info("[local-enrich] %s — cloning %s @ %s", iid, repo, base_commit[:8])
+    repo_path = _clone_repo(repo, base_commit)
+    if not repo_path:
+        log.warning("[local-enrich] %s — clone failed, skipping", iid)
+        return None
+
+    # Save validated fields that enrich_instance() may clobber
+    preserved_fields = {}
+    for key in ("patch", "test_patch", "base_commit", "merge_commit",
+                "FAIL_TO_PASS", "PASS_TO_PASS"):
+        if key in instance:
+            preserved_fields[key] = instance[key]
+
+    log.info("[local-enrich] %s — running enrichment (model=%s)", iid, model)
+    try:
+        result = await enrich_instance(instance, repo_path, model=model)
+    except Exception:
+        log.exception("[local-enrich] %s — enrichment failed", iid)
+        return None
+
+    if result is None:
+        log.warning("[local-enrich] %s — enrichment returned None (screening failed)", iid)
+        return None
+
+    # Restore original validated fields — only keep the new problem_statement
+    for key, value in preserved_fields.items():
+        result[key] = value
+
+    log.info("[local-enrich] %s — enrichment succeeded", iid)
+    return result
+
+
+def run_local_enrichment(instances: list[dict], model: str) -> list[dict]:
+    async def _run_all():
+        results = []
+        for i, inst in enumerate(instances, 1):
+            log.info("[local-enrich] Processing %d/%d", i, len(instances))
+            result = await _enrich_one(inst, model)
+            if result is not None:
+                results.append(result)
+        return results
+
+    return asyncio.run(_run_all())
+
+
 # ── Main eval ────────────────────────────────────────────────────
 
 
-def run_eval(n_instances=20, seed=None):
+def run_eval(n_instances=20, seed=None, local_enrich=False, enrich_model="opus"):
     round_id = f"r{int(time.time()) % 100000}"
     prefix = f"diff-{round_id}"
 
@@ -155,16 +250,22 @@ def run_eval(n_instances=20, seed=None):
     sample = rng.sample(all_instances, min(n_instances, len(all_instances)))
     log.info("Sampled %d instances for this round", len(sample))
 
-    # ── Step 2: Launch enrichment on cluster ──
-    log.info("Launching enrichment on cluster (%d instances)...", len(sample))
-    enrich_yaml = os.path.join(PROJECT_ROOT, "k8s/enrichment-job.yaml")
-    launch_jobs(sample, "enrichment", enrich_yaml, prefix=prefix)
-    wait_for_jobs("enrichment", prefix=prefix, timeout=1800)
-    enrich_results = collect_annotations("enrichment", prefix=prefix)
-    log.info("Enrichment: %d/%d returned results", len(enrich_results), len(sample))
+    # ── Step 2: Enrichment ──
+    if local_enrich:
+        log.info("Running LOCAL enrichment (%d instances, model=%s)...", len(sample), enrich_model)
+        enrich_results = run_local_enrichment(sample, model=enrich_model)
+        log.info("Local enrichment: %d/%d returned results", len(enrich_results), len(sample))
+    else:
+        log.info("Launching enrichment on cluster (%d instances)...", len(sample))
+        enrich_yaml = os.path.join(PROJECT_ROOT, "k8s/enrichment-job.yaml")
+        launch_jobs(sample, "enrichment", enrich_yaml, prefix=prefix)
+        wait_for_jobs("enrichment", prefix=prefix, timeout=1800)
+        enrich_results = collect_annotations("enrichment", prefix=prefix)
+        log.info("Enrichment: %d/%d returned results", len(enrich_results), len(sample))
 
     if not enrich_results:
-        cleanup_jobs("enrichment", prefix=prefix)
+        if not local_enrich:
+            cleanup_jobs("enrichment", prefix=prefix)
         print(json.dumps({"score": 0.0, "details": "No enrichment results"}))
         return
 
@@ -204,7 +305,8 @@ def run_eval(n_instances=20, seed=None):
     score = 0.7 * haiku_failure + 0.15 * diversity + 0.15 * 0.5
 
     # ── Step 6: Cleanup ──
-    cleanup_jobs("enrichment", prefix=prefix)
+    if not local_enrich:
+        cleanup_jobs("enrichment", prefix=prefix)
     cleanup_jobs("eval", prefix=prefix)
 
     # ── Output ──
@@ -242,10 +344,15 @@ def main():
     parser.add_argument("--n-instances", type=int, default=20)
     parser.add_argument("--seed", type=int, default=None, help="Random seed for sampling")
     parser.add_argument("--role", type=str, default="generator", help="generator or discriminator")
+    parser.add_argument("--local-enrich", action="store_true",
+                        help="Run enrichment locally using current code instead of on cluster")
+    parser.add_argument("--enrich-model", type=str, default="opus",
+                        help="Model to use for local enrichment (default: opus)")
     args = parser.parse_args()
 
     n = 5 if args.quick else args.n_instances
-    run_eval(n_instances=n, seed=args.seed)
+    run_eval(n_instances=n, seed=args.seed,
+             local_enrich=args.local_enrich, enrich_model=args.enrich_model)
 
 
 if __name__ == "__main__":
