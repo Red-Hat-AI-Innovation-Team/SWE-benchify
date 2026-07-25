@@ -29,6 +29,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NAMESPACE = "swebenchify"
 IMAGE = "ghcr.io/red-hat-ai-innovation-team/swe-benchify/swebenchify-synthesis:streaming"
 SYNTHESIZER_PATH = os.path.join(PROJECT_ROOT, "src/swebenchify/synthesizer.py")
+VALIDATE_SCRIPT_PATH = os.path.join(PROJECT_ROOT, "scripts/validate_and_prepare.py")
 
 EVAL_REPOS = [
     {"slug": "grpc/grpc-go", "url": "https://github.com/grpc/grpc-go.git", "language": "go"},
@@ -52,7 +53,9 @@ def push_code_overlay(prefix):
     cm_name = f"synth-code-{prefix}"
     oc("delete", "configmap", cm_name, "-n", NAMESPACE)
     r = oc("create", "configmap", cm_name,
-           f"--from-file=synthesizer.py={SYNTHESIZER_PATH}", "-n", NAMESPACE)
+           f"--from-file=synthesizer.py={SYNTHESIZER_PATH}",
+           f"--from-file=validate_and_prepare.py={VALIDATE_SCRIPT_PATH}",
+           "-n", NAMESPACE)
     if r.returncode != 0:
         log.error("Failed to create code overlay: %s", r.stderr[:200])
         return None
@@ -68,6 +71,10 @@ def inject_code_overlay(yaml_text, code_cm):
         "            - name: code-overlay\n"
         "              mountPath: /app/src/swebenchify/synthesizer.py\n"
         "              subPath: synthesizer.py\n"
+        "              readOnly: true\n"
+        "            - name: code-overlay\n"
+        "              mountPath: /app/scripts/validate_and_prepare.py\n"
+        "              subPath: validate_and_prepare.py\n"
         "              readOnly: true\n"
     )
     overlay_volume = (
@@ -260,7 +267,7 @@ def run_eval(n_instances=10, seed=None, repos=None):
             "IMAGE": IMAGE,
             "NAMESPACE": NAMESPACE,
             "LANGUAGE": "go",
-        })
+        }, code_cm)
 
     wait_for_jobs("validation", prefix, timeout=1800)
     val_results = collect_annotations("validation", prefix)
