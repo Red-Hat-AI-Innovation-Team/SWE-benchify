@@ -272,13 +272,22 @@ def run_eval(n_instances=10, seed=None, repos=None):
     wait_for_jobs("validation", prefix, timeout=1800)
     val_results = collect_annotations("validation", prefix)
     valid_ids = {r["instance_id"] for r in val_results if r.get("status") == "valid"}
+    val_by_id = {}
+    for vr in val_results:
+        vid = vr.get("instance_id")
+        if vid and vr.get("status") == "valid":
+            val_by_id[vid] = vr
     log.info("Validation: %d/%d valid", len(valid_ids), len(enrich_results))
 
     # ── Step 5: Eval on cluster (Haiku) ──
     eval_instances = []
     for inst in enrich_results:
-        if inst.get("instance_id") not in valid_ids:
+        iid = inst.get("instance_id")
+        if iid not in valid_ids:
             continue
+        vr = val_by_id.get(iid, {})
+        inst["FAIL_TO_PASS"] = vr.get("FAIL_TO_PASS", [])
+        inst["PASS_TO_PASS"] = vr.get("PASS_TO_PASS", [])
         inst["version"] = "1.0"
         inst["repo_language"] = "go"
         if isinstance(inst.get("FAIL_TO_PASS"), list):
