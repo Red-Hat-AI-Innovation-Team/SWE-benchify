@@ -100,6 +100,48 @@ def _clone_repo(repo_url: str, base_commit: str, dest: Path,
          cwd=dest)
 
 
+def _derive_test_command_from_output(test_output: str, repo_dir: Path) -> str | None:
+    """Parse _pipeline.test_output to derive a targeted Go test command.
+
+    Extracts test file names from lines like:
+        service_config_test.go:52: parseState ...
+    Then locates those files in the repo to derive package paths,
+    and extracts top-level test names from '--- FAIL: TestName' lines.
+    """
+    test_files: set[str] = set()
+    test_names: set[str] = set()
+
+    for line in test_output.splitlines():
+        m = re.search(r"\b(\w+_test\.go):\d+", line)
+        if m:
+            test_files.add(m.group(1))
+        m = re.match(r"\s*--- (?:FAIL|PASS): (\w+)", line)
+        if m:
+            test_names.add(m.group(1))
+
+    if not test_files:
+        return None
+
+    packages: set[str] = set()
+    for tf in test_files:
+        results = list(repo_dir.rglob(tf))
+        if results:
+            rel = results[0].parent.relative_to(repo_dir)
+            pkg = f"./{rel}" if str(rel) != "." else "./"
+            packages.add(pkg)
+
+    if not packages:
+        return None
+
+    pkg_str = " ".join(sorted(packages))
+    cmd = f"go test -v -count=1 -timeout 300s {pkg_str}"
+    if test_names:
+        run_pattern = "|".join(f"^{n}$" for n in sorted(test_names))
+        cmd += f" -run '{run_pattern}'"
+
+    return cmd
+
+
 def _fix_repo_field(raw: str) -> str:
     """Convert local path like 'data/yield-sweep-22/clones/grpc__grpc-go' to 'grpc/grpc-go'."""
     if "/" not in raw or raw.count("/") == 1:
@@ -145,6 +187,14 @@ def validate_instance(
 
     if language == "go":
         test_command = _build_go_test_command(test_patch)
+        if test_command == "go test -v -count=1 ./...":
+            pipeline_output = instance.get("_pipeline", {}).get("test_output", "")
+            if pipeline_output:
+                targeted = _derive_test_command_from_output(pipeline_output, repo_dir)
+                if targeted:
+                    print("  Narrowed './...' to targeted command from test_output",
+                          flush=True)
+                    test_command = targeted
     else:
         return {"instance_id": instance_id, "status": "error",
                 "error": f"Unsupported language: {language}"}
