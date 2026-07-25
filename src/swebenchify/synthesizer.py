@@ -2154,10 +2154,10 @@ Use a STRUCTURAL mutation that requires understanding the code's intent to fix:
 Do NOT make simple operator swaps or single-line deletions — the mutation must require reasoning about code structure to fix, not just pattern-matching the diff."""
 
     strategy_override = ""
-    if mutation_strategy == "caller_mutation":
-        strategy_override = "\nSTRATEGY: CALLER MUTATION (cross-function bug). Instead of mutating this function directly, find a HELPER FUNCTION that this function calls and mutate THAT. The test failure must appear when testing the original function, but the fix must be in the helper.\n\nFor example: if the target function calls validate_input(), mutate validate_input() so it returns True for invalid inputs. Tests of the target function will fail, but the fix is in validate_input().\n\nRequirements:\n- The mutation MUST be in a function that is CALLED BY the target, not in the target itself\n- The target function's code must appear UNCHANGED in the diff\n- The diff must show changes in the called helper function only\n- The failing tests must test the TARGET function (the caller), not the helper directly"
-    elif mutation_strategy == "guard_removal":
+    if mutation_strategy == "guard_removal":
         strategy_override = "\nFOCUS: Remove an entire guard clause block (3+ lines including the condition, body, and surrounding cleanup). Restructure the surrounding code to look clean without the guard — as if the developer determined the guard was unnecessary after a refactoring. Do NOT just delete lines — rewrite the area to flow naturally without the removed logic."
+    elif mutation_strategy == "caller_mutation":
+        strategy_override = "\nSTRATEGY: CALLER MUTATION (cross-function bug). Instead of mutating this function directly, find a HELPER FUNCTION that this function calls and mutate THAT. The test failure must appear when testing the original function, but the fix must be in the helper.\n\nFor example: if the target function calls validate_input(), mutate validate_input() so it returns True for invalid inputs. Tests of the target function will fail, but the fix is in validate_input().\n\nRequirements:\n- The mutation MUST be in a function that is CALLED BY the target, not in the target itself\n- The target function code must appear UNCHANGED in the diff\n- The diff must show changes in the called helper function only\n- The failing tests must test the TARGET function (the caller), not the helper directly"
     elif mutation_strategy == "return_corruption":
         strategy_override = "\nFOCUS: Restructure the function's return logic — consolidate multiple return paths into one, extract the return value computation into a variable, or convert early returns into an if-else chain. In the restructuring, introduce a logic error that causes the wrong value to be returned for certain inputs. The restructured code should look like a genuine cleanup."
 
@@ -5886,7 +5886,7 @@ async def synthesize_repo(
 
         # H2: Fall back to LLM introduce_bug (retry up to 2 times if patch too simple)
         # Each retry uses a progressively more aggressive structural mutation strategy
-        _retry_strategies = ["caller_mutation", "", "guard_removal", "return_corruption"]
+        _retry_strategies = ["", "guard_removal", "caller_mutation", "return_corruption"]
         # Skip targeted mutation for retries — it produces simple patches
         for attempt in range(4):
             if bug_spec is None:
@@ -5915,24 +5915,24 @@ async def synthesize_repo(
             )
 
             if mutated_content == original_content:
-                logger.warning('%s  Mutation could not be applied, retrying (%d/3)', pfx, attempt + 1)
+                logger.warning('%s  Mutation could not be applied, retrying (%d/2)', pfx, attempt + 1)
                 bug_spec = None
                 continue
 
             if not _validate_mutation_parses(mutated_content, language):
-                logger.warning('%s  Mutation does not parse (%s), retrying (%d/3)', pfx, language, attempt + 1)
+                logger.warning('%s  Mutation does not parse (%s), retrying (%d/2)', pfx, language, attempt + 1)
                 bug_spec = None
                 continue
 
             orig_stripped = [ln.strip() for ln in original_content.splitlines() if ln.strip()]
             mut_stripped = [ln.strip() for ln in mutated_content.splitlines() if ln.strip()]
             if orig_stripped == mut_stripped:
-                logger.warning('%s  Mutation is whitespace-only, retrying (%d/3)', pfx, attempt + 1)
+                logger.warning('%s  Mutation is whitespace-only, retrying (%d/2)', pfx, attempt + 1)
                 bug_spec = None
                 continue
 
             if _is_ast_equivalent(original_content, mutated_content, language):
-                logger.warning('%s  Mutation is semantically equivalent, retrying (%d/3)', pfx, attempt + 1)
+                logger.warning('%s  Mutation is semantically equivalent, retrying (%d/2)', pfx, attempt + 1)
                 bug_spec = None
                 continue
 
@@ -5945,16 +5945,16 @@ async def synthesize_repo(
                 break
 
             changed = _count_changed_lines(patch)
-            if changed >= 12 and len(patch) >= 600:
+            if changed >= 6 and len(patch) >= 300:
                 break
-            if attempt < 3:
+            if attempt < 2:
                 reason = []
-                if changed < 12:
-                    reason.append(f"{changed} changed lines < 12")
-                if len(patch) < 600:
-                    reason.append(f"{len(patch)} chars < 600")
+                if changed < 6:
+                    reason.append(f"{changed} changed lines < 6")
+                if len(patch) < 300:
+                    reason.append(f"{len(patch)} chars < 300")
                 logger.info(
-                    "%s  Patch too simple (%s), retrying (%d/3)",
+                    "%s  Patch too simple (%s), retrying (%d/2)",
                     pfx, ", ".join(reason), attempt + 1,
                 )
                 bug_spec = None
