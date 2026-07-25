@@ -5886,7 +5886,7 @@ async def synthesize_repo(
 
         # H2: Fall back to LLM introduce_bug (retry up to 2 times if patch too simple)
         # Each retry uses a progressively more aggressive structural mutation strategy
-        _retry_strategies = ["", "guard_removal", "caller_mutation", "return_corruption"]
+        _retry_strategies = ["caller_mutation", "", "guard_removal", "return_corruption"]
         # Skip targeted mutation for retries — it produces simple patches
         for attempt in range(4):
             if bug_spec is None:
@@ -5915,24 +5915,24 @@ async def synthesize_repo(
             )
 
             if mutated_content == original_content:
-                logger.warning('%s  Mutation could not be applied, retrying (%d/2)', pfx, attempt + 1)
+                logger.warning('%s  Mutation could not be applied, retrying (%d/3)', pfx, attempt + 1)
                 bug_spec = None
                 continue
 
             if not _validate_mutation_parses(mutated_content, language):
-                logger.warning('%s  Mutation does not parse (%s), retrying (%d/2)', pfx, language, attempt + 1)
+                logger.warning('%s  Mutation does not parse (%s), retrying (%d/3)', pfx, language, attempt + 1)
                 bug_spec = None
                 continue
 
             orig_stripped = [ln.strip() for ln in original_content.splitlines() if ln.strip()]
             mut_stripped = [ln.strip() for ln in mutated_content.splitlines() if ln.strip()]
             if orig_stripped == mut_stripped:
-                logger.warning('%s  Mutation is whitespace-only, retrying (%d/2)', pfx, attempt + 1)
+                logger.warning('%s  Mutation is whitespace-only, retrying (%d/3)', pfx, attempt + 1)
                 bug_spec = None
                 continue
 
             if _is_ast_equivalent(original_content, mutated_content, language):
-                logger.warning('%s  Mutation is semantically equivalent, retrying (%d/2)', pfx, attempt + 1)
+                logger.warning('%s  Mutation is semantically equivalent, retrying (%d/3)', pfx, attempt + 1)
                 bug_spec = None
                 continue
 
@@ -5945,16 +5945,16 @@ async def synthesize_repo(
                 break
 
             changed = _count_changed_lines(patch)
-            if changed >= 6 and len(patch) >= 300:
+            if changed >= 12 and len(patch) >= 600:
                 break
-            if attempt < 2:
+            if attempt < 3:
                 reason = []
-                if changed < 6:
-                    reason.append(f"{changed} changed lines < 6")
-                if len(patch) < 300:
-                    reason.append(f"{len(patch)} chars < 300")
+                if changed < 12:
+                    reason.append(f"{changed} changed lines < 12")
+                if len(patch) < 600:
+                    reason.append(f"{len(patch)} chars < 600")
                 logger.info(
-                    "%s  Patch too simple (%s), retrying (%d/2)",
+                    "%s  Patch too simple (%s), retrying (%d/3)",
                     pfx, ", ".join(reason), attempt + 1,
                 )
                 bug_spec = None
