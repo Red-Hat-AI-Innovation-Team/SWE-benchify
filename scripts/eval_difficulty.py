@@ -8,7 +8,7 @@ Pipeline: synthesis → enrichment → validation → eval (Haiku)
 Score = 0.7 × haiku_failure + 0.15 × diversity + 0.15 × 0.5
 
 Usage:
-    python3 scripts/eval_difficulty.py                    # 10 instances, 1 repo
+    python3 scripts/eval_difficulty.py                    # 10 instances × 6 repos = 60 total
     python3 scripts/eval_difficulty.py --quick             # 5 instances
     python3 scripts/eval_difficulty.py --n-instances 20    # Custom count
 """
@@ -32,7 +32,12 @@ SYNTHESIZER_PATH = os.path.join(PROJECT_ROOT, "src/swebenchify/synthesizer.py")
 VALIDATE_SCRIPT_PATH = os.path.join(PROJECT_ROOT, "scripts/validate_and_prepare.py")
 
 EVAL_REPOS = [
+    {"slug": "containers/image", "url": "https://github.com/containers/image.git", "language": "go"},
     {"slug": "grpc/grpc-go", "url": "https://github.com/grpc/grpc-go.git", "language": "go"},
+    {"slug": "openshift/router", "url": "https://github.com/openshift/router.git", "language": "go"},
+    {"slug": "containers/storage", "url": "https://github.com/containers/storage.git", "language": "go"},
+    {"slug": "tektoncd/pipeline", "url": "https://github.com/tektoncd/pipeline.git", "language": "go"},
+    {"slug": "operator-framework/operator-registry", "url": "https://github.com/operator-framework/operator-registry.git", "language": "go"},
 ]
 
 log = logging.getLogger("eval_difficulty")
