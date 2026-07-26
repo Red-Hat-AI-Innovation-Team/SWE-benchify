@@ -4,13 +4,17 @@ Used by remote-factory via factory.md. Runs the full pipeline on the cluster
 with a ConfigMap code overlay so synthesizer.py changes take effect without
 rebuilding the image.
 
-Pipeline: synthesis → enrichment → validation → eval (Haiku)
-Score = 0.7 × haiku_failure + 0.15 × diversity + 0.15 × 0.5
+Pipeline: synthesis → enrichment → validation → eval (configurable model)
+Score = 0.7 × model_failure + 0.15 × diversity + 0.15 × 0.5
 
 Usage:
-    python3 scripts/eval_difficulty.py                    # 10 instances × 6 repos = 60 total
-    python3 scripts/eval_difficulty.py --quick             # 5 instances
-    python3 scripts/eval_difficulty.py --n-instances 20    # Custom count
+    python3 scripts/eval_difficulty.py                                # 10 instances × 6 repos, haiku
+    python3 scripts/eval_difficulty.py --model sonnet                  # Use Sonnet for eval
+    python3 scripts/eval_difficulty.py --model opus                    # Use Opus for eval
+    python3 scripts/eval_difficulty.py --eval-only instances.jsonl     # Skip pipeline, eval only
+    python3 scripts/eval_difficulty.py --eval-only instances.jsonl --model sonnet  # Re-eval with Sonnet
+    python3 scripts/eval_difficulty.py --quick                         # 5 instances
+    python3 scripts/eval_difficulty.py --n-instances 20                # Custom count
 """
 
 from __future__ import annotations
@@ -39,6 +43,12 @@ EVAL_REPOS = [
     {"slug": "tektoncd/pipeline", "url": "https://github.com/tektoncd/pipeline.git", "language": "go"},
     {"slug": "operator-framework/operator-registry", "url": "https://github.com/operator-framework/operator-registry.git", "language": "go"},
 ]
+
+MODEL_MAP = {
+    "haiku": "claude-haiku-4-5",
+    "sonnet": "claude-sonnet-4-20250514",
+    "opus": "claude-opus-4-6",
+}
 
 log = logging.getLogger("eval_difficulty")
 log.setLevel(logging.DEBUG)
@@ -102,7 +112,7 @@ def inject_code_overlay(yaml_text, code_cm):
     return yaml_text
 
 
-def launch_job(yaml_path, env_vars, code_cm=None):
+def launch_job(yaml_path, env_vars, code_cm=None, model_id=None):
     envsubst_vars = " ".join(f"${{{k}}}" for k in env_vars)
     env = {**os.environ, **env_vars}
     r = subprocess.run(
@@ -110,6 +120,8 @@ def launch_job(yaml_path, env_vars, code_cm=None):
         shell=True, capture_output=True, text=True, env=env,
     )
     rendered = inject_code_overlay(r.stdout, code_cm)
+    if model_id:
+        rendered = rendered.replace("claude-haiku-4-5", model_id)
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
         f.write(rendered)
         tmp = f.name
@@ -185,9 +197,104 @@ def make_slug(instance_id, prefix, max_len=40):
 # ── Main eval ────────────────────────────────────────────────────
 
 
-def run_eval(n_instances=10, seed=None, repos=None):
+def _run_eval_only(eval_only_path, model, model_id, round_id):
+    prefix = f"ev-{model}-{round_id}"
+    eval_instances = []
+    with open(eval_only_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            inst = json.loads(line)
+            if isinstance(inst.get("FAIL_TO_PASS"), list):
+                inst["FAIL_TO_PASS"] = json.dumps(inst["FAIL_TO_PASS"])
+            if isinstance(inst.get("PASS_TO_PASS"), list):
+                inst["PASS_TO_PASS"] = json.dumps(inst["PASS_TO_PASS"])
+            inst.setdefault("hints_text", "")
+            inst.setdefault("version", "1.0")
+            inst.setdefault("repo_language", "go")
+            eval_instances.append(inst)
+    log.info("Eval-only: loaded %d instances from %s (model=%s)",
+             len(eval_instances), eval_only_path, model)
+    if not eval_instances:
+        print(json.dumps({"score": 0.0, "details": "No instances in eval-only input"}))
+        return
+
+    log.info("Launching eval (%d instances, model=%s)...", len(eval_instances), model)
+    eval_yaml = os.path.join(PROJECT_ROOT, "k8s/eval-job.yaml")
+    for inst in eval_instances:
+        job_slug = make_slug(inst["instance_id"], prefix)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write(json.dumps(inst) + "\n")
+            tmpf = f.name
+        oc("delete", "configmap", f"eval-input-{job_slug}", "-n", NAMESPACE)
+        oc("create", "configmap", f"eval-input-{job_slug}",
+           f"--from-file=instance.jsonl={tmpf}", "-n", NAMESPACE)
+        os.unlink(tmpf)
+        launch_job(eval_yaml, {
+            "REPO_FULL": inst["repo"],
+            "INSTANCE_SLUG": job_slug,
+            "IMAGE": IMAGE,
+            "NAMESPACE": NAMESPACE,
+            "LANGUAGE": "go",
+            "MODEL": model,
+        }, model_id=model_id)
+
+    wait_for_jobs("eval", prefix, timeout=3600)
+    eval_results = collect_annotations("eval", prefix)
+    log.info("Eval: %d/%d returned results", len(eval_results), len(eval_instances))
+
+    n_eval = len(eval_results)
+    n_resolved = sum(1 for r in eval_results if r.get("resolved"))
+    model_failure = (n_eval - n_resolved) / n_eval if n_eval > 0 else 0.0
+
+    categories = {}
+    for inst in eval_instances:
+        cat = inst.get("_pipeline", {}).get("bug_spec", {}).get("bug_category", "unknown")
+        categories[cat] = categories.get(cat, 0) + 1
+    diversity = min(1.0, len(categories) / 5.0)
+
+    score = 0.7 * model_failure + 0.15 * diversity + 0.15 * 0.5
+
+    cleanup_all(prefix)
+
+    result = {
+        "score": round(score, 4),
+        "model": model,
+        "model_failure": round(model_failure, 4),
+        "diversity": round(diversity, 4),
+        "n_yields": 0,
+        "n_enriched": 0,
+        "n_valid": len(eval_instances),
+        "n_eval": n_eval,
+        "n_resolved": n_resolved,
+        "categories": categories,
+        "eval_only_source": eval_only_path,
+        "per_instance": [
+            {"instance_id": r.get("instance_id"), "resolved": r.get("resolved"),
+             "patch_lines": len(r.get("agent_patch", "").strip().splitlines())}
+            for r in eval_results
+        ],
+    }
+    print(json.dumps(result))
+    log.info("Score=%.4f model_failure=%.4f diversity=%.4f (%d/%d resolved, model=%s)",
+             score, model_failure, diversity, n_resolved, n_eval, model)
+
+    results_dir = os.path.join(PROJECT_ROOT, ".factory", "reviews")
+    os.makedirs(results_dir, exist_ok=True)
+    with open(os.path.join(results_dir, "difficulty-eval-latest.json"), "w") as f:
+        json.dump(result, f, indent=2)
+
+
+def run_eval(n_instances=10, seed=None, repos=None, model="haiku", eval_only=None):
     repos = repos or EVAL_REPOS
     round_id = f"r{int(time.time()) % 100000}"
+    model_id = MODEL_MAP[model]
+
+    if eval_only:
+        _run_eval_only(eval_only, model, model_id, round_id)
+        return
+
     prefix = f"exp-{round_id}"
 
     # ── Step 1: Push code overlay ──
@@ -284,7 +391,7 @@ def run_eval(n_instances=10, seed=None, repos=None):
             val_by_id[vid] = vr
     log.info("Validation: %d/%d valid", len(valid_ids), len(enrich_results))
 
-    # ── Step 5: Eval on cluster (Haiku) ──
+    # ── Step 5: Eval on cluster ──
     eval_instances = []
     for inst in enrich_results:
         iid = inst.get("instance_id")
@@ -308,7 +415,16 @@ def run_eval(n_instances=10, seed=None, repos=None):
         print(json.dumps({"score": 0.0, "details": f"No valid instances (0/{len(enrich_results)})"}))
         return
 
-    log.info("Launching eval (%d valid instances)...", len(eval_instances))
+    results_dir = os.path.join(PROJECT_ROOT, ".factory", "reviews")
+    os.makedirs(results_dir, exist_ok=True)
+    instances_path = os.path.join(results_dir, f"validated-instances-{round_id}.jsonl")
+    with open(instances_path, "w") as f:
+        for inst in eval_instances:
+            f.write(json.dumps(inst) + "\n")
+    log.info("Saved %d validated instances to %s (reuse with --eval-only)",
+             len(eval_instances), instances_path)
+
+    log.info("Launching eval (%d valid instances, model=%s)...", len(eval_instances), model)
     eval_yaml = os.path.join(PROJECT_ROOT, "k8s/eval-job.yaml")
     for inst in eval_instances:
         job_slug = make_slug(inst["instance_id"], prefix)
@@ -325,8 +441,8 @@ def run_eval(n_instances=10, seed=None, repos=None):
             "IMAGE": IMAGE,
             "NAMESPACE": NAMESPACE,
             "LANGUAGE": "go",
-            "MODEL": "haiku",
-        })
+            "MODEL": model,
+        }, model_id=model_id)
 
     wait_for_jobs("eval", prefix, timeout=3600)
     eval_results = collect_annotations("eval", prefix)
@@ -335,7 +451,7 @@ def run_eval(n_instances=10, seed=None, repos=None):
     # ── Step 6: Compute scores ──
     n_eval = len(eval_results)
     n_resolved = sum(1 for r in eval_results if r.get("resolved"))
-    haiku_failure = (n_eval - n_resolved) / n_eval if n_eval > 0 else 0.0
+    model_failure = (n_eval - n_resolved) / n_eval if n_eval > 0 else 0.0
 
     categories = {}
     for inst in enrich_results:
@@ -343,14 +459,15 @@ def run_eval(n_instances=10, seed=None, repos=None):
         categories[cat] = categories.get(cat, 0) + 1
     diversity = min(1.0, len(categories) / 5.0) if enrich_results else 0.0
 
-    score = 0.7 * haiku_failure + 0.15 * diversity + 0.15 * 0.5
+    score = 0.7 * model_failure + 0.15 * diversity + 0.15 * 0.5
 
     # ── Step 7: Cleanup ──
     cleanup_all(prefix, code_cm)
 
     result = {
         "score": round(score, 4),
-        "haiku_failure": round(haiku_failure, 4),
+        "model": model,
+        "model_failure": round(model_failure, 4),
         "diversity": round(diversity, 4),
         "n_yields": len(synth_results),
         "n_enriched": len(enrich_results),
@@ -365,11 +482,9 @@ def run_eval(n_instances=10, seed=None, repos=None):
         ],
     }
     print(json.dumps(result))
-    log.info("Score=%.4f haiku_failure=%.4f diversity=%.4f (%d/%d resolved)",
-             score, haiku_failure, diversity, n_resolved, n_eval)
+    log.info("Score=%.4f model_failure=%.4f diversity=%.4f (%d/%d resolved, model=%s)",
+             score, model_failure, diversity, n_resolved, n_eval, model)
 
-    results_dir = os.path.join(PROJECT_ROOT, ".factory", "reviews")
-    os.makedirs(results_dir, exist_ok=True)
     with open(os.path.join(results_dir, "difficulty-eval-latest.json"), "w") as f:
         json.dump(result, f, indent=2)
 
@@ -381,6 +496,11 @@ def main():
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--repo", type=str, default=None)
     parser.add_argument("--role", type=str, default="generator")
+    parser.add_argument("--model", type=str, default="haiku",
+                        choices=list(MODEL_MAP.keys()),
+                        help="Claude model for eval (default: haiku)")
+    parser.add_argument("--eval-only", type=str, default=None, metavar="JSONL_FILE",
+                        help="Skip synthesis/enrichment/validation; eval from a JSONL file of validated instances")
     args = parser.parse_args()
 
     n = 5 if args.quick else args.n_instances
@@ -388,7 +508,7 @@ def main():
     if args.repo:
         repos = [{"slug": args.repo, "url": f"https://github.com/{args.repo}.git", "language": "go"}]
 
-    run_eval(n_instances=n, seed=args.seed, repos=repos)
+    run_eval(n_instances=n, seed=args.seed, repos=repos, model=args.model, eval_only=args.eval_only)
 
 
 if __name__ == "__main__":
