@@ -2640,6 +2640,7 @@ def test_build_social_context_empty_artifacts() -> None:
 
 def test_bug_to_symptom_includes_file_context() -> None:
     """When file_path is provided, the prompt anchors the symptom to that module."""
+    from collections import namedtuple
     from unittest.mock import MagicMock
     from unittest.mock import patch as mock_patch
 
@@ -2647,11 +2648,12 @@ def test_bug_to_symptom_includes_file_context() -> None:
 
     captured_prompts: list[str] = []
     _RM = _synth.ResultMessage
+    _TextBlock = namedtuple("_TextBlock", ["text"])
 
     async def fake_query(prompt: str, options: object = None):
         captured_prompts.append(prompt)
         msg = MagicMock(spec=_RM)
-        msg.result = "logging breaks under heavy load"
+        msg.content = [_TextBlock(text="logging breaks under heavy load")]
         yield msg
 
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
@@ -2670,6 +2672,7 @@ def test_bug_to_symptom_includes_file_context() -> None:
 
 def test_bug_to_symptom_no_file_path() -> None:
     """Without file_path, no file context appears in the prompt."""
+    from collections import namedtuple
     from unittest.mock import MagicMock
     from unittest.mock import patch as mock_patch
 
@@ -2677,11 +2680,12 @@ def test_bug_to_symptom_no_file_path() -> None:
 
     captured_prompts: list[str] = []
     _RM = _synth.ResultMessage
+    _TextBlock = namedtuple("_TextBlock", ["text"])
 
     async def fake_query(prompt: str, options: object = None):
         captured_prompts.append(prompt)
         msg = MagicMock(spec=_RM)
-        msg.result = "broken parsing"
+        msg.content = [_TextBlock(text="broken parsing")]
         yield msg
 
     with mock_patch("swebenchify.synthesizer.query", fake_query), \
