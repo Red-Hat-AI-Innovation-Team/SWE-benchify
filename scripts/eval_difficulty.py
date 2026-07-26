@@ -46,7 +46,7 @@ EVAL_REPOS = [
 
 MODEL_MAP = {
     "haiku": "claude-haiku-4-5",
-    "sonnet": "claude-sonnet-4-20250514",
+    "sonnet": "claude-sonnet-4-5",
     "opus": "claude-opus-4-6",
 }
 
