@@ -172,26 +172,113 @@ def collect_annotations(component, prefix):
 
 
 def cleanup_all(prefix, code_cm=None):
-    for component in ("synthesis-exp", "enrichment", "validation", "eval"):
-        r = oc("get", "jobs", "-l", f"component={component}", "-n", NAMESPACE,
-               "--no-headers", "-o", "custom-columns=NAME:.metadata.name")
-        for name in r.stdout.strip().split("\n"):
-            name = name.strip()
-            if name and prefix in name:
-                oc("delete", "job", name, "-n", NAMESPACE, "--wait=false")
-    r = oc("get", "configmaps", "-n", NAMESPACE, "--no-headers",
-           "-o", "custom-columns=NAME:.metadata.name")
-    for cm in r.stdout.strip().split("\n"):
-        cm = cm.strip()
-        if cm and prefix in cm:
-            oc("delete", "configmap", cm, "-n", NAMESPACE)
+    components = {"synthesis-exp", "enrichment", "validation", "eval"}
+    r = oc("get", "jobs", "-n", NAMESPACE, "-o", "json", timeout=120)
+    if r.returncode == 0:
+        data = json.loads(r.stdout)
+        to_delete = [
+            job["metadata"]["name"]
+            for job in data.get("items", [])
+            if prefix in job["metadata"]["name"]
+            and job.get("metadata", {}).get("labels", {}).get("component", "") in components
+        ]
+        if to_delete:
+            oc("delete", "jobs", *to_delete, "-n", NAMESPACE, "--wait=false")
+
+    cms_to_delete = []
+    r = oc("get", "configmaps", "-n", NAMESPACE, "-o", "json", timeout=120)
+    if r.returncode == 0:
+        data = json.loads(r.stdout)
+        cms_to_delete = [
+            cm["metadata"]["name"]
+            for cm in data.get("items", [])
+            if prefix in cm["metadata"]["name"]
+        ]
     if code_cm:
-        oc("delete", "configmap", code_cm, "-n", NAMESPACE)
+        cms_to_delete.append(code_cm)
+    if cms_to_delete:
+        oc("delete", "configmaps", *cms_to_delete, "-n", NAMESPACE)
 
 
 def make_slug(instance_id, prefix, max_len=40):
     slug = re.sub(r"[^a-z0-9-]", "-", instance_id.lower().replace("_", "-"))[:max_len].rstrip("-")
     return f"{prefix}-{slug}"
+
+
+def local_patch_prefilter(instances):
+    """Reject instances whose patches won't apply, avoiding unnecessary cluster jobs."""
+    if not instances:
+        return instances
+
+    clone_cache = {}
+    passed = []
+    skipped = 0
+
+    for inst in instances:
+        repo = inst.get("repo", "")
+        patch = inst.get("patch", "")
+        commit = inst.get("merge_commit") or inst.get("base_commit", "")
+        instance_id = inst.get("instance_id", "unknown")
+
+        if not patch or not commit:
+            passed.append(inst)
+            continue
+
+        if repo not in clone_cache:
+            repo_slug = repo.replace("/", "-")
+            repo_dir = os.path.join("/tmp", f"prefilter-{repo_slug}")
+            if not os.path.isdir(os.path.join(repo_dir, ".git")):
+                repo_url = f"https://github.com/{repo}.git"
+                log.info("Pre-filter: cloning %s...", repo)
+                r = subprocess.run(
+                    ["git", "clone", "--quiet", repo_url, repo_dir],
+                    capture_output=True, text=True, timeout=300,
+                )
+                if r.returncode != 0:
+                    log.warning("Pre-filter: clone failed for %s, passing instances through", repo)
+                    clone_cache[repo] = None
+                    passed.append(inst)
+                    continue
+            clone_cache[repo] = repo_dir
+
+        local_dir = clone_cache.get(repo)
+        if local_dir is None:
+            passed.append(inst)
+            continue
+
+        subprocess.run(
+            ["git", "fetch", "--quiet", "origin", commit],
+            capture_output=True, text=True, cwd=local_dir, timeout=60,
+        )
+        r = subprocess.run(
+            ["git", "checkout", "--quiet", "--force", commit],
+            capture_output=True, text=True, cwd=local_dir, timeout=30,
+        )
+        if r.returncode != 0:
+            log.warning("Pre-filter: checkout %s failed for %s, passing through", commit[:8], instance_id)
+            passed.append(inst)
+            continue
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".patch", delete=False) as pf:
+            pf.write(patch)
+            patch_file = pf.name
+
+        try:
+            r = subprocess.run(
+                ["git", "apply", "--check", "--reverse", patch_file],
+                capture_output=True, text=True, cwd=local_dir, timeout=30,
+            )
+        finally:
+            os.unlink(patch_file)
+
+        if r.returncode == 0:
+            passed.append(inst)
+        else:
+            skipped += 1
+            log.info("Pre-filter: skipped %s (patch won't apply at %s)", instance_id, commit[:8])
+
+    log.info("Pre-filter: %d/%d passed, %d skipped", len(passed), len(instances), skipped)
+    return passed
 
 
 # ── Main eval ────────────────────────────────────────────────────
@@ -359,6 +446,13 @@ def run_eval(n_instances=10, seed=None, repos=None, model="haiku", eval_only=Non
     if not enrich_results:
         cleanup_all(prefix, code_cm)
         print(json.dumps({"score": 0.0, "details": "No enrichment results"}))
+        return
+
+    # ── Step 3.5: Local pre-filter ──
+    enrich_results = local_patch_prefilter(enrich_results)
+    if not enrich_results:
+        cleanup_all(prefix, code_cm)
+        print(json.dumps({"score": 0.0, "details": "No instances passed local pre-filter"}))
         return
 
     # ── Step 4: Validation on cluster ──
