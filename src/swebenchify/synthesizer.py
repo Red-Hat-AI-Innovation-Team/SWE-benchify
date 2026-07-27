@@ -5889,7 +5889,7 @@ async def synthesize_repo(
 
         # H2: Fall back to LLM introduce_bug (retry up to 2 times if patch too simple)
         # Each retry uses a progressively more aggressive structural mutation strategy
-        _retry_strategies = ['', 'guard_removal', 'caller_mutation', 'return_corruption']
+        _retry_strategies = ["", "guard_removal", "caller_mutation", "return_corruption"]
         # Skip targeted mutation for retries — it produces simple patches
         for attempt in range(4):
             if bug_spec is None:
