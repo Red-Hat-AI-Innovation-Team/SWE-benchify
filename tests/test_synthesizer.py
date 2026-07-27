@@ -90,7 +90,9 @@ def test_find_mutation_targets_python(tmp_path: Path) -> None:
             cleaned = name.strip()
             parts = cleaned.split()
             first = parts[0]
-            return f"Hello, {first}!"
+            last = parts[-1] if len(parts) > 1 else ""
+            full = first + " " + last
+            return f"Hello, {full.strip()}!"
 
         def add(a, b):
             if a is None:
@@ -99,7 +101,9 @@ def test_find_mutation_targets_python(tmp_path: Path) -> None:
                 raise TypeError("b is None")
             result = a + b
             validated = int(result)
-            return validated
+            clamped = max(validated, 0)
+            final = min(clamped, 1000)
+            return final
     """))
 
     targets = find_mutation_targets(str(tmp_path), "python")
@@ -122,7 +126,9 @@ def test_find_mutation_targets_python_nested(tmp_path: Path) -> None:
                     raise TypeError("b is None")
                 result = a * b
                 validated = int(result)
-                return validated
+                clamped = max(validated, 0)
+                final = min(clamped, 1000)
+                return final
     """))
 
     targets = find_mutation_targets(str(tmp_path), "python")
@@ -148,7 +154,11 @@ def test_find_mutation_targets_go(tmp_path: Path) -> None:
                 return -1
             }
             result := a + b
-            return result
+            clamped := result
+            if clamped > 1000 {
+                clamped = 1000
+            }
+            return clamped
         }
 
         func (s *Server) Handle(req Request) Response {
@@ -160,7 +170,9 @@ def test_find_mutation_targets_go(tmp_path: Path) -> None:
             if validated == nil {
                 return Response{}
             }
-            return Response{Data: validated}
+            cleaned := s.clean(validated)
+            formatted := s.format(cleaned)
+            return Response{Data: formatted}
         }
     """))
 
@@ -185,7 +197,9 @@ def test_find_mutation_targets_rust(tmp_path: Path) -> None:
                 return -1;
             }
             let result = x + y;
-            result
+            let clamped = if result > 1000 { 1000 } else { result };
+            let validated = clamped.abs();
+            clamped
         }
 
         fn helper(s: &str) -> String {
@@ -196,7 +210,9 @@ def test_find_mutation_targets_rust(tmp_path: Path) -> None:
             let lower = trimmed.to_lowercase();
             let owned = lower.to_string();
             let validated = owned.clone();
-            validated
+            let prefixed = format!("val: {}", validated);
+            let cleaned = prefixed.trim().to_string();
+            cleaned
         }
     """))
 
@@ -215,6 +231,10 @@ def test_find_mutation_targets_rust_async(tmp_path: Path) -> None:
             }
             let client = Client::new();
             let resp = client.get(url).await?;
+            let status = resp.status();
+            if !status.is_success() {
+                return Err(Error::new("bad status"));
+            }
             let body = resp.text().await?;
             let trimmed = body.trim().to_string();
             Ok(trimmed)
@@ -242,7 +262,9 @@ def test_find_mutation_targets_java(tmp_path: Path) -> None:
                     throw new IllegalArgumentException("b negative");
                 }
                 int result = a + b;
-                return result;
+                int clamped = Math.max(result, 0);
+                int bounded = Math.min(clamped, 1000);
+                return bounded;
             }
 
             private String format(int value) {
@@ -253,7 +275,9 @@ def test_find_mutation_targets_java(tmp_path: Path) -> None:
                 String trimmed = formatted.trim();
                 String padded = "  " + trimmed;
                 String result = padded.strip();
-                return result;
+                String wrapped = "[" + result + "]";
+                String cleaned = wrapped.replace("[]", "empty");
+                return cleaned;
             }
         }
     """))
@@ -517,8 +541,11 @@ def test_find_mutation_targets_excludes_python_tests(tmp_path: Path) -> None:
             c = a + b
             d = c * 2
             e = d - 1
-            assert e > 0
-            return e
+            f = e + 10
+            g = f * 3
+            h = g - 5
+            assert h > 0
+            return h
     """))
     conftest = tmp_path / "conftest.py"
     conftest.write_text(textwrap.dedent("""\
@@ -529,7 +556,10 @@ def test_find_mutation_targets_excludes_python_tests(tmp_path: Path) -> None:
             d = c * 2
             e = d - 1
             f = e + 10
-            return f
+            g = f * 3
+            h = g - 5
+            i = h + 1
+            return i
     """))
     setup = tmp_path / "setup.py"
     setup.write_text("from setuptools import setup\nsetup()\npass\n")
@@ -545,7 +575,9 @@ def test_find_mutation_targets_excludes_python_tests(tmp_path: Path) -> None:
             result = value * 2
             cleaned = str(result)
             validated = int(cleaned)
-            return validated
+            clamped = max(validated, 0)
+            bounded = min(clamped, 1000)
+            return bounded
     """))
 
     targets = find_mutation_targets(str(tmp_path), "python")
@@ -568,7 +600,9 @@ def test_find_mutation_targets_excludes_go_tests(tmp_path: Path) -> None:
             c := a + b
             d := c * 2
             e := d - 1
-            result := Add(e, b)
+            f := e + 10
+            g := f * 3
+            result := Add(g, b)
             assert(result == 3)
         }
     """))
@@ -584,7 +618,9 @@ def test_find_mutation_targets_excludes_go_tests(tmp_path: Path) -> None:
             c := a + b
             d := c * 2
             e := d - 1
-            value := e + 42
+            f := e + 10
+            g := f * 3
+            value := g + 42
             return value
         }
     """))
@@ -598,7 +634,9 @@ def test_find_mutation_targets_excludes_go_tests(tmp_path: Path) -> None:
             c := a + b
             d := c * 2
             e := d - 1
-            value := e + 1
+            f := e + 10
+            g := f * 3
+            value := g + 1
             return value
         }
     """))
@@ -621,8 +659,11 @@ def test_find_mutation_targets_excludes_rust_tests(tmp_path: Path) -> None:
             let c = a + b;
             let d = c * 2;
             let e = d - 1;
-            let x = e + 10;
-            assert_eq!(x, 15);
+            let f = e + 10;
+            let g = f * 3;
+            let h = g - 5;
+            let x = h + 10;
+            assert_eq!(x, 40);
         }
     """))
     src = tmp_path / "lib.rs"
@@ -633,7 +674,10 @@ def test_find_mutation_targets_excludes_rust_tests(tmp_path: Path) -> None:
             }
             let a = x + 1;
             let b = a * 2;
-            let result = b - x;
+            let c = b - x;
+            let d = c.abs();
+            let e = d + 1;
+            let result = e * 2;
             result
         }
     """))
@@ -653,7 +697,9 @@ def test_find_mutation_targets_excludes_java_tests(tmp_path: Path) -> None:
                 int b = 2;
                 int c = a + b;
                 int d = c * 2;
-                int result = calc.add(d, b);
+                int e = d - 1;
+                int f = e + 10;
+                int result = calc.add(f, b);
                 assertEquals(8, result);
             }
         }
@@ -668,7 +714,9 @@ def test_find_mutation_targets_excludes_java_tests(tmp_path: Path) -> None:
                 int b = 2;
                 int c = a + b;
                 int d = c * 2;
-                int x = d - 1;
+                int e = d - 1;
+                int f = e + 10;
+                int x = f - 1;
                 assertEquals(5, x);
             }
         }
@@ -682,7 +730,9 @@ def test_find_mutation_targets_excludes_java_tests(tmp_path: Path) -> None:
                 }
                 int a = x + 1;
                 int b = a * 2;
-                int result = b - x;
+                int c = b - x;
+                int d = Math.max(c, 0);
+                int result = Math.min(d, 1000);
                 return result;
             }
         }
@@ -708,7 +758,9 @@ def test_find_mutation_targets_excludes_docs_dir(tmp_path: Path) -> None:
             config.update({"key": "value"})
             validated = config.get("key")
             result = validated.strip()
-            return result
+            cleaned = result.lower()
+            formatted = cleaned.replace("-", "_")
+            return formatted
     """))
     src = tmp_path / "core.py"
     src.write_text(textwrap.dedent("""\
@@ -719,7 +771,9 @@ def test_find_mutation_targets_excludes_docs_dir(tmp_path: Path) -> None:
             parts = cleaned.split(",")
             result = [p.strip() for p in parts]
             validated = [p for p in result if p]
-            return validated
+            unique = list(set(validated))
+            sorted_result = sorted(unique)
+            return sorted_result
     """))
 
     targets = find_mutation_targets(str(tmp_path), "python")
@@ -741,7 +795,9 @@ def test_find_mutation_targets_excludes_examples_dir(tmp_path: Path) -> None:
             app = create_app(config)
             result = app.start()
             status = result.get("status")
-            return status
+            cleaned = status.strip()
+            validated = cleaned.lower()
+            return validated
     """))
     src = tmp_path / "lib.py"
     src.write_text(textwrap.dedent("""\
@@ -752,7 +808,9 @@ def test_find_mutation_targets_excludes_examples_dir(tmp_path: Path) -> None:
                 raise TypeError("y required")
             result = x + y
             validated = int(result)
-            return validated
+            clamped = max(validated, 0)
+            bounded = min(clamped, 1000)
+            return bounded
     """))
 
     targets = find_mutation_targets(str(tmp_path), "python")
@@ -762,7 +820,7 @@ def test_find_mutation_targets_excludes_examples_dir(tmp_path: Path) -> None:
 
 
 def test_find_mutation_targets_min_function_size(tmp_path: Path) -> None:
-    """Functions with fewer than 5 lines are excluded."""
+    """Functions with fewer than 10 lines are excluded."""
     src = tmp_path / "module.py"
     src.write_text(textwrap.dedent("""\
         def tiny():
@@ -779,7 +837,9 @@ def test_find_mutation_targets_min_function_size(tmp_path: Path) -> None:
             parts = cleaned.split(",")
             result = [p.strip() for p in parts]
             validated = [p for p in result if p]
-            return validated
+            unique = list(set(validated))
+            sorted_result = sorted(unique)
+            return sorted_result
     """))
 
     targets = find_mutation_targets(str(tmp_path), "python")
@@ -805,7 +865,9 @@ def test_find_mutation_targets_max_files(tmp_path: Path) -> None:
                 result = value * 2
                 cleaned = str(result)
                 validated = int(cleaned)
-                return validated
+                clamped = max(validated, 0)
+                bounded = min(clamped, 1000)
+                return bounded
         """))
 
     targets = find_mutation_targets(str(tmp_path), "python", max_files=3)
@@ -1636,7 +1698,7 @@ def test_edge_case_score_error_handling() -> None:
 
 def test_edge_case_score_happy_path() -> None:
     target = {"source": "def add(a, b):\n    return a + b"}
-    assert _edge_case_score(target) == 0
+    assert _edge_case_score(target) == 2
 
 
 def test_edge_case_score_null_check() -> None:
@@ -1655,7 +1717,9 @@ def test_find_mutation_targets_sorted_by_score(tmp_path: Path) -> None:
             doubled = total * 2
             halved = doubled // 2
             result = halved
-            return result
+            clamped = max(result, 0)
+            bounded = min(clamped, 1000)
+            return bounded
     """))
     complex_f = tmp_path / "handler.py"
     complex_f.write_text(textwrap.dedent("""\
@@ -1666,7 +1730,9 @@ def test_find_mutation_targets_sorted_by_score(tmp_path: Path) -> None:
                 raise RuntimeError("bad data")
             if result is None:
                 return fallback()
-            return result
+            cleaned = result.strip()
+            validated = cleaned.lower()
+            return validated
     """))
 
     targets = find_mutation_targets(str(tmp_path), "python")
@@ -2653,6 +2719,7 @@ def test_bug_to_symptom_includes_file_context() -> None:
     async def fake_query(prompt: str, options: object = None):
         captured_prompts.append(prompt)
         msg = MagicMock(spec=_RM)
+        msg.result = None
         msg.content = [_TextBlock(text="logging breaks under heavy load")]
         yield msg
 
@@ -2685,6 +2752,7 @@ def test_bug_to_symptom_no_file_path() -> None:
     async def fake_query(prompt: str, options: object = None):
         captured_prompts.append(prompt)
         msg = MagicMock(spec=_RM)
+        msg.result = None
         msg.content = [_TextBlock(text="broken parsing")]
         yield msg
 
@@ -2806,13 +2874,13 @@ def test_generate_issue_from_symptom_no_llm_for_symptom_only() -> None:
 # ---------------------------------------------------------------------------
 
 def test_patch_floor_accepts_5_lines_500_chars() -> None:
-    """Verify new thresholds: 4 changed lines, 200 chars."""
+    """Verify new thresholds: 12 changed lines, 600 chars."""
     import inspect
 
     import swebenchify.synthesizer as mod
     source = inspect.getsource(mod.synthesize_repo)
-    assert "changed >= 4" in source
-    assert 'len(patch) >= 200' in source
+    assert "changed >= 12" in source
+    assert 'len(patch) >= 600' in source
 
 
 def test_patch_floor_log_messages_updated() -> None:
@@ -2821,8 +2889,8 @@ def test_patch_floor_log_messages_updated() -> None:
 
     import swebenchify.synthesizer as mod
     source = inspect.getsource(mod.synthesize_repo)
-    assert 'changed lines < 4' in source
-    assert 'chars < 200' in source
+    assert 'changed lines < 12' in source
+    assert 'chars < 600' in source
 
 
 # ---------------------------------------------------------------------------
@@ -5233,9 +5301,8 @@ def test_introduce_bug_aggressive_prompt_with_test_context() -> None:
 
     assert len(captured_prompts) == 1
     prompt = captured_prompts[0]
-    assert "MOST IMPACTFUL mutation" in prompt
+    assert "STRUCTURAL mutation" in prompt
     assert "The mutation must compile/parse correctly" in prompt
-    assert "The bug must be subtle" not in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -5312,7 +5379,7 @@ def test_introduce_bug_subtle_without_test_context() -> None:
     assert len(captured_prompts) == 1
     prompt = captured_prompts[0]
     assert "The bug must be subtle" in prompt
-    assert "MOST IMPACTFUL mutation" not in prompt
+    assert "STRUCTURAL mutation" not in prompt
 
 
 def test_introduce_bug_no_assertions_omits_block() -> None:
@@ -5373,7 +5440,7 @@ def test_introduce_bug_guard_removal_strategy() -> None:
         asyncio.run(introduce_bug(target, mutation_strategy="guard_removal"))
 
     assert len(captured_prompts) == 1
-    assert "Remove or bypass a guard clause, null check, or bounds validation" in captured_prompts[0]
+    assert "Remove an entire guard clause block" in captured_prompts[0]
 
 
 def test_introduce_bug_return_corruption_strategy() -> None:
@@ -5402,7 +5469,7 @@ def test_introduce_bug_return_corruption_strategy() -> None:
         asyncio.run(introduce_bug(target, mutation_strategy="return_corruption"))
 
     assert len(captured_prompts) == 1
-    assert "Return a wrong value, wrong type, or wrong error" in captured_prompts[0]
+    assert "Restructure the function's return logic" in captured_prompts[0]
 
 
 def test_introduce_bug_no_strategy_override() -> None:
@@ -5606,38 +5673,51 @@ def test_synthesize_repo_accepts_yield_only():
 # find_mutation_targets — min function size lowered to 5
 # ---------------------------------------------------------------------------
 
-def test_find_mutation_targets_includes_five_line_functions(tmp_path: Path) -> None:
-    """Functions with 5-7 lines are now included (threshold lowered from 8 to 5)."""
+def test_find_mutation_targets_includes_ten_line_functions(tmp_path: Path) -> None:
+    """Functions with 10+ lines are included (threshold is 10)."""
     src = tmp_path / "module.py"
     src.write_text(textwrap.dedent("""\
         def tiny():
             return 1
 
-        def five_liner(x):
+        def nine_liner(x):
             if x < 0:
                 return -x
             result = x * 2
-            return result
+            cleaned = result + 1
+            validated = cleaned - 1
+            clamped = max(validated, 0)
+            bounded = min(clamped, 100)
+            return bounded
 
-        def six_liner(data):
+        def ten_liner(data):
             if data is None:
                 raise ValueError
             cleaned = data.strip()
             parts = cleaned.split(",")
-            return parts
+            result = [p.strip() for p in parts]
+            validated = [p for p in result if p]
+            unique = list(set(validated))
+            sorted_result = sorted(unique)
+            return sorted_result
 
-        def seven_liner(items):
+        def twelve_liner(items):
             result = []
             for item in items:
                 if item > 0:
                     result.append(item)
             result.sort()
-            return result
+            cleaned = [x for x in result if x < 100]
+            validated = cleaned[:10]
+            total = sum(validated)
+            avg = total / max(len(validated), 1)
+            rounded = round(avg, 2)
+            return rounded
     """))
 
     targets = find_mutation_targets(str(tmp_path), "python")
     names = {t["function_name"] for t in targets}
-    assert "five_liner" in names
-    assert "six_liner" in names
-    assert "seven_liner" in names
+    assert "ten_liner" in names
+    assert "twelve_liner" in names
     assert "tiny" not in names
+    assert "nine_liner" not in names
