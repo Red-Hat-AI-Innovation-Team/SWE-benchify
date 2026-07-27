@@ -2158,6 +2158,8 @@ Do NOT make simple operator swaps or single-line deletions — the mutation must
         strategy_override = "\nFOCUS: Remove an entire guard clause block (3+ lines including the condition, body, and surrounding cleanup). Restructure the surrounding code to look clean without the guard — as if the developer determined the guard was unnecessary after a refactoring. Do NOT just delete lines — rewrite the area to flow naturally without the removed logic."
     elif mutation_strategy == "caller_mutation":
         strategy_override = "\nSTRATEGY: CALLER MUTATION (cross-function bug). Instead of mutating this function directly, find a HELPER FUNCTION that this function calls and mutate THAT. The test failure must appear when testing the original function, but the fix must be in the helper.\n\nFor example: if the target function calls validate_input(), mutate validate_input() so it returns True for invalid inputs. Tests of the target function will fail, but the fix is in validate_input().\n\nRequirements:\n- The mutation MUST be in a function that is CALLED BY the target, not in the target itself\n- The target function code must appear UNCHANGED in the diff\n- The diff must show changes in the called helper function only\n- The failing tests must test the TARGET function (the caller), not the helper directly"
+    elif mutation_strategy == 'deep_caller_mutation':
+        strategy_override = '\nSTRATEGY: DEEP CALLER MUTATION (multi-level cross-function bug). Find a UTILITY FUNCTION that is called by a helper that is called by the target function. Mutate that deep utility — NOT the target, NOT the direct helper, but a function 2-3 levels down in the call chain.\n\nThe test failure will appear in the top-level target function tests, but the fix must be in a utility function that the target calls indirectly.\n\nRequirements:\n- Trace the call chain: target → helper → utility. Mutate the utility.\n- The target function and its direct helpers must appear UNCHANGED in the diff\n- The diff must show changes only in the deeply-called utility function\n- The failing tests must test the TARGET function, not the utility'
     elif mutation_strategy == "return_corruption":
         strategy_override = "\nFOCUS: Restructure the function's return logic — consolidate multiple return paths into one, extract the return value computation into a variable, or convert early returns into an if-else chain. In the restructuring, introduce a logic error that causes the wrong value to be returned for certain inputs. The restructured code should look like a genuine cleanup."
 
@@ -5125,22 +5127,6 @@ def build_candidate(
     )
 
 
-def _strip_test_output(problem_statement: str) -> str:
-    """Remove embedded test output from problem statements so solvers must run tests themselves."""
-    _test_signal_markers = re.compile(
-        r'FAIL|PASS|Error|_test\.go:|assert|expected', re.IGNORECASE
-    )
-    cleaned = re.sub(
-        r'```[^\n]*\n(.*?)```',
-        lambda m: '' if _test_signal_markers.search(m.group(1)) else m.group(0),
-        problem_statement,
-        flags=re.DOTALL,
-    )
-    cleaned = re.sub(r'^.*\w+_test\.go:\d+.*$', '', cleaned, flags=re.MULTILINE)
-    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
-    return cleaned.strip()
-
-
 async def enrich_instance(
     instance: dict,
     repo_path: str,
@@ -5232,7 +5218,6 @@ async def enrich_instance(
         logger.info('  screening failed all %d attempts (independence or self-screen), discarding', max_screen_attempts)
         return None
 
-    problem_statement = _strip_test_output(problem_statement)
     instance['problem_statement'] = problem_statement
     instance['test_patch'] = test_patch
     instance['_pipeline']['phase'] = 'enriched'
@@ -5906,9 +5891,9 @@ async def synthesize_repo(
 
         # H2: Fall back to LLM introduce_bug (retry up to 2 times if patch too simple)
         # Each retry uses a progressively more aggressive structural mutation strategy
-        _retry_strategies = ['', 'guard_removal', 'caller_mutation', 'return_corruption']
+        _retry_strategies = ['', 'guard_removal', 'caller_mutation', 'deep_caller_mutation', 'return_corruption']
         # Skip targeted mutation for retries — it produces simple patches
-        for attempt in range(4):
+        for attempt in range(5):
             if bug_spec is None:
                 bug_spec = await introduce_bug(
                     target, model=model, related_files=related_files,
