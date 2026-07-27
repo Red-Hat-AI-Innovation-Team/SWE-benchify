@@ -5710,8 +5710,11 @@ def _is_same_package(primary_file: str, secondary_file: str, language: str) -> b
     sec_dir = os.path.dirname(secondary_file)
 
     if language == "go":
-        # In Go, same directory = same package
-        return primary_dir == sec_dir
+        if primary_dir == sec_dir:
+            return True
+        primary_parent = Path(primary_dir).parent
+        sec_parent = Path(sec_dir).parent
+        return primary_parent == sec_parent and str(primary_parent) != '.'
 
     if language == "python":
         # For Python, check same top-level package
@@ -5886,7 +5889,7 @@ async def synthesize_repo(
 
         # H2: Fall back to LLM introduce_bug (retry up to 2 times if patch too simple)
         # Each retry uses a progressively more aggressive structural mutation strategy
-        _retry_strategies = ["caller_mutation", "", "guard_removal", "return_corruption"]
+        _retry_strategies = ["", "guard_removal", "caller_mutation", "return_corruption"]
         # Skip targeted mutation for retries — it produces simple patches
         for attempt in range(4):
             if bug_spec is None:
