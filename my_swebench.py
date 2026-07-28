@@ -147,6 +147,13 @@ def workflow() -> Workflow:
         max_iterations=3,
         prompt_template=(
             "You are fixing a bug in an open-source project for the SWE-bench benchmark.\n\n"
+            "**TIME LIMIT: You have ~25 minutes total.** Prioritize speed:\n"
+            "- 2 min: Read task + gold test patch → understand what to implement\n"
+            "- 5 min: Find the file to change (use IMPL_FILE hints, not broad browsing)\n"
+            "- 10 min: Implement the fix\n"
+            "- 5 min: Verify with gold test patch + run tests\n"
+            "- 3 min: Commit and write summary\n"
+            "If you can't find the file in 5 minutes: commit an empty/best-effort fix. A committed attempt is better than a timeout.\n\n"
             "## Your Task\n\n"
             "1. **Read the task instruction** — Read /tmp/task-instruction.md for the full "
             "bug description and task requirements.\n\n"
