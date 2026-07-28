@@ -452,6 +452,7 @@ def run_eval(n_instances=10, seed=None, repos=None, model="haiku", eval_only=Non
             "INSTANCE_SLUG": job_slug,
             "IMAGE": IMAGE,
             "NAMESPACE": NAMESPACE,
+            "SKIP_SCREENING": "1",
         }, code_cm)
 
     wait_for_jobs("enrichment", prefix, timeout=1800)

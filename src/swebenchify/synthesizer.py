@@ -5259,6 +5259,7 @@ async def enrich_instance(
     instance: dict,
     repo_path: str,
     model: str = 'sonnet',
+    skip_screening: bool = False,
 ) -> dict | None:
     pipeline = instance.get('_pipeline')
     if not pipeline:
@@ -5299,52 +5300,58 @@ async def enrich_instance(
         language=pipeline['language'],
     )
     test_patch = ''
-    try:
-        generated_tp = await generate_test_patch(
-            bug_spec, repo_path, pipeline['language'], model=model,
-            test_output=pipeline['test_output'],
-        )
-        if generated_tp:
-            test_patch = generated_tp
-    except Exception:
-        logger.warning(
-            'test_patch generation failed for %s', instance.get('instance_id'),
-            exc_info=True,
-        )
+    if skip_screening:
+        logger.info('  skip_screening=True, bypassing self-screen')
+    else:
+        try:
+            generated_tp = await generate_test_patch(
+                bug_spec, repo_path, pipeline['language'], model=model,
+                test_output=pipeline['test_output'],
+            )
+            if generated_tp:
+                test_patch = generated_tp
+        except Exception:
+            logger.warning(
+                'test_patch generation failed for %s', instance.get('instance_id'),
+                exc_info=True,
+            )
 
     iid = instance.get('instance_id', 'unknown')
-    max_screen_attempts = 5
-    for screen_attempt in range(max_screen_attempts):
-        social_context = _build_social_context(social_artifacts)
-        _issue_gen_kwargs['social_context'] = social_context
+    if skip_screening:
         problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
-
-        if not _verify_issue_independence(problem_statement, bug_spec):
-            for _retry in range(2):
-                problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
-                if _verify_issue_independence(problem_statement, bug_spec):
-                    break
-            else:
-                logger.info('  issue leaks identifiers on attempt %d/%d, re-rolling',
-                            screen_attempt + 1, max_screen_attempts)
-                continue
-
-        screen_candidate = CandidateInstance(
-            instance_id=iid, repo=instance.get('repo', ''),
-            pr_number=0, base_commit=instance.get('base_commit', ''),
-            merge_commit=instance.get('merge_commit', ''),
-            patch=instance.get('patch', ''),
-            problem_statement=problem_statement,
-            test_patch=test_patch,
-            hints_text='', created_at='',
-        )
-        if await _self_screen_instance(screen_candidate):
-            logger.info('  self-screen PASSED on attempt %d/%d', screen_attempt + 1, max_screen_attempts)
-            break
-        logger.info('  self-screen failed attempt %d/%d, re-rolling issue text', screen_attempt + 1, max_screen_attempts)
     else:
-        logger.info('  screening failed all %d attempts (independence or self-screen), discarding', max_screen_attempts)
-        return None
+        max_screen_attempts = 5
+        for screen_attempt in range(max_screen_attempts):
+            social_context = _build_social_context(social_artifacts)
+            _issue_gen_kwargs['social_context'] = social_context
+            problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
+
+            if not _verify_issue_independence(problem_statement, bug_spec):
+                for _retry in range(2):
+                    problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
+                    if _verify_issue_independence(problem_statement, bug_spec):
+                        break
+                else:
+                    logger.info('  issue leaks identifiers on attempt %d/%d, re-rolling',
+                                screen_attempt + 1, max_screen_attempts)
+                    continue
+
+            screen_candidate = CandidateInstance(
+                instance_id=iid, repo=instance.get('repo', ''),
+                pr_number=0, base_commit=instance.get('base_commit', ''),
+                merge_commit=instance.get('merge_commit', ''),
+                patch=instance.get('patch', ''),
+                problem_statement=problem_statement,
+                test_patch=test_patch,
+                hints_text='', created_at='',
+            )
+            if await _self_screen_instance(screen_candidate):
+                logger.info('  self-screen PASSED on attempt %d/%d', screen_attempt + 1, max_screen_attempts)
+                break
+            logger.info('  self-screen failed attempt %d/%d, re-rolling issue text', screen_attempt + 1, max_screen_attempts)
+        else:
+            logger.info('  screening failed all %d attempts (independence or self-screen), discarding', max_screen_attempts)
+            return None
 
     instance['problem_statement'] = problem_statement
     instance['test_patch'] = test_patch
