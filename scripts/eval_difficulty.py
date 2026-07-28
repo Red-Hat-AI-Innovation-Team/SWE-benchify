@@ -248,14 +248,19 @@ def local_patch_prefilter(instances):
             passed.append(inst)
             continue
 
-        subprocess.run(
-            ["git", "fetch", "--quiet", "origin", commit],
-            capture_output=True, text=True, cwd=local_dir, timeout=60,
-        )
-        r = subprocess.run(
-            ["git", "checkout", "--quiet", "--force", commit],
-            capture_output=True, text=True, cwd=local_dir, timeout=30,
-        )
+        try:
+            subprocess.run(
+                ["git", "fetch", "--quiet", "origin", commit],
+                capture_output=True, text=True, cwd=local_dir, timeout=60,
+            )
+            r = subprocess.run(
+                ["git", "checkout", "--quiet", "--force", commit],
+                capture_output=True, text=True, cwd=local_dir, timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            log.warning("Pre-filter: git timeout for %s at %s, passing through", instance_id, commit[:8])
+            passed.append(inst)
+            continue
         if r.returncode != 0:
             log.warning("Pre-filter: checkout %s failed for %s, passing through", commit[:8], instance_id)
             passed.append(inst)
@@ -375,7 +380,7 @@ def _run_eval_only(eval_only_path, model, model_id, round_id):
         json.dump(result, f, indent=2)
 
 
-def run_eval(n_instances=10, seed=None, repos=None, model="haiku", eval_only=None):
+def run_eval(n_instances=10, seed=None, repos=None, model="haiku", eval_only=None, skip_prefilter=False):
     repos = repos or EVAL_REPOS
     round_id = f"r{int(time.time()) % 100000}"
     model_id = MODEL_MAP[model]
@@ -464,7 +469,10 @@ def run_eval(n_instances=10, seed=None, repos=None, model="haiku", eval_only=Non
         return
 
     # ── Step 3.5: Local pre-filter ──
-    enrich_results = local_patch_prefilter(enrich_results)
+    if skip_prefilter:
+        log.info("Pre-filter: skipped (--skip-prefilter)")
+    else:
+        enrich_results = local_patch_prefilter(enrich_results)
     if not enrich_results:
         cleanup_all(prefix, code_cm)
         print(json.dumps({"score": 0.0, "details": "No instances passed local pre-filter"}))
@@ -610,6 +618,8 @@ def main():
                         help="Claude model for eval (default: haiku)")
     parser.add_argument("--eval-only", type=str, default=None, metavar="JSONL_FILE",
                         help="Skip synthesis/enrichment/validation; eval from a JSONL file of validated instances")
+    parser.add_argument("--skip-prefilter", action="store_true",
+                        help="Skip local_patch_prefilter step entirely")
     args = parser.parse_args()
 
     n = 5 if args.quick else args.n_instances
@@ -617,7 +627,7 @@ def main():
     if args.repo:
         repos = [{"slug": args.repo, "url": f"https://github.com/{args.repo}.git", "language": "go"}]
 
-    run_eval(n_instances=n, seed=args.seed, repos=repos, model=args.model, eval_only=args.eval_only)
+    run_eval(n_instances=n, seed=args.seed, repos=repos, model=args.model, eval_only=args.eval_only, skip_prefilter=args.skip_prefilter)
 
 
 if __name__ == "__main__":
