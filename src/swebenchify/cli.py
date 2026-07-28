@@ -503,6 +503,7 @@ def _cmd_enrich(args: argparse.Namespace) -> None:
                 try:
                     result = await enrich_instance(
                         inst, repo_path=args.repo, model=args.model,
+                        skip_screening=args.skip_screening,
                     )
                     if result:
                         enriched_count += 1
@@ -760,6 +761,10 @@ def build_parser() -> argparse.ArgumentParser:
     enrich_parser.add_argument(
         "--model", default="sonnet",
         help="Claude model for issue generation (default: sonnet)",
+    )
+    enrich_parser.add_argument(
+        "--skip-screening", action="store_true", default=False,
+        help="Skip self-screening loop and test_patch generation (faster, lower quality)",
     )
 
     # eval

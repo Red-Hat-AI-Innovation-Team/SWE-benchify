@@ -609,6 +609,106 @@ def find_mutation_targets(
     return targets
 
 
+def _find_interface_break_targets(
+    repo_path: str,
+    targets: list[dict],
+    language: str,
+    max_pairs: int = 10,
+) -> list[dict]:
+    """Discover callee-caller pairs across files for interface-break mutations.
+
+    For each mutation target, find functions in OTHER files that call it.
+    Filter to same/sibling packages via _is_same_package(). Extract the
+    FULL caller function body so the LLM can produce accurate secondary
+    changes.
+
+    Returns enriched target dicts with '_interface_break_caller' metadata.
+    """
+    root = Path(repo_path)
+    extensions = _LANGUAGE_EXTENSIONS.get(language, [])
+    if not extensions:
+        return []
+
+    enriched: list[dict] = []
+
+    for target in targets:
+        if len(enriched) >= max_pairs:
+            break
+
+        func_name = target["function_name"]
+        target_file = target["file"]
+
+        try:
+            result = subprocess.run(
+                ["grep", "-rn", "--include=*" + extensions[0],
+                 r"\b" + func_name + r"\b", "."],
+                cwd=repo_path, capture_output=True, text=True, timeout=10,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            continue
+
+        for line in result.stdout.splitlines():
+            if len(enriched) >= max_pairs:
+                break
+            if not line.startswith("./"):
+                continue
+            parts = line.split(":", 2)
+            if len(parts) < 3:
+                continue
+            caller_rel = parts[0][2:]  # strip "./"
+            if caller_rel == target_file:
+                continue
+            if _should_exclude(caller_rel, language):
+                continue
+            if any(excl in caller_rel for excl in _EXCLUDE_SUBSTR):
+                continue
+            if not _is_same_package(target_file, caller_rel, language):
+                continue
+
+            caller_path = root / caller_rel
+            if not caller_path.is_file():
+                continue
+            try:
+                caller_content = caller_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+
+            caller_lines = caller_content.splitlines()
+            extractor = _EXTRACTORS.get(language)
+            if not extractor:
+                continue
+            caller_funcs = extractor(caller_lines)
+
+            # Find the function that actually calls our target
+            caller_func = None
+            for cf in caller_funcs:
+                if func_name in str(cf["source"]):
+                    caller_func = cf
+                    break
+
+            if not caller_func:
+                continue
+
+            enriched_target = dict(target)
+            enriched_target["_interface_break_caller"] = {
+                "file": caller_rel,
+                "function_name": caller_func["function_name"],
+                "source": caller_func["source"],
+                "start_line": caller_func["start_line"],
+                "end_line": caller_func["end_line"],
+            }
+            enriched.append(enriched_target)
+            logger.info(
+                "  interface_break: %s:%s called by %s:%s",
+                target_file, func_name,
+                caller_rel, caller_func["function_name"],
+            )
+            break  # one caller per target is enough
+
+    logger.info("Found %d interface-break target pairs", len(enriched))
+    return enriched
+
+
 _EDGE_CASE_SIGNALS = [
     re.compile(r"\b(?:try|except|catch|finally)\b"),
     re.compile(r"\b(?:raise|throw|panic)\b"),
@@ -2160,6 +2260,36 @@ Do NOT make simple operator swaps or single-line deletions — the mutation must
         strategy_override = "\nSTRATEGY: CALLER MUTATION (cross-function bug). Instead of mutating this function directly, find a HELPER FUNCTION that this function calls and mutate THAT. The test failure must appear when testing the original function, but the fix must be in the helper.\n\nFor example: if the target function calls validate_input(), mutate validate_input() so it returns True for invalid inputs. Tests of the target function will fail, but the fix is in validate_input().\n\nRequirements:\n- The mutation MUST be in a function that is CALLED BY the target, not in the target itself\n- The target function code must appear UNCHANGED in the diff\n- The diff must show changes in the called helper function only\n- The failing tests must test the TARGET function (the caller), not the helper directly"
     elif mutation_strategy == "return_corruption":
         strategy_override = "\nFOCUS: Restructure the function's return logic — consolidate multiple return paths into one, extract the return value computation into a variable, or convert early returns into an if-else chain. In the restructuring, introduce a logic error that causes the wrong value to be returned for certain inputs. The restructured code should look like a genuine cleanup."
+    elif mutation_strategy == "interface_break":
+        caller_meta = target.get("_interface_break_caller")
+        if caller_meta:
+            strategy_override = (
+                "\nSTRATEGY: INTERFACE BREAK (coordinated cross-file contract mutation)."
+                "\n\nYou MUST make TWO coordinated changes:"
+                "\n\n1. PRIMARY (callee — the function shown above): Change the function's "
+                "behavioral CONTRACT while keeping the type signature IDENTICAL. Examples:"
+                "\n   - Silently swallow errors instead of propagating them"
+                "\n   - Skip a validation step that callers rely on"
+                "\n   - Return a default/zero value for an edge case that previously returned an error"
+                "\n   - Leave a field uninitialized that callers expect to be populated"
+                "\n   - Change iteration order that callers depend on"
+                "\n\n2. SECONDARY (caller — shown below): Remove or weaken the caller's handling "
+                "that DEPENDED on the callee's old behavior. Examples:"
+                "\n   - Remove error checks that relied on the callee returning errors"
+                "\n   - Remove validation that was redundant because the callee validated"
+                "\n   - Remove a nil/null check because the callee 'always' returns non-nil now"
+                "\n\nThe resulting bug requires fixing BOTH files — fixing only the callee leaves "
+                "the caller without its safety checks; fixing only the caller leaves the callee "
+                "with broken behavior."
+                "\n\nDo NOT change function signatures, parameter types, or return types."
+                "\nDo NOT rename functions or change exports."
+                "\nOnly change BEHAVIORAL SEMANTICS — what the function does, not its interface."
+            )
+            related_context = (
+                f"\n\nCALLER FUNCTION (in `{caller_meta['file']}`) that calls "
+                f"`{function_name}` — you MUST provide a secondary change for this file:\n"
+                f"```{language}\n{caller_meta['source']}\n```"
+            )
 
     language_guidance = ""
     if language == "rust":
@@ -5129,6 +5259,7 @@ async def enrich_instance(
     instance: dict,
     repo_path: str,
     model: str = 'sonnet',
+    skip_screening: bool = False,
 ) -> dict | None:
     pipeline = instance.get('_pipeline')
     if not pipeline:
@@ -5169,52 +5300,58 @@ async def enrich_instance(
         language=pipeline['language'],
     )
     test_patch = ''
-    try:
-        generated_tp = await generate_test_patch(
-            bug_spec, repo_path, pipeline['language'], model=model,
-            test_output=pipeline['test_output'],
-        )
-        if generated_tp:
-            test_patch = generated_tp
-    except Exception:
-        logger.warning(
-            'test_patch generation failed for %s', instance.get('instance_id'),
-            exc_info=True,
-        )
+    if skip_screening:
+        logger.info('  skip_screening=True, bypassing self-screen')
+    else:
+        try:
+            generated_tp = await generate_test_patch(
+                bug_spec, repo_path, pipeline['language'], model=model,
+                test_output=pipeline['test_output'],
+            )
+            if generated_tp:
+                test_patch = generated_tp
+        except Exception:
+            logger.warning(
+                'test_patch generation failed for %s', instance.get('instance_id'),
+                exc_info=True,
+            )
 
     iid = instance.get('instance_id', 'unknown')
-    max_screen_attempts = 5
-    for screen_attempt in range(max_screen_attempts):
-        social_context = _build_social_context(social_artifacts)
-        _issue_gen_kwargs['social_context'] = social_context
+    if skip_screening:
         problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
-
-        if not _verify_issue_independence(problem_statement, bug_spec):
-            for _retry in range(2):
-                problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
-                if _verify_issue_independence(problem_statement, bug_spec):
-                    break
-            else:
-                logger.info('  issue leaks identifiers on attempt %d/%d, re-rolling',
-                            screen_attempt + 1, max_screen_attempts)
-                continue
-
-        screen_candidate = CandidateInstance(
-            instance_id=iid, repo=instance.get('repo', ''),
-            pr_number=0, base_commit=instance.get('base_commit', ''),
-            merge_commit=instance.get('merge_commit', ''),
-            patch=instance.get('patch', ''),
-            problem_statement=problem_statement,
-            test_patch=test_patch,
-            hints_text='', created_at='',
-        )
-        if await _self_screen_instance(screen_candidate):
-            logger.info('  self-screen PASSED on attempt %d/%d', screen_attempt + 1, max_screen_attempts)
-            break
-        logger.info('  self-screen failed attempt %d/%d, re-rolling issue text', screen_attempt + 1, max_screen_attempts)
     else:
-        logger.info('  screening failed all %d attempts (independence or self-screen), discarding', max_screen_attempts)
-        return None
+        max_screen_attempts = 5
+        for screen_attempt in range(max_screen_attempts):
+            social_context = _build_social_context(social_artifacts)
+            _issue_gen_kwargs['social_context'] = social_context
+            problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
+
+            if not _verify_issue_independence(problem_statement, bug_spec):
+                for _retry in range(2):
+                    problem_statement = await generate_issue_from_symptom(**_issue_gen_kwargs)
+                    if _verify_issue_independence(problem_statement, bug_spec):
+                        break
+                else:
+                    logger.info('  issue leaks identifiers on attempt %d/%d, re-rolling',
+                                screen_attempt + 1, max_screen_attempts)
+                    continue
+
+            screen_candidate = CandidateInstance(
+                instance_id=iid, repo=instance.get('repo', ''),
+                pr_number=0, base_commit=instance.get('base_commit', ''),
+                merge_commit=instance.get('merge_commit', ''),
+                patch=instance.get('patch', ''),
+                problem_statement=problem_statement,
+                test_patch=test_patch,
+                hints_text='', created_at='',
+            )
+            if await _self_screen_instance(screen_candidate):
+                logger.info('  self-screen PASSED on attempt %d/%d', screen_attempt + 1, max_screen_attempts)
+                break
+            logger.info('  self-screen failed attempt %d/%d, re-rolling issue text', screen_attempt + 1, max_screen_attempts)
+        else:
+            logger.info('  screening failed all %d attempts (independence or self-screen), discarding', max_screen_attempts)
+            return None
 
     instance['problem_statement'] = problem_statement
     instance['test_patch'] = test_patch
@@ -5318,6 +5455,94 @@ def _create_buggy_commit_multi(
         except Exception:
             pass
         return None
+
+
+def _validate_multi_file_necessity(
+    repo_path: str,
+    buggy_files: dict[str, str],
+    primary_file: str,
+    language: str,
+    target_file: str | None = None,
+    function_name: str | None = None,
+    timeout: int = 120,
+) -> bool:
+    """Validate that a multi-file bug genuinely requires multi-file fix.
+
+    Restores ONLY the primary file to its original content (secondary files
+    remain buggy) and runs tests. If tests PASS, the bug is single-file
+    solvable and should be rejected. If tests FAIL, the bug genuinely
+    requires a multi-file fix.
+
+    Returns True if the bug is genuinely multi-file, False if single-file solvable.
+    """
+    if len(buggy_files) < 2:
+        return True  # single-file bug, no validation needed
+
+    def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            cmd, cwd=repo_path, capture_output=True, text=True, check=True,
+        )
+
+    try:
+        orig = run(["git", "rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
+        if orig == "HEAD":
+            orig = run(["git", "rev-parse", "HEAD"]).stdout.strip()
+    except subprocess.CalledProcessError:
+        return True  # can't verify, accept by default
+
+    primary_path = Path(repo_path) / primary_file
+    try:
+        original_primary = primary_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return True
+
+    hash_input = "validate_" + "".join(sorted(buggy_files.keys()))
+    branch_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:12]
+    temp_branch = f"validate-{branch_hash}"
+
+    try:
+        run(["git", "checkout", "-b", temp_branch])
+
+        # Write ALL buggy files
+        for file_rel, content in buggy_files.items():
+            file_path = Path(repo_path) / file_rel
+            file_path.write_text(content, encoding="utf-8")
+            run(["git", "add", file_rel])
+
+        # Now restore ONLY the primary file to original
+        primary_path.write_text(original_primary, encoding="utf-8")
+        run(["git", "add", primary_file])
+
+        run(["git", "commit", "-m", "validate: primary restored, secondaries buggy"])
+
+        # Run tests
+        test_output = _run_tests_on_buggy_code(
+            repo_path,
+            run(["git", "rev-parse", "HEAD"]).stdout.strip(),
+            language,
+            timeout=timeout,
+            target_file=target_file,
+            function_name=function_name,
+        )
+
+        # Cleanup
+        run(["git", "checkout", orig])
+        run(["git", "branch", "-D", temp_branch])
+
+        if test_output and _is_valid_test_output(test_output):
+            logger.info("  Multi-file validation PASSED — bug requires multi-file fix")
+            return True
+        else:
+            logger.info("  Multi-file validation FAILED — bug is single-file solvable")
+            return False
+
+    except subprocess.CalledProcessError:
+        try:
+            run(["git", "checkout", orig])
+            run(["git", "branch", "-D", temp_branch])
+        except Exception:
+            pass
+        return True  # can't verify, accept by default
 
 
 _FAILED_TEST_PATTERN = re.compile(
@@ -5730,6 +5955,50 @@ def _is_same_package(primary_file: str, secondary_file: str, language: str) -> b
     return primary_dir == sec_dir
 
 
+def _fuzzy_find_snippet(snippet: str, content: str, threshold: float = 0.85) -> str | None:
+    """Try to find a snippet in content using fuzzy matching.
+
+    When exact substring matching fails (e.g. due to whitespace differences
+    from _extract_brace_language_functions), try:
+    1. Strip whitespace per line and retry exact match
+    2. Use difflib.SequenceMatcher sliding window
+
+    Returns the ACTUAL text from the file that matches, or None.
+    """
+    # Strategy 1: strip whitespace per line and retry
+    stripped_snippet_lines = [ln.strip() for ln in snippet.splitlines()]
+    stripped_snippet = "\n".join(stripped_snippet_lines)
+    content_lines = content.splitlines()
+    snippet_line_count = len(stripped_snippet_lines)
+
+    for start_idx in range(len(content_lines) - snippet_line_count + 1):
+        window_lines = content_lines[start_idx:start_idx + snippet_line_count]
+        stripped_window = "\n".join(ln.strip() for ln in window_lines)
+        if stripped_window == stripped_snippet:
+            actual_text = "\n".join(window_lines)
+            return actual_text
+
+    # Strategy 2: SequenceMatcher sliding window
+    best_ratio = 0.0
+    best_start = -1
+    best_end = -1
+    # Slide over content in line-aligned chunks
+    for start_idx in range(len(content_lines) - snippet_line_count + 1):
+        end_idx = min(start_idx + snippet_line_count + 2, len(content_lines))
+        candidate = "\n".join(content_lines[start_idx:end_idx])
+        ratio = difflib.SequenceMatcher(None, snippet, candidate).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_start = start_idx
+            best_end = end_idx
+
+    if best_ratio >= threshold and best_start >= 0:
+        actual_text = "\n".join(content_lines[best_start:best_end])
+        return actual_text
+
+    return None
+
+
 async def synthesize_repo(
     repo_path: str,
     repo_slug: str,
@@ -5823,6 +6092,29 @@ async def synthesize_repo(
     # Prioritize: targets with assertions first, then with tests, then without
     targets = with_assertions + with_tests_no_assertions + without_tests
 
+    # Discover interface-break targets (callee-caller pairs across files)
+    interface_break_targets = _find_interface_break_targets(
+        repo_path, targets, language,
+    )
+    # Build a set of (file, function_name) for quick lookup
+    _ib_keys: set[tuple[str, str]] = set()
+    for ibt in interface_break_targets:
+        _ib_keys.add((ibt["file"], ibt["function_name"]))
+    # Enrich matching targets with caller metadata
+    for t in targets:
+        key = (t["file"], t["function_name"])
+        if key in _ib_keys:
+            for ibt in interface_break_targets:
+                if ibt["file"] == t["file"] and ibt["function_name"] == t["function_name"]:
+                    t["_interface_break_caller"] = ibt["_interface_break_caller"]
+                    break
+
+    # Prioritize interface_break targets — try them before regular targets
+    ib_targets = [t for t in targets if t.get('_interface_break_caller')]
+    non_ib_targets = [t for t in targets if not t.get('_interface_break_caller')]
+    targets = ib_targets + non_ib_targets
+    logger.info('Target order: %d interface_break first, then %d regular', len(ib_targets), len(non_ib_targets))
+
     _ensure_venv(repo_path, language)
 
     candidates: list[CandidateInstance] = []
@@ -5889,9 +6181,13 @@ async def synthesize_repo(
 
         # H2: Fall back to LLM introduce_bug (retry up to 2 times if patch too simple)
         # Each retry uses a progressively more aggressive structural mutation strategy
-        _retry_strategies = ["", "guard_removal", "caller_mutation", "return_corruption"]
+        if target.get("_interface_break_caller"):
+            _retry_strategies = ["interface_break", "", "guard_removal", "caller_mutation", "return_corruption"]
+            logger.info("%s  Using interface_break as preferred strategy", pfx)
+        else:
+            _retry_strategies = ["", "guard_removal", "caller_mutation", "return_corruption"]
         # Skip targeted mutation for retries — it produces simple patches
-        for attempt in range(4):
+        for attempt in range(len(_retry_strategies)):
             if bug_spec is None:
                 bug_spec = await introduce_bug(
                     target, model=model, related_files=related_files,
@@ -5995,10 +6291,16 @@ async def synthesize_repo(
                 sec_content = sec_path.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
+            actual_snippet = sc.original_snippet
             if sc.original_snippet not in sec_content:
-                logger.warning("%s  Secondary snippet not found in %s", pfx, sc.file)
-                continue
-            sec_buggy = sec_content.replace(sc.original_snippet, sc.buggy_snippet, 1)
+                fuzzy_match = _fuzzy_find_snippet(sc.original_snippet, sec_content)
+                if fuzzy_match:
+                    logger.info("%s  Fuzzy-matched secondary snippet in %s", pfx, sc.file)
+                    actual_snippet = fuzzy_match
+                else:
+                    logger.warning("%s  Secondary snippet not found in %s", pfx, sc.file)
+                    continue
+            sec_buggy = sec_content.replace(actual_snippet, sc.buggy_snippet, 1)
             if sec_buggy != sec_content:
                 sec_diff = generate_patch(sec_content, sec_buggy, sc.file)
                 if sc.file.startswith(('tests/', 'test/')) or '/test_' in sc.file or sc.file.startswith('test_'):
@@ -6028,9 +6330,15 @@ async def synthesize_repo(
                         sec_content = sec_path.read_text(encoding="utf-8", errors="replace")
                     except OSError:
                         continue
+                    actual_snippet = sc.original_snippet
                     if sc.original_snippet not in sec_content:
-                        continue
-                    sec_buggy = sec_content.replace(sc.original_snippet, sc.buggy_snippet, 1)
+                        fuzzy_match = _fuzzy_find_snippet(sc.original_snippet, sec_content)
+                        if fuzzy_match:
+                            logger.info("%s  Fuzzy-matched retry secondary snippet in %s", pfx, sc.file)
+                            actual_snippet = fuzzy_match
+                        else:
+                            continue
+                    sec_buggy = sec_content.replace(actual_snippet, sc.buggy_snippet, 1)
                     if sec_buggy != sec_content:
                         sec_diff = generate_patch(sec_content, sec_buggy, sc.file)
                         if sc.file.startswith(('tests/', 'test/')) or '/test_' in sc.file or sc.file.startswith('test_'):
@@ -6100,6 +6408,19 @@ async def synthesize_repo(
         if buggy_commit is None:
             logger.warning("%s  Skipped — could not create buggy commit", pfx)
             continue
+
+        if len(buggy_files) >= 2:
+            is_genuine_multi = _validate_multi_file_necessity(
+                repo_path, buggy_files, bug_spec.file, language,
+                target_file=bug_spec.file,
+                function_name=bug_spec.function_name,
+            )
+            if not is_genuine_multi:
+                logger.warning(
+                    "%s  Skipped — multi-file bug is single-file solvable",
+                    pfx,
+                )
+                continue
 
         # H3: Capture test failure output from buggy code
         test_output = _run_tests_on_buggy_code(

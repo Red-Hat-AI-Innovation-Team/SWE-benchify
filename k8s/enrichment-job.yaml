@@ -24,11 +24,16 @@ spec:
               set -e
               export HOME=/tmp
               git clone --depth=50 https://github.com/${REPO_FULL}.git /tmp/repo
+              ENRICH_FLAGS=""
+              if [ -n "$SKIP_SCREENING" ]; then
+                ENRICH_FLAGS="--skip-screening"
+              fi
               swebenchify enrich \
                 --input /input/instances.jsonl \
                 --repo /tmp/repo \
                 --output /output/enriched.jsonl \
-                --model opus
+                --model opus \
+                $ENRICH_FLAGS
               echo "=== RESULTS ==="
               cat /output/enriched.jsonl
               RESULT=$(cat /output/enriched.jsonl | head -1)
@@ -42,6 +47,8 @@ spec:
                   "https://kubernetes.default.svc/apis/batch/v1/namespaces/${NAMESPACE}/jobs/enrich-${INSTANCE_SLUG}"
               fi
           env:
+            - name: SKIP_SCREENING
+              value: "${SKIP_SCREENING}"
             - name: CLAUDE_CODE_USE_VERTEX
               value: "1"
             - name: CLOUD_ML_REGION
