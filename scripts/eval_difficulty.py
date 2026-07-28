@@ -165,7 +165,9 @@ def collect_annotations(component, prefix):
             if not line:
                 continue
             try:
-                results.append(json.loads(line, strict=False))
+                parsed = json.loads(line, strict=False)
+                parsed["_job_name"] = name
+                results.append(parsed)
             except json.JSONDecodeError:
                 continue
     return results
@@ -406,10 +408,22 @@ def run_eval(n_instances=10, seed=None, repos=None, model="haiku", eval_only=Non
     synth_results = collect_annotations("synthesis-exp", prefix)
 
     # Fix repo/instance_id fields (synthesis outputs local/repo)
+    # Build reverse map from k8s-safe slug to full repo slug
+    repo_k8s_map = {r["slug"].replace("/", "-"): r["slug"] for r in repos}
     for d in synth_results:
         old_repo = d.get("repo", "")
         if old_repo == "local/repo" or "local" in old_repo:
-            d["repo"] = repos[0]["slug"]
+            job_name = d.pop("_job_name", "")
+            matched = False
+            for k8s_slug, full_slug in sorted(repo_k8s_map.items(), key=lambda x: -len(x[0])):
+                if k8s_slug in job_name:
+                    d["repo"] = full_slug
+                    matched = True
+                    break
+            if not matched:
+                d["repo"] = repos[0]["slug"]
+        else:
+            d.pop("_job_name", None)
         old_id = d.get("instance_id", "")
         if old_id.startswith("local__"):
             num = old_id.rsplit("-", 1)[-1] if "-" in old_id else old_id
