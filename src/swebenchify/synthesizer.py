@@ -6102,6 +6102,12 @@ async def synthesize_repo(
                     t["_interface_break_caller"] = ibt["_interface_break_caller"]
                     break
 
+    # Prioritize interface_break targets — try them before regular targets
+    ib_targets = [t for t in targets if t.get('_interface_break_caller')]
+    non_ib_targets = [t for t in targets if not t.get('_interface_break_caller')]
+    targets = ib_targets + non_ib_targets
+    logger.info('Target order: %d interface_break first, then %d regular', len(ib_targets), len(non_ib_targets))
+
     _ensure_venv(repo_path, language)
 
     candidates: list[CandidateInstance] = []
