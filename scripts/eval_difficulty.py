@@ -34,6 +34,7 @@ NAMESPACE = "swebenchify"
 IMAGE = "ghcr.io/red-hat-ai-innovation-team/swe-benchify/swebenchify-synthesis:streaming"
 SYNTHESIZER_PATH = os.path.join(PROJECT_ROOT, "src/swebenchify/synthesizer.py")
 VALIDATE_SCRIPT_PATH = os.path.join(PROJECT_ROOT, "scripts/validate_and_prepare.py")
+CLI_PATH = os.path.join(PROJECT_ROOT, "src/swebenchify/cli.py")
 
 EVAL_REPOS = [
     {"slug": "containers/image", "url": "https://github.com/containers/image.git", "language": "go"},
@@ -70,6 +71,7 @@ def push_code_overlay(prefix):
     r = oc("create", "configmap", cm_name,
            f"--from-file=synthesizer.py={SYNTHESIZER_PATH}",
            f"--from-file=validate_and_prepare.py={VALIDATE_SCRIPT_PATH}",
+           f"--from-file=cli.py={CLI_PATH}",
            "-n", NAMESPACE)
     if r.returncode != 0:
         log.error("Failed to create code overlay: %s", r.stderr[:200])
@@ -90,6 +92,10 @@ def inject_code_overlay(yaml_text, code_cm):
         "            - name: code-overlay\n"
         "              mountPath: /app/scripts/validate_and_prepare.py\n"
         "              subPath: validate_and_prepare.py\n"
+        "              readOnly: true\n"
+        "            - name: code-overlay\n"
+        "              mountPath: /app/src/swebenchify/cli.py\n"
+        "              subPath: cli.py\n"
         "              readOnly: true\n"
     )
     overlay_volume = (
