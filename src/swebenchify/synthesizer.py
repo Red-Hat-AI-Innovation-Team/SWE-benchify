@@ -5488,13 +5488,13 @@ def _validate_multi_file_necessity(
         if orig == "HEAD":
             orig = run(["git", "rev-parse", "HEAD"]).stdout.strip()
     except subprocess.CalledProcessError:
-        return True  # can't verify, accept by default
+        return False  # can't verify → reject
 
     primary_path = Path(repo_path) / primary_file
     try:
         original_primary = primary_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return True
+        return False
 
     hash_input = "validate_" + "".join(sorted(buggy_files.keys()))
     branch_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:12]
@@ -5536,13 +5536,14 @@ def _validate_multi_file_necessity(
             logger.info("  Multi-file validation FAILED — bug is single-file solvable")
             return False
 
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError as e:
+        logger.warning('  Multi-file validation error (rejecting): %s', e)
         try:
             run(["git", "checkout", orig])
             run(["git", "branch", "-D", temp_branch])
         except Exception:
             pass
-        return True  # can't verify, accept by default
+        return False  # can't verify → reject
 
 
 _FAILED_TEST_PATTERN = re.compile(
