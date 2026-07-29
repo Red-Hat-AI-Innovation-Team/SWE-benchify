@@ -6,7 +6,7 @@ metadata:
     app: swebenchify
     component: synthesis-exp
 spec:
-  backoffLimit: 0
+  backoffLimit: 1
   activeDeadlineSeconds: 7200
   template:
     metadata:

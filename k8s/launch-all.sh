@@ -12,6 +12,7 @@ set -euo pipefail
 IMAGE="${IMAGE:-ghcr.io/red-hat-ai-innovation-team/swe-benchify/swebenchify-synthesis:streaming}"
 NAMESPACE="${NAMESPACE:-swebenchify}"
 JOBS_PER_REPO="${JOBS_PER_REPO:-100}"
+BATCH_SIZE="${BATCH_SIZE:-500}"  # max concurrent jobs to avoid overwhelming the cluster
 
 REPOS=(
   argoproj/argo-cd
@@ -92,6 +93,18 @@ for repo in "${REPOS[@]}"; do
 
     echo "$rendered" | oc apply -n "$NAMESPACE" -f - 2>/dev/null || continue
     launched=$((launched + 1))
+
+    # Throttle: when we hit BATCH_SIZE, wait for running count to drop
+    if [ $((launched % BATCH_SIZE)) -eq 0 ]; then
+      echo "  Batch $((launched / BATCH_SIZE)): $launched launched, waiting for cluster to catch up..."
+      while true; do
+        running=$(oc get jobs -l component=synthesis-exp -n "$NAMESPACE" --no-headers 2>/dev/null | grep -c Running || true)
+        if [ "$running" -lt "$((BATCH_SIZE / 2))" ]; then
+          break
+        fi
+        sleep 30
+      done
+    fi
   done
 
   echo "  $repo: $JOBS_PER_REPO jobs launched"
