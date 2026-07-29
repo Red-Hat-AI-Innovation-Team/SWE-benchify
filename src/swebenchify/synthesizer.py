@@ -6182,8 +6182,8 @@ async def synthesize_repo(
         # H2: Fall back to LLM introduce_bug (retry up to 2 times if patch too simple)
         # Each retry uses a progressively more aggressive structural mutation strategy
         if target.get("_interface_break_caller"):
-            _retry_strategies = ["interface_break", "interface_break", "interface_break"]
-            logger.info("%s  Interface-break target: using interface_break strategy exclusively", pfx)
+            _retry_strategies = ["interface_break", "", "guard_removal", "caller_mutation", "return_corruption"]
+            logger.info("%s  Interface-break target: using mixed strategy (interface_break first)", pfx)
         else:
             _retry_strategies = ["", "guard_removal", "caller_mutation", "return_corruption"]
         # Skip targeted mutation for retries — it produces simple patches
