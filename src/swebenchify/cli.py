@@ -450,6 +450,7 @@ def _cmd_synthesize(args: argparse.Namespace) -> None:
                 max_files=args.max_files,
                 max_functions=args.max_functions,
                 on_candidate=_on_candidate,
+                haiku_screen=args.haiku_screen,
             )
 
         candidates = result.candidates
@@ -739,6 +740,10 @@ def build_parser() -> argparse.ArgumentParser:
     synth_parser.add_argument(
         "--max-functions", type=int, default=None,
         help="Max functions per file to extract (default: 5, or 10 when multiplier > 8)",
+    )
+    synth_parser.add_argument(
+        "--haiku-screen", action="store_true", default=False,
+        help="Screen candidates with a Haiku agent; reject if Haiku solves quickly",
     )
 
     # enrich

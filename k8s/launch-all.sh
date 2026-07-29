@@ -11,7 +11,7 @@ set -euo pipefail
 
 IMAGE="${IMAGE:-ghcr.io/red-hat-ai-innovation-team/swe-benchify/swebenchify-synthesis:streaming}"
 NAMESPACE="${NAMESPACE:-swebenchify}"
-JOBS_PER_REPO="${JOBS_PER_REPO:-50}"
+JOBS_PER_REPO="${JOBS_PER_REPO:-100}"
 
 REPOS=(
   argoproj/argo-cd

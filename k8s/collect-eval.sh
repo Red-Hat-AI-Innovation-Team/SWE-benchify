@@ -26,6 +26,10 @@ collect_once() {
   total_jobs=$(oc get jobs -l "$LABEL_SELECTOR" -n "$NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d ' ')
 
   for job in $(oc get jobs -l "$LABEL_SELECTOR" -n "$NAMESPACE" --no-headers 2>/dev/null | grep "Complete" | awk '{print $1}'); do
+    # Skip old jobs from previous runs (e.g. eval-ev-* from eval_difficulty.py)
+    if [ -n "$MODEL" ] && [[ ! "$job" =~ ^eval-${MODEL}- ]]; then
+      continue
+    fi
     grep -q "^${job}$" "$COLLECTED" && continue
 
     result=$(oc get job "$job" -n "$NAMESPACE" -o jsonpath='{.metadata.annotations.result}' 2>/dev/null || true)

@@ -5545,6 +5545,121 @@ def _validate_multi_file_necessity(
         return True  # can't verify, accept by default
 
 
+async def _haiku_screen_instance(
+    repo_path: str,
+    buggy_commit: str,
+    test_output: str,
+    language: str,
+    bug_spec: "BugSpec",
+    max_turns: int = 10,
+    agent_timeout: int = 600,
+) -> bool:
+    """Run a quick Haiku agent attempt; return True if Haiku FAILED to solve.
+
+    Gives Haiku the test failure output and lets it try to fix the bug.
+    If Haiku resolves it in ≤max_turns, the instance is too easy — return False.
+    If Haiku fails, the instance is hard enough — return True (keep it).
+
+    Uses test_output as the problem description (more info than the agent gets
+    at eval time), making this a conservative screen.
+    """
+    if ClaudeCodeOptions is None:
+        logger.warning("Claude Code SDK not available, skipping Haiku screening")
+        return True
+
+    resolved_model = MODEL_MAP.get("haiku", "haiku")
+
+    def _run(cmd, **kw):
+        return subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True, **kw)
+
+    # Determine test command from bug_spec target file
+    if language == "go":
+        pkg_dir = os.path.dirname(bug_spec.file) or "."
+        test_cmd = f"go test -v -count=1 -timeout 120s ./{pkg_dir}"
+    elif language == "python":
+        test_cmd = "python -m pytest -x -q"
+    else:
+        test_cmd = "make test"
+
+    prompt = (
+        f"You are a software engineer fixing a bug in a {language} project.\n\n"
+        f"The repository is at {repo_path}. There are failing tests.\n\n"
+        f"## Failing test output\n```\n{test_output[:3000]}\n```\n\n"
+        f"## Instructions\n"
+        f"1. Read the failing test output and find the relevant source code.\n"
+        f"2. Fix the bug so the failing tests pass.\n"
+        f"3. Verify your fix by running: {test_cmd}\n\n"
+        f"Do NOT modify any test files."
+    )
+
+    # Save pre-agent state
+    _run(["git", "add", "-A"])
+    _run(["git", "commit", "-m", "pre-screen", "--allow-empty"],
+         env={**os.environ, "GIT_AUTHOR_NAME": "screen", "GIT_AUTHOR_EMAIL": "s@s",
+              "GIT_COMMITTER_NAME": "screen", "GIT_COMMITTER_EMAIL": "s@s"})
+    pre_ref = _run(["git", "rev-parse", "HEAD"]).stdout.strip()
+
+    try:
+        options = ClaudeCodeOptions(
+            cwd=repo_path,
+            allowed_tools=["Bash(description:*)", "Read", "Edit", "Write"],
+            permission_mode="bypassPermissions",
+            max_turns=max_turns,
+            model=resolved_model,
+        )
+
+        logger.info("  Haiku screening: running agent (max_turns=%d, model=%s)", max_turns, resolved_model)
+
+        try:
+            async for message in query(prompt=prompt, options=options):
+                if isinstance(message, ResultMessage):
+                    pass
+        except Exception as exc:
+            logger.warning("  Haiku screening agent error: %s", exc)
+
+        # Revert test file modifications (anti-reward-hacking)
+        if language == "go":
+            test_patterns = [r"_test\.go$"]
+        else:
+            test_patterns = [r"(^|/)tests?/", r"test_.*\.py$"]
+        combined = re.compile("|".join(test_patterns))
+
+        r = _run(["git", "diff", "--name-only"])
+        for f in r.stdout.strip().split("\n"):
+            if f and combined.search(f):
+                _run(["git", "checkout", "--", f])
+        r = _run(["git", "ls-files", "--others", "--exclude-standard"])
+        for f in r.stdout.strip().split("\n"):
+            if f and combined.search(f):
+                try:
+                    os.remove(os.path.join(repo_path, f))
+                except OSError:
+                    pass
+
+        # Run tests to check if Haiku solved it
+        test_result = _run(test_cmd, shell=True, timeout=180)
+        combined_output = (test_result.stdout or "") + "\n" + (test_result.stderr or "")
+
+        if language == "go":
+            has_fail = "FAIL" in combined_output and test_result.returncode != 0
+        else:
+            has_fail = test_result.returncode != 0
+
+        haiku_failed = has_fail
+        if haiku_failed:
+            logger.info("  Haiku screening: FAILED to solve (keeping instance)")
+        else:
+            logger.info("  Haiku screening: SOLVED (rejecting instance)")
+
+        return haiku_failed
+
+    finally:
+        # Restore pre-agent state
+        _run(["git", "checkout", "."])
+        _run(["git", "clean", "-fd"])
+        _run(["git", "reset", "--hard", pre_ref])
+
+
 _FAILED_TEST_PATTERN = re.compile(
     r"FAILED\s+(\S+::(?:\S+::)?\S+)",
 )
@@ -6013,6 +6128,7 @@ async def synthesize_repo(
     max_files: int | None = None,
     max_functions: int | None = None,
     on_candidate: Callable[[CandidateInstance, dict], None] | None = None,
+    haiku_screen: bool = False,
 ) -> RepoSynthesisResult:
     """Synthesize bug instances for a repository.
 
@@ -6442,6 +6558,16 @@ async def synthesize_repo(
             logger.info('%s  Skipped — duplicate patch (same diff already yielded)', pfx)
             continue
         seen_patches.add(patch_hash)
+
+        if haiku_screen:
+            haiku_failed = await _haiku_screen_instance(
+                repo_path, buggy_commit, test_output or "",
+                language, bug_spec,
+            )
+            if not haiku_failed:
+                logger.warning("%s  Skipped — Haiku solved in screening", pfx)
+                continue
+            logger.info("%s  Passed Haiku screening (Haiku failed to solve)", pfx)
 
         if yield_only:
             synthesis_result = SynthesisResult(
