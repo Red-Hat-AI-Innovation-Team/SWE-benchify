@@ -7,12 +7,26 @@ MODEL="${MODEL:-haiku}"
 INPUT="${1:?Usage: launch-eval.sh <input-jsonl> [--limit N]}"
 LIMIT="${LIMIT:-0}"
 
-echo "=== Launching eval jobs (model=$MODEL) ==="
+# Model name → full model ID mapping
+declare -A MODEL_IDS
+MODEL_IDS=(
+  [haiku]="claude-haiku-4-5"
+  [sonnet]="claude-sonnet-4-5"
+  [opus]="claude-opus-4-6"
+)
+
+MODEL_ID="${MODEL_IDS[$MODEL]:-}"
+if [ -z "$MODEL_ID" ]; then
+  echo "ERROR: Unknown model '$MODEL'. Valid: haiku, sonnet, opus"
+  exit 1
+fi
+
+echo "=== Launching eval jobs (model=$MODEL, model_id=$MODEL_ID) ==="
 
 oc project "$NAMESPACE" 2>/dev/null || true
 
-# Get existing eval jobs to skip
-existing=$(oc get jobs -l component=eval -n "$NAMESPACE" \
+# Get existing eval jobs for this model to skip
+existing=$(oc get jobs -l component=eval,model="$MODEL" -n "$NAMESPACE" \
   --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null || true)
 
 launched=0
@@ -33,8 +47,10 @@ print(d.get('instance_id', ''), d.get('repo', ''))
 
   [ -z "$instance_slug" ] && continue
 
+  job_name="eval-${MODEL}-${instance_slug}"
+
   # Skip if job already exists
-  if echo "$existing" | grep -q "^eval-${instance_slug}$"; then
+  if echo "$existing" | grep -q "^${job_name}$"; then
     skipped=$((skipped + 1))
     continue
   fi
@@ -43,20 +59,21 @@ print(d.get('instance_id', ''), d.get('repo', ''))
   tmpf=$(mktemp)
   echo "$line" > "$tmpf"
 
-  # Create ConfigMap
-  oc delete configmap "eval-input-$instance_slug" -n "$NAMESPACE" &>/dev/null || true
-  oc create configmap "eval-input-$instance_slug" \
+  # Create ConfigMap (model-namespaced)
+  cm_name="eval-input-${MODEL}-${instance_slug}"
+  oc delete configmap "$cm_name" -n "$NAMESPACE" &>/dev/null || true
+  oc create configmap "$cm_name" \
     --from-file="instance.jsonl=$tmpf" \
     -n "$NAMESPACE" 2>/dev/null || { rm -f "$tmpf"; continue; }
   rm -f "$tmpf"
 
   # Launch eval job
-  export REPO_FULL="$repo_full" INSTANCE_SLUG="$instance_slug" IMAGE="$IMAGE" NAMESPACE="$NAMESPACE" MODEL="$MODEL"
-  envsubst '${REPO_FULL} ${INSTANCE_SLUG} ${IMAGE} ${NAMESPACE} ${MODEL}' < k8s/eval-job.yaml \
+  export REPO_FULL="$repo_full" INSTANCE_SLUG="$instance_slug" IMAGE="$IMAGE" NAMESPACE="$NAMESPACE" MODEL="$MODEL" MODEL_ID="$MODEL_ID"
+  envsubst '${REPO_FULL} ${INSTANCE_SLUG} ${IMAGE} ${NAMESPACE} ${MODEL} ${MODEL_ID}' < k8s/eval-job.yaml \
     | oc apply -n "$NAMESPACE" -f - 2>/dev/null || continue
 
   launched=$((launched + 1))
-  echo "Launched: eval-$instance_slug ($repo_full)"
+  echo "Launched: $job_name ($repo_full)"
 
   if [ $((launched % 50)) -eq 0 ]; then
     echo "  ... $launched jobs launched so far"
@@ -69,5 +86,5 @@ print(d.get('instance_id', ''), d.get('repo', ''))
 done < "$INPUT"
 
 echo
-echo "=== Launched $launched eval jobs ($skipped already existed, $total total instances) ==="
-echo "Monitor with: oc get jobs -l component=eval -n $NAMESPACE"
+echo "=== Launched $launched eval jobs for $MODEL ($skipped already existed, $total total instances) ==="
+echo "Monitor with: oc get jobs -l component=eval,model=$MODEL -n $NAMESPACE"

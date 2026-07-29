@@ -4,11 +4,11 @@ Transform GitHub repositories into SWE-bench-compatible benchmarks. Mines real p
 
 ## Goal
 
-Make synthetic SWE-bench instances HARDER for Claude Haiku to solve. Haiku currently resolves 79% of our Go instances — too easy. Iterate on the synthesizer's mutation strategies, bug categories, multi-file coordination, and patch complexity to produce bugs that require deeper reasoning. Problem statement framing alone doesn't work — Haiku solves from test signals.
+Make synthetic SWE-bench instances HARDER for Claude models to solve. Baseline Haiku resolve rate was 79% on Go instances — too easy. Iterate on the synthesizer's mutation strategies, bug categories, multi-file coordination, and patch complexity to produce bugs that require deeper reasoning.
 
-Score = 0.7 × haiku_failure_rate + 0.15 × diversity + 0.15 × 0.5. Target: haiku_failure > 0.5.
+Primary optimization target: Haiku failure rate (Score = 0.7 × haiku_failure + 0.15 × diversity + 0.15 × 0.5, target: haiku_failure > 0.5). Sonnet and Opus resolve rates are tracked for difficulty calibration across model tiers.
 
-The eval runs the full pipeline on OpenShift: synthesis → enrichment → validation → eval (Haiku). Local synthesizer.py changes are injected into cluster pods via ConfigMap overlay — no image rebuild needed.
+The eval runs the full pipeline on OpenShift: synthesis → enrichment → validation → eval (Haiku, Sonnet, Opus). Local synthesizer.py changes are injected into cluster pods via ConfigMap overlay — no image rebuild needed. Scale pipeline: `bash scripts/run_scaled_pipeline.sh`.
 
 ## Language
 
