@@ -33,6 +33,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NAMESPACE = "swebenchify"
 IMAGE = "ghcr.io/red-hat-ai-innovation-team/swe-benchify/swebenchify-synthesis:streaming"
 SYNTHESIZER_PATH = os.path.join(PROJECT_ROOT, "src/swebenchify/synthesizer.py")
+CLI_PATH = os.path.join(PROJECT_ROOT, "src/swebenchify/cli.py")
 VALIDATE_SCRIPT_PATH = os.path.join(PROJECT_ROOT, "scripts/validate_and_prepare.py")
 
 EVAL_REPOS = [
@@ -69,6 +70,7 @@ def push_code_overlay(prefix):
     oc("delete", "configmap", cm_name, "-n", NAMESPACE)
     r = oc("create", "configmap", cm_name,
            f"--from-file=synthesizer.py={SYNTHESIZER_PATH}",
+           f"--from-file=cli.py={CLI_PATH}",
            f"--from-file=validate_and_prepare.py={VALIDATE_SCRIPT_PATH}",
            "-n", NAMESPACE)
     if r.returncode != 0:
@@ -86,6 +88,10 @@ def inject_code_overlay(yaml_text, code_cm):
         "            - name: code-overlay\n"
         "              mountPath: /app/src/swebenchify/synthesizer.py\n"
         "              subPath: synthesizer.py\n"
+        "              readOnly: true\n"
+        "            - name: code-overlay\n"
+        "              mountPath: /app/src/swebenchify/cli.py\n"
+        "              subPath: cli.py\n"
         "              readOnly: true\n"
         "            - name: code-overlay\n"
         "              mountPath: /app/scripts/validate_and_prepare.py\n"

@@ -52,9 +52,10 @@ CODE_CM="synth-code-scale"
 oc delete configmap "$CODE_CM" -n "$NAMESPACE" 2>/dev/null || true
 oc create configmap "$CODE_CM" \
   --from-file="synthesizer.py=$PROJECT_ROOT/src/swebenchify/synthesizer.py" \
+  --from-file="cli.py=$PROJECT_ROOT/src/swebenchify/cli.py" \
   --from-file="validate_and_prepare.py=$PROJECT_ROOT/scripts/validate_and_prepare.py" \
   -n "$NAMESPACE"
-echo "Pushed code overlay as ConfigMap $CODE_CM"
+echo "Pushed code overlay as ConfigMap $CODE_CM (synthesizer.py + cli.py)"
 echo
 
 # Template for injecting code overlay into rendered YAML
@@ -65,6 +66,10 @@ inject_overlay() {
             - name: code-overlay\
               mountPath: /app/src/swebenchify/synthesizer.py\
               subPath: synthesizer.py\
+              readOnly: true\
+            - name: code-overlay\
+              mountPath: /app/src/swebenchify/cli.py\
+              subPath: cli.py\
               readOnly: true\
             - name: code-overlay\
               mountPath: /app/scripts/validate_and_prepare.py\
