@@ -59,9 +59,9 @@ else
   echo "Launching synthesis jobs for all repos..."
   bash k8s/launch-all.sh
 
-  echo "Waiting for synthesis jobs to complete (this may take hours)..."
+  echo "Waiting for synthesis jobs to complete..."
   SYNTH_OUTPUT="$DATA_DIR/synth-raw-$TIMESTAMP.jsonl"
-  OUTPUT="$SYNTH_OUTPUT" bash k8s/collect-results.sh synthesis "$SYNTH_OUTPUT" --watch
+  bash k8s/collect-results.sh synthesis-exp "$SYNTH_OUTPUT" --watch
 
   synth_count=$(count_lines "$SYNTH_OUTPUT")
   echo "Synthesis complete: $synth_count raw instances"
@@ -76,7 +76,13 @@ elif $SKIP_ENRICHMENT; then
 else
   echo "=== Stage 2: Enrichment ==="
   echo "Launching enrichment jobs..."
-  bash k8s/launch-enrichment.sh
+  # Pass synthesis results if available, otherwise enrichment script collects from cluster
+  ENRICH_INPUT="${SYNTH_OUTPUT:-}"
+  if [ -n "$ENRICH_INPUT" ] && [ -f "$ENRICH_INPUT" ]; then
+    bash k8s/launch-enrichment.sh "$ENRICH_INPUT"
+  else
+    bash k8s/launch-enrichment.sh
+  fi
 
   echo "Waiting for enrichment jobs to complete..."
   ENRICH_OUTPUT="$DATA_DIR/enriched-$TIMESTAMP.jsonl"
