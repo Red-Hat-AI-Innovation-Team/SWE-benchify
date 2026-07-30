@@ -124,7 +124,8 @@ def make_slug(text, max_len=50):
     return re.sub(r"[^a-z0-9-]", "-", text.lower().replace("_", "-"))[:max_len].rstrip("-")
 
 
-def get_job_annotations(component, prefix=None):
+def get_job_results(component, prefix=None):
+    """Get results from completed jobs via annotations, falling back to logs."""
     r = oc("get", "jobs", "-l", f"component={component}", "-n", NAMESPACE, "-o", "json", timeout=120)
     if r.returncode != 0:
         return {}
@@ -139,6 +140,20 @@ def get_job_annotations(component, prefix=None):
         if not is_done:
             continue
         ann = job.get("metadata", {}).get("annotations", {}).get("result", "")
+        if not ann:
+            # Fallback: read from logs
+            lr = oc("logs", f"job/{name}", "-n", NAMESPACE, timeout=30)
+            if lr.returncode == 0 and "=== RESULTS ===" in lr.stdout:
+                log_results = lr.stdout.split("=== RESULTS ===", 1)[1]
+                # Also check for RESULT: prefix (validation format)
+                for line in lr.stdout.splitlines():
+                    if line.startswith("RESULT: "):
+                        ann = line[8:]
+                        break
+                if not ann:
+                    json_lines = [x for x in log_results.strip().splitlines() if x.strip().startswith("{")]
+                    if json_lines:
+                        ann = "\n".join(json_lines)
         results[name] = ann
     return results
 
@@ -238,7 +253,7 @@ def poll_and_stream(prefix, code_cm, models, output_dir, poll_interval=30):
 
     while True:
         # ── Harvest synthesis completions → launch enrichment ──
-        synth_anns = get_job_annotations("synthesis-exp", prefix)
+        synth_anns = get_job_results("synthesis-exp", prefix)
         new_synth = 0
         for job_name, ann in synth_anns.items():
             if job_name in synth_processed or not ann:
@@ -268,7 +283,7 @@ def poll_and_stream(prefix, code_cm, models, output_dir, poll_interval=30):
                     "INSTANCE_SLUG": job_slug,
                     "IMAGE": IMAGE,
                     "NAMESPACE": NAMESPACE,
-                    "SKIP_SCREENING": "",
+                    "SKIP_SCREENING": "1",
                 }, code_cm)
                 new_synth += 1
 
@@ -276,7 +291,7 @@ def poll_and_stream(prefix, code_cm, models, output_dir, poll_interval=30):
             log.info("Synthesis → Enrichment: launched %d new enrichment jobs", new_synth)
 
         # ── Harvest enrichment completions → launch validation ──
-        enrich_anns = get_job_annotations("enrichment")
+        enrich_anns = get_job_results("enrichment")
         new_enrich = 0
         for job_name, ann in enrich_anns.items():
             if job_name in enrich_processed or not ann:
@@ -314,7 +329,7 @@ def poll_and_stream(prefix, code_cm, models, output_dir, poll_interval=30):
             log.info("Enrichment → Validation: launched %d new validation jobs", new_enrich)
 
         # ── Harvest validation completions → launch eval ──
-        valid_anns = get_job_annotations("validation")
+        valid_anns = get_job_results("validation")
         new_valid = 0
         for job_name, ann in valid_anns.items():
             if job_name in valid_processed or not ann:
@@ -364,7 +379,7 @@ def poll_and_stream(prefix, code_cm, models, output_dir, poll_interval=30):
 
         # ── Harvest eval completions ──
         for model in models:
-            eval_anns = get_job_annotations("eval")
+            eval_anns = get_job_results("eval")
             for job_name, ann in eval_anns.items():
                 if not job_name.startswith(f"eval-{model}-"):
                     continue
@@ -489,7 +504,7 @@ def main():
         eval_processed = {m: set() for m in models}
 
         while True:
-            eval_anns = get_job_annotations("eval")
+            eval_anns = get_job_results("eval")
             for model in models:
                 for job_name, ann in eval_anns.items():
                     if not job_name.startswith(f"eval-{model}-") or job_name in eval_processed[model] or not ann:
