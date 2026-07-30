@@ -3423,9 +3423,6 @@ def _is_valid_test_output(test_output: str) -> bool:
         return False
     if any(sig in stripped for sig in _RAT_FAILURE_SIGNALS):
         return False
-    # Reject build failures — these aren't reproducible test failures.
-    # Go: "[build failed]", "cannot find package", missing headers
-    # Python: "SyntaxError", compilation errors
     _BUILD_FAILURE_SIGNALS = (
         '[build failed]',
         '[setup failed]',
@@ -3436,11 +3433,7 @@ def _is_valid_test_output(test_output: str) -> bool:
         'missing go.sum entry',
     )
     if any(sig in stripped for sig in _BUILD_FAILURE_SIGNALS):
-        # Only reject if there are NO actual test failure lines
-        has_test_failure = ('--- FAIL:' in stripped or 'FAILED' in stripped
-                           or 'AssertionError' in stripped or 'panicked' in stripped)
-        if not has_test_failure:
-            return False
+        return False
     failure_signals = (
         'FAILED', 'FAIL', 'AssertionError',
         'panicked',
