@@ -6235,11 +6235,18 @@ async def synthesize_repo(
                     t["_interface_break_caller"] = ibt["_interface_break_caller"]
                     break
 
-    # Prioritize interface_break targets — try them before regular targets
+    # Mix interface_break and regular targets — don't prioritize multi-file
+    # so single-file mutations also get a chance to yield
     ib_targets = [t for t in targets if t.get('_interface_break_caller')]
     non_ib_targets = [t for t in targets if not t.get('_interface_break_caller')]
-    targets = ib_targets + non_ib_targets
-    logger.info('Target order: %d interface_break first, then %d regular', len(ib_targets), len(non_ib_targets))
+    logger.info('Targets: %d interface_break, %d regular (interleaved)', len(ib_targets), len(non_ib_targets))
+    interleaved = []
+    for i in range(max(len(ib_targets), len(non_ib_targets))):
+        if i < len(non_ib_targets):
+            interleaved.append(non_ib_targets[i])
+        if i < len(ib_targets):
+            interleaved.append(ib_targets[i])
+    targets = interleaved
 
     _ensure_venv(repo_path, language)
 
