@@ -34,6 +34,16 @@ spec:
                 --test-timeout 600 2>&1 | tee /tmp/validation.log
               RESULT_LINE=$(grep '^RESULT: ' /tmp/validation.log | tail -1 | sed 's/^RESULT: //')
               if [ -n "$RESULT_LINE" ]; then
+                # Truncate PASS_TO_PASS to avoid exceeding K8s annotation size limit (256KB)
+                RESULT_LINE=$(echo "$RESULT_LINE" | python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+p2p = d.get('PASS_TO_PASS', [])
+if len(p2p) > 50:
+    d['PASS_TO_PASS'] = p2p[:50]
+    d['_p2p_truncated'] = len(p2p)
+print(json.dumps(d))
+")
                 TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
                 ESCAPED=$(echo "$RESULT_LINE" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read().strip()))")
                 curl -sk -X PATCH \
