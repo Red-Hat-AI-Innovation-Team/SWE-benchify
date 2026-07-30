@@ -3412,7 +3412,7 @@ def _issue_patch_aligned(problem_statement: str, patch: str) -> bool:
 
 
 def _is_valid_test_output(test_output: str) -> bool:
-    """Check if test output contains a real test failure, not a setup error."""
+    """Check if test output contains a real test failure, not a setup/build error."""
     stripped = test_output.strip()
     if len(stripped) < 100:
         return False
@@ -3421,14 +3421,29 @@ def _is_valid_test_output(test_output: str) -> bool:
         return False
     if 'ImportError while loading conftest' in stripped:
         return False
-    # Reject RAT/license check failures — these are meta-build failures caused by
-    # synthetic marker files, completely unrelated to the logic bug under test.
-    # Embedding them in the issue creates an irreconcilable mismatch with the patch.
     if any(sig in stripped for sig in _RAT_FAILURE_SIGNALS):
         return False
+    # Reject build failures — these aren't reproducible test failures.
+    # Go: "[build failed]", "cannot find package", missing headers
+    # Python: "SyntaxError", compilation errors
+    _BUILD_FAILURE_SIGNALS = (
+        '[build failed]',
+        '[setup failed]',
+        'No such file or directory',
+        'cannot find package',
+        'could not import',
+        'no required module provides',
+        'missing go.sum entry',
+    )
+    if any(sig in stripped for sig in _BUILD_FAILURE_SIGNALS):
+        # Only reject if there are NO actual test failure lines
+        has_test_failure = ('--- FAIL:' in stripped or 'FAILED' in stripped
+                           or 'AssertionError' in stripped or 'panicked' in stripped)
+        if not has_test_failure:
+            return False
     failure_signals = (
         'FAILED', 'FAIL', 'AssertionError',
-        'panicked', 'BUILD FAILURE',
+        'panicked',
     )
     if not any(sig in stripped for sig in failure_signals):
         return False
