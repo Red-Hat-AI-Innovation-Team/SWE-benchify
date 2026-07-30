@@ -5796,8 +5796,10 @@ def _run_tests_on_buggy_code(
             test_cmd = ["go", "test", "-short", "-count=1", "-timeout", "90s", f"./{pkg_dir}"]
             logger.debug("  Running targeted Go tests: ./%s", pkg_dir)
         elif function_name and _find_go_cross_package_test(repo_path, function_name):
-            test_cmd = ["go", "test", "-short", "-count=1", "-timeout", "90s", "./..."]
-            logger.debug("  Running cross-package Go tests for %s: ./...", function_name)
+            cross_pkg = _find_go_cross_package_test(repo_path, function_name)
+            cross_dir = os.path.dirname(cross_pkg) or "."
+            test_cmd = ["go", "test", "-short", "-count=1", "-timeout", "90s", f"./{pkg_dir}", f"./{cross_dir}"]
+            logger.debug("  Running cross-package Go tests for %s: ./%s ./%s", function_name, pkg_dir, cross_dir)
         else:
             test_cmd = ["go", "test", "-short", "-count=1", "-timeout", "90s", f"./{pkg_dir}"]
             logger.debug("  Running targeted Go tests: ./%s", pkg_dir)
