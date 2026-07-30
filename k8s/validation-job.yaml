@@ -31,7 +31,7 @@ spec:
                 --output /output \
                 --repo-dir /tmp/testbed \
                 --language ${LANGUAGE} \
-                --test-timeout 300 2>&1 | tee /tmp/validation.log
+                --test-timeout 600 2>&1 | tee /tmp/validation.log
               RESULT_LINE=$(grep '^RESULT: ' /tmp/validation.log | tail -1 | sed 's/^RESULT: //')
               if [ -n "$RESULT_LINE" ]; then
                 TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)

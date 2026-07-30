@@ -188,13 +188,27 @@ def validate_instance(
     if language == "go":
         test_command = _build_go_test_command(test_patch)
         if test_command == "go test -v -count=1 ./...":
-            pipeline_output = instance.get("_pipeline", {}).get("test_output", "")
-            if pipeline_output:
-                targeted = _derive_test_command_from_output(pipeline_output, repo_dir)
-                if targeted:
-                    print("  Narrowed './...' to targeted command from test_output",
-                          flush=True)
-                    test_command = targeted
+            # Try to derive a targeted test command instead of running all tests
+            pipeline = instance.get("_pipeline", {})
+
+            # First: use bug_spec.file to target the right package
+            bug_file = pipeline.get("bug_spec", {}).get("file", "")
+            if bug_file:
+                pkg_dir = os.path.dirname(bug_file) or "."
+                test_command = f"go test -v -count=1 -timeout {test_timeout}s ./{pkg_dir}"
+                print(f"  Targeted test from bug_spec.file: ./{pkg_dir}",
+                      flush=True)
+
+            # Fallback: parse test output for package/test names
+            if "./..." in test_command:
+                pipeline_output = pipeline.get("test_output", "")
+                if pipeline_output:
+                    targeted = _derive_test_command_from_output(
+                        pipeline_output, repo_dir)
+                    if targeted:
+                        print("  Narrowed to targeted command from test_output",
+                              flush=True)
+                        test_command = targeted
     else:
         return {"instance_id": instance_id, "status": "error",
                 "error": f"Unsupported language: {language}"}
@@ -355,7 +369,7 @@ def main() -> None:
                         help="GitHub repo (owner/name) to clone")
     parser.add_argument("--language", default=None,
                         help="Language (default: from _pipeline.language or 'go')")
-    parser.add_argument("--test-timeout", type=int, default=300,
+    parser.add_argument("--test-timeout", type=int, default=600,
                         help="Timeout for each test run in seconds")
     parser.add_argument("--clone-timeout", type=int, default=300,
                         help="Timeout for git clone in seconds")
