@@ -5618,12 +5618,18 @@ async def _haiku_screen_instance(
 
         logger.info("  Haiku screening: running agent (max_turns=%d, model=%s)", max_turns, resolved_model)
 
+        agent_errored = False
         try:
             async for message in query(prompt=prompt, options=options):
                 if isinstance(message, ResultMessage):
                     pass
         except Exception as exc:
             logger.warning("  Haiku screening agent error: %s", exc)
+            agent_errored = True
+
+        if agent_errored:
+            logger.info("  Haiku screening: agent errored, treating as FAILED (keeping instance)")
+            return True
 
         # Revert test file modifications (anti-reward-hacking)
         if language == "go":
