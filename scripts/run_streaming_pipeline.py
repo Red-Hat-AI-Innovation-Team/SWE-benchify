@@ -22,6 +22,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -203,10 +204,12 @@ def create_configmap(name, key, data_str):
 
 # ── Pipeline stages ──────────────────────────────────────────────
 
-def launch_synthesis(prefix, code_cm, jobs_per_repo, batch_size=500):
-    """Launch synthesis jobs in batches. Returns total launched."""
+
+def launch_synthesis(prefix, code_cm, jobs_per_repo, batch_size=500, launch_done=None):
+    """Launch synthesis jobs in batches. Sets launch_done event when finished."""
     synth_yaml = os.path.join(PROJECT_ROOT, "k8s/synthesis-experiment-job.yaml")
     launched = 0
+    total = jobs_per_repo * len(REPOS)
     for repo in REPOS:
         repo_slug = repo.replace("/", "-")
         for j in range(jobs_per_repo):
@@ -221,21 +224,23 @@ def launch_synthesis(prefix, code_cm, jobs_per_repo, batch_size=500):
             launched += 1
 
             if launched % batch_size == 0:
-                log.info("Batch %d: %d launched, waiting for cluster...", launched // batch_size, launched)
+                log.info("Batch %d: %d/%d launched, waiting for cluster...",
+                         launched // batch_size, launched, total)
                 while True:
                     _, running, _ = count_jobs("synthesis-exp", prefix)
                     if running < batch_size // 2:
                         break
                     time.sleep(30)
 
-        if launched % 100 == 0:
-            log.info("  %s: %d/%d total launched", repo, launched, jobs_per_repo * len(REPOS))
+        if launched % 500 == 0:
+            log.info("  %s: %d/%d total launched", repo, launched, total)
 
-    log.info("Synthesis: %d jobs launched", launched)
-    return launched
+    log.info("Synthesis: all %d jobs launched", launched)
+    if launch_done:
+        launch_done.set()
 
 
-def poll_and_stream(prefix, code_cm, models, output_dir, poll_interval=30):
+def poll_and_stream(prefix, code_cm, models, output_dir, poll_interval=30, launch_done=None):
     """Main streaming loop: poll for completions and launch next-stage jobs."""
 
     synth_processed = set()
@@ -424,7 +429,8 @@ def poll_and_stream(prefix, code_cm, models, output_dir, poll_interval=30):
             write_results(valid_instances, eval_results, output_dir, "latest")
 
         # ── Check if everything is done ──
-        all_synth_done = s_r == 0 and (s_c + s_f) > 0
+        synth_launched = launch_done is None or launch_done.is_set()
+        all_synth_done = synth_launched and s_r == 0 and (s_c + s_f) > 0
         all_enrich_done = e_r == 0 and all_synth_done and len(synth_processed) >= (s_c + s_f)
         all_valid_done = v_r == 0 and all_enrich_done and len(enrich_processed) >= (e_c + e_f)
         all_eval_done = ev_r == 0 and all_valid_done and len(valid_processed) >= (v_c + v_f)
@@ -543,12 +549,20 @@ def main():
     code_cm = push_code_overlay(prefix)
     log.info("Code overlay: %s", code_cm)
 
-    log.info("Launching synthesis...")
-    launch_synthesis(prefix, code_cm, args.jobs_per_repo, args.batch_size)
+    launch_done = threading.Event()
+    launch_thread = threading.Thread(
+        target=launch_synthesis,
+        args=(prefix, code_cm, args.jobs_per_repo, args.batch_size, launch_done),
+        daemon=True,
+    )
+    log.info("Launching synthesis in background, streaming poll loop starting...")
+    launch_thread.start()
 
-    log.info("Starting streaming poll loop...")
+    # Give first batch a head start before polling
+    time.sleep(60)
+
     valid_instances, eval_results = poll_and_stream(
-        prefix, code_cm, models, args.output_dir, args.poll_interval,
+        prefix, code_cm, models, args.output_dir, args.poll_interval, launch_done,
     )
 
     write_results(valid_instances, eval_results, args.output_dir, timestamp)
