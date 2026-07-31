@@ -206,14 +206,25 @@ def create_configmap(name, key, data_str):
 
 
 def launch_synthesis(prefix, code_cm, jobs_per_repo, batch_size=500, launch_done=None):
-    """Launch synthesis jobs in batches. Sets launch_done event when finished."""
+    """Launch synthesis jobs in batches. Skips already-existing jobs. Sets launch_done when finished."""
     synth_yaml = os.path.join(PROJECT_ROOT, "k8s/synthesis-experiment-job.yaml")
+
+    # Get existing job names to skip
+    r = oc("get", "jobs", "-l", "component=synthesis-exp", "-n", NAMESPACE,
+           "--no-headers", "-o", "custom-columns=NAME:.metadata.name")
+    existing = set(r.stdout.strip().splitlines()) if r.returncode == 0 else set()
+
     launched = 0
+    skipped = 0
     total = jobs_per_repo * len(REPOS)
     for repo in REPOS:
         repo_slug = repo.replace("/", "-")
         for j in range(jobs_per_repo):
             job_slug = f"{repo_slug}-{j}"
+            full_name = f"synth-exp-{prefix}-{job_slug}"
+            if full_name in existing:
+                skipped += 1
+                continue
             launch_job(synth_yaml, {
                 "REPO_FULL": repo,
                 "REPO_SLUG": f"{prefix}-{job_slug}",
@@ -235,7 +246,7 @@ def launch_synthesis(prefix, code_cm, jobs_per_repo, batch_size=500, launch_done
         if launched % 500 == 0:
             log.info("  %s: %d/%d total launched", repo, launched, total)
 
-    log.info("Synthesis: all %d jobs launched", launched)
+    log.info("Synthesis: %d launched, %d skipped (already existed)", launched, skipped)
     if launch_done:
         launch_done.set()
 
@@ -473,11 +484,13 @@ def main():
     parser.add_argument("--eval-only", type=str, help="Skip to eval with a JSONL file of validated instances")
     parser.add_argument("--poll-interval", type=int, default=30)
     parser.add_argument("--output-dir", type=str, default="data")
+    parser.add_argument("--resume-prefix", type=str, default=None,
+                        help="Resume a previous run by reusing its prefix (skips already-launched jobs)")
     args = parser.parse_args()
 
     models = [m.strip() for m in args.models.split(",")]
     timestamp = time.strftime("%Y%m%d-%H%M%S")
-    prefix = f"s-{int(time.time()) % 100000}"
+    prefix = args.resume_prefix or f"s-{int(time.time()) % 100000}"
 
     log.info("Streaming pipeline: %d repos × %d jobs = %d total, models=%s",
              len(REPOS), args.jobs_per_repo, len(REPOS) * args.jobs_per_repo, models)
@@ -546,20 +559,33 @@ def main():
         return
 
     # Full pipeline
-    code_cm = push_code_overlay(prefix)
+    if args.resume_prefix:
+        code_cm = f"synth-code-{prefix}"
+        c, r, f = count_jobs("synthesis-exp", prefix)
+        already = c + r + f
+        log.info("Resuming prefix %s: %d jobs already on cluster", prefix, already)
+    else:
+        code_cm = push_code_overlay(prefix)
+        already = 0
     log.info("Code overlay: %s", code_cm)
 
-    launch_done = threading.Event()
-    launch_thread = threading.Thread(
-        target=launch_synthesis,
-        args=(prefix, code_cm, args.jobs_per_repo, args.batch_size, launch_done),
-        daemon=True,
-    )
-    log.info("Launching synthesis in background, streaming poll loop starting...")
-    launch_thread.start()
+    total_target = args.jobs_per_repo * len(REPOS)
+    remaining = total_target - already
 
-    # Give first batch a head start before polling
-    time.sleep(60)
+    launch_done = threading.Event()
+    if remaining > 0:
+        launch_thread = threading.Thread(
+            target=launch_synthesis,
+            args=(prefix, code_cm, args.jobs_per_repo, args.batch_size, launch_done),
+            daemon=True,
+        )
+        log.info("Launching %d synthesis jobs in background (%d already on cluster)...",
+                 remaining, already)
+        launch_thread.start()
+        time.sleep(60)
+    else:
+        log.info("All %d jobs already launched, starting poll loop...", already)
+        launch_done.set()
 
     valid_instances, eval_results = poll_and_stream(
         prefix, code_cm, models, args.output_dir, args.poll_interval, launch_done,
