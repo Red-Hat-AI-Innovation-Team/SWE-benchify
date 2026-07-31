@@ -396,10 +396,16 @@ def poll_and_stream(prefix, code_cm, models, output_dir, poll_interval=30):
                     continue
 
         # ── Status report ──
-        s_c, s_r, s_f = count_jobs("synthesis-exp", prefix)
-        e_c, e_r, e_f = count_jobs("enrichment")
-        v_c, v_r, v_f = count_jobs("validation")
-        ev_c, ev_r, ev_f = count_jobs("eval")
+        try:
+            s_c, s_r, s_f = count_jobs("synthesis-exp", prefix)
+            e_c, e_r, e_f = count_jobs("enrichment")
+            v_c, v_r, v_f = count_jobs("validation")
+            ev_c, ev_r, ev_f = count_jobs("eval")
+        except Exception:
+            log.warning("Failed to get job counts (auth expired?), saving progress...")
+            write_results(valid_instances, eval_results, output_dir, f"checkpoint-{int(time.time())}")
+            time.sleep(poll_interval * 4)
+            continue
 
         eval_summary = " | ".join(
             f"{m}: {sum(1 for r in eval_results[m] if r.get('resolved'))}/{len(eval_results[m])}"
@@ -411,6 +417,11 @@ def poll_and_stream(prefix, code_cm, models, output_dir, poll_interval=30):
             s_c, s_r, s_f, e_c, e_r, e_f, v_c, v_r, v_f, ev_c, ev_r, ev_f,
             eval_summary,
         )
+
+        # Save checkpoint periodically
+        total_eval = sum(len(v) for v in eval_results.values())
+        if total_eval > 0 and total_eval % 20 < len(models):
+            write_results(valid_instances, eval_results, output_dir, "latest")
 
         # ── Check if everything is done ──
         all_synth_done = s_r == 0 and (s_c + s_f) > 0
