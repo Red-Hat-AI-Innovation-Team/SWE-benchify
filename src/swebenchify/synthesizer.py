@@ -5795,19 +5795,21 @@ def _run_tests_on_buggy_code(
             logger.debug("  Running targeted tests: %s", test_file)
     elif target_file and language == "go":
         pkg_dir = os.path.dirname(target_file) or "."
+        # CGO_ENABLED=0 avoids build failures from C deps (btrfs, gpgme, etc.)
+        go_test_base = ["env", "CGO_ENABLED=0", "go", "test", "-short", "-count=1", "-timeout", "90s"]
         co_located_test = Path(repo_path) / (
             str(Path(target_file).parent / f"{Path(target_file).stem}_test.go")
         )
         if co_located_test.is_file():
-            test_cmd = ["go", "test", "-short", "-count=1", "-timeout", "90s", f"./{pkg_dir}"]
+            test_cmd = go_test_base + [f"./{pkg_dir}"]
             logger.debug("  Running targeted Go tests: ./%s", pkg_dir)
         elif function_name and _find_go_cross_package_test(repo_path, function_name):
             cross_pkg = _find_go_cross_package_test(repo_path, function_name)
             cross_dir = os.path.dirname(cross_pkg) or "."
-            test_cmd = ["go", "test", "-short", "-count=1", "-timeout", "90s", f"./{pkg_dir}", f"./{cross_dir}"]
+            test_cmd = go_test_base + [f"./{pkg_dir}", f"./{cross_dir}"]
             logger.debug("  Running cross-package Go tests for %s: ./%s ./%s", function_name, pkg_dir, cross_dir)
         else:
-            test_cmd = ["go", "test", "-short", "-count=1", "-timeout", "90s", f"./{pkg_dir}"]
+            test_cmd = go_test_base + [f"./{pkg_dir}"]
             logger.debug("  Running targeted Go tests: ./%s", pkg_dir)
     elif target_file and language == "rust":
         rust_root = Path(repo_path)

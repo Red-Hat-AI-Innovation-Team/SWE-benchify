@@ -562,6 +562,11 @@ def main():
     # Full pipeline
     if args.resume_prefix:
         code_cm = f"synth-code-{prefix}"
+        # Re-create overlay if it was cleaned up
+        r = oc("get", "configmap", code_cm, "-n", NAMESPACE)
+        if r.returncode != 0:
+            log.info("Code overlay %s missing, re-creating...", code_cm)
+            code_cm = push_code_overlay(prefix)
         c, r, f = count_jobs("synthesis-exp", prefix)
         already = c + r + f
         log.info("Resuming prefix %s: %d jobs already on cluster", prefix, already)
