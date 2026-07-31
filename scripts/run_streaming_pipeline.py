@@ -339,7 +339,7 @@ def poll_and_stream(prefix, code_cm, models, output_dir, poll_interval=30, launc
                     "IMAGE": IMAGE,
                     "NAMESPACE": NAMESPACE,
                     "LANGUAGE": "go",
-                })
+                }, code_cm)
                 new_enrich += 1
 
         if new_enrich:
