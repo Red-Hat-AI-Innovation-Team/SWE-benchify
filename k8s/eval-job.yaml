@@ -25,7 +25,7 @@ spec:
           args:
             - |
               set -eo pipefail
-              export HOME=/tmp GOPATH=/tmp/go GOMODCACHE=/tmp/go/mod
+              export HOME=/tmp GOPATH=/tmp/go GOMODCACHE=/tmp/go/mod CGO_ENABLED=0
 
               python3 << 'EVALSCRIPT'
               import json, subprocess, re, os, sys, shlex

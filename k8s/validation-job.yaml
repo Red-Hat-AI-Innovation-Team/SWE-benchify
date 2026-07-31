@@ -23,7 +23,7 @@ spec:
           args:
             - |
               set -e
-              export HOME=/tmp
+              export HOME=/tmp CGO_ENABLED=0
               git clone --depth=50 https://github.com/${REPO_FULL}.git /tmp/testbed || \
                 git clone https://github.com/${REPO_FULL}.git /tmp/testbed
               python scripts/validate_and_prepare.py \
