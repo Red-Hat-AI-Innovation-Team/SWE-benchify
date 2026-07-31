@@ -141,21 +141,6 @@ def get_job_results(component, prefix=None):
         if not is_done:
             continue
         ann = job.get("metadata", {}).get("annotations", {}).get("result", "")
-        if not ann:
-            try:
-                lr = oc("logs", f"job/{name}", "-n", NAMESPACE, timeout=30)
-                if lr.returncode == 0 and "=== RESULTS ===" in lr.stdout:
-                    log_results = lr.stdout.split("=== RESULTS ===", 1)[1]
-                    for line in lr.stdout.splitlines():
-                        if line.startswith("RESULT: "):
-                            ann = line[8:]
-                            break
-                    if not ann:
-                        json_lines = [x for x in log_results.strip().splitlines() if x.strip().startswith("{")]
-                        if json_lines:
-                            ann = "\n".join(json_lines)
-            except Exception:
-                pass
         results[name] = ann
     return results
 
