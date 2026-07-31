@@ -2260,6 +2260,19 @@ Do NOT make simple operator swaps or single-line deletions — the mutation must
         strategy_override = "\nSTRATEGY: CALLER MUTATION (cross-function bug). Instead of mutating this function directly, find a HELPER FUNCTION that this function calls and mutate THAT. The test failure must appear when testing the original function, but the fix must be in the helper.\n\nFor example: if the target function calls validate_input(), mutate validate_input() so it returns True for invalid inputs. Tests of the target function will fail, but the fix is in validate_input().\n\nRequirements:\n- The mutation MUST be in a function that is CALLED BY the target, not in the target itself\n- The target function code must appear UNCHANGED in the diff\n- The diff must show changes in the called helper function only\n- The failing tests must test the TARGET function (the caller), not the helper directly"
     elif mutation_strategy == "return_corruption":
         strategy_override = "\nFOCUS: Restructure the function's return logic — consolidate multiple return paths into one, extract the return value computation into a variable, or convert early returns into an if-else chain. In the restructuring, introduce a logic error that causes the wrong value to be returned for certain inputs. The restructured code should look like a genuine cleanup."
+    elif mutation_strategy == "symptom_displacement":
+        strategy_override = (
+            "\nSTRATEGY: SYMPTOM DISPLACEMENT — the bug manifests far from its root cause."
+            "\n\nMutate this function so that:"
+            "\n1. The error PROPAGATES through at least one intermediate function before "
+            "reaching a test assertion"
+            "\n2. A PLAUSIBLE BUT WRONG fix exists in a different file — the error message "
+            "or failing test naturally points to a downstream handler, not this function"
+            "\n3. The mutation should look like a structural cleanup (consolidating error paths, "
+            "removing a status check, flattening nested conditionals) that breaks an implicit contract"
+            "\n\nThe goal: an agent reading the test failure will investigate the wrong file first. "
+            "The fix requires tracing the error back through the call chain to find the actual root cause."
+        )
     elif mutation_strategy == "interface_break":
         caller_meta = target.get("_interface_break_caller")
         if caller_meta:
@@ -6323,10 +6336,10 @@ async def synthesize_repo(
         # H2: Fall back to LLM introduce_bug (retry up to 2 times if patch too simple)
         # Each retry uses a progressively more aggressive structural mutation strategy
         if target.get("_interface_break_caller"):
-            _retry_strategies = ["interface_break", "", "guard_removal", "caller_mutation", "return_corruption"]
+            _retry_strategies = ["interface_break", "symptom_displacement", "", "guard_removal", "caller_mutation", "return_corruption"]
             logger.info("%s  Using interface_break as preferred strategy", pfx)
         else:
-            _retry_strategies = ["", "guard_removal", "caller_mutation", "return_corruption"]
+            _retry_strategies = ["", "symptom_displacement", "guard_removal", "caller_mutation", "return_corruption"]
         # Skip targeted mutation for retries — it produces simple patches
         for attempt in range(len(_retry_strategies)):
             if bug_spec is None:

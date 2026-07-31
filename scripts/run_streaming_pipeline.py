@@ -203,9 +203,10 @@ def launch_synthesis(prefix, code_cm, jobs_per_repo, batch_size=500, launch_done
     launched = 0
     skipped = 0
     total = jobs_per_repo * len(REPOS)
-    for repo in REPOS:
-        repo_slug = repo.replace("/", "-")
-        for j in range(jobs_per_repo):
+    # Round-robin across repos so each batch covers all repos
+    for j in range(jobs_per_repo):
+        for repo in REPOS:
+            repo_slug = repo.replace("/", "-")
             job_slug = f"{repo_slug}-{j}"
             full_name = f"synth-exp-{prefix}-{job_slug}"
             if full_name in existing:
@@ -221,16 +222,13 @@ def launch_synthesis(prefix, code_cm, jobs_per_repo, batch_size=500, launch_done
             launched += 1
 
             if launched % batch_size == 0:
-                log.info("Batch %d: %d/%d launched, waiting for cluster...",
-                         launched // batch_size, launched, total)
+                log.info("Batch %d: %d/%d launched (%d repos × %d each so far), waiting...",
+                         launched // batch_size, launched, total, len(REPOS), j + 1)
                 while True:
                     _, running, _ = count_jobs("synthesis-exp", prefix)
                     if running < batch_size // 2:
                         break
                     time.sleep(30)
-
-        if launched % 500 == 0:
-            log.info("  %s: %d/%d total launched", repo, launched, total)
 
     log.info("Synthesis: %d launched, %d skipped (already existed)", launched, skipped)
     if launch_done:
