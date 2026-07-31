@@ -2,7 +2,7 @@
 # Collect validation results from job annotations (persists after pod GC).
 # Usage: bash k8s/collect-validation.sh [--watch]
 
-OUTPUT="data/opus-validated-batch1.jsonl"
+OUTPUT="${OUTPUT:-data/validated-results.jsonl}"
 COLLECTED="${OUTPUT}.collected"
 touch "$COLLECTED" "$OUTPUT"
 NAMESPACE="${NAMESPACE:-swebenchify}"

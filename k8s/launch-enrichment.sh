@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Launch enrichment jobs for synthesis results.
+#
+# Usage:
+#   bash k8s/launch-enrichment.sh <input-jsonl>       # From a pre-collected JSONL file
+#   bash k8s/launch-enrichment.sh                     # Auto-collect from cluster synthesis-exp jobs
+
 IMAGE="${IMAGE:-ghcr.io/red-hat-ai-innovation-team/swe-benchify/swebenchify-synthesis:streaming}"
 NAMESPACE="${NAMESPACE:-swebenchify}"
 LIMIT="${LIMIT:-0}"  # 0 = no limit
+SKIP_SCREENING="${SKIP_SCREENING:-1}"
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
-echo "=== Extracting instances from synthesis pods ==="
-
 oc project "$NAMESPACE" 2>/dev/null || true
 
-# Map pod slug -> repo full name
+# Map slug -> repo full name (for fixing instance_id/repo fields from synthesis output)
 declare -A SLUG_TO_REPO
 SLUG_TO_REPO=(
   [argoproj-argo-cd]="argoproj/argo-cd"
@@ -38,47 +43,71 @@ SLUG_TO_REPO=(
   [thanos-io-thanos]="thanos-io/thanos"
 )
 
-# Collect synthesis results (survives pod GC)
-bash k8s/collect-results.sh synthesis "$TMPDIR/raw-synth.jsonl"
+if [ -n "${1:-}" ] && [ -f "${1:-}" ]; then
+  # Input JSONL provided — use it directly
+  echo "=== Using provided input: $1 ==="
+  cp "$1" "$TMPDIR/all-instances.jsonl"
+else
+  # Auto-collect from cluster synthesis-exp jobs
+  echo "=== Collecting synthesis results from cluster ==="
+  bash k8s/collect-results.sh synthesis-exp "$TMPDIR/raw-synth.jsonl"
 
-# Fix repo and instance_id fields (synthesis outputs "local/repo" as repo)
-for job in $(oc get jobs -l component=synthesis -n "$NAMESPACE" --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null | sort); do
-  slug="${job#synth-}"
-  repo_full="${SLUG_TO_REPO[$slug]:-}"
-  [ -z "$repo_full" ] && continue
+  # Also collect from annotations directly for any jobs whose logs are gone
+  touch "$TMPDIR/all-instances.jsonl"
+  for job in $(oc get jobs -l component=synthesis-exp -n "$NAMESPACE" --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null | sort); do
+    ann=$(oc get job "$job" -n "$NAMESPACE" -o jsonpath='{.metadata.annotations.result}' 2>/dev/null || true)
+    [ -z "$ann" ] && continue
+    echo "$ann" | grep '^{' >> "$TMPDIR/all-instances.jsonl" 2>/dev/null || true
+  done
 
-  oc logs "job/$job" -n "$NAMESPACE" 2>/dev/null | grep '^{' | python3 -c "
-import json, sys
-repo_full = '$repo_full'
-repo_slug = '$slug'
-for line in sys.stdin:
-    line = line.strip()
-    if not line: continue
-    try: d = json.loads(line)
-    except: continue
-    d['repo'] = repo_full
-    old_id = d.get('instance_id', '')
-    if old_id.startswith('local__'):
-        num = old_id.rsplit('-', 1)[-1] if '-' in old_id else old_id
-        d['instance_id'] = f'{repo_slug}-{num}'
-    print(json.dumps(d))
-" >> "$TMPDIR/all-instances.jsonl" 2>/dev/null || true
-done
+  # Merge with log-based results
+  if [ -f "$TMPDIR/raw-synth.jsonl" ]; then
+    cat "$TMPDIR/raw-synth.jsonl" >> "$TMPDIR/all-instances.jsonl"
+  fi
+fi
 
-# Deduplicate by instance_id
+# Fix repo and instance_id fields, deduplicate
 python3 -c "
-import json
+import json, sys, re
+
+slug_to_repo = dict(line.split('=', 1) for line in '''$(for k in "${!SLUG_TO_REPO[@]}"; do echo "$k=${SLUG_TO_REPO[$k]}"; done)'''.strip().split('\n') if '=' in line)
+
 seen = set()
 with open('$TMPDIR/all-instances.jsonl') as f:
     for line in f:
         line = line.strip()
         if not line:
             continue
-        d = json.loads(line)
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        # Fix repo field if it's a local path
+        repo = d.get('repo', '')
+        if 'local' in repo or '/' not in repo or '/clones/' in repo:
+            # Try to infer repo from instance_id or job name
+            iid = d.get('instance_id', '')
+            matched = False
+            for slug, full in sorted(slug_to_repo.items(), key=lambda x: -len(x[0])):
+                if slug in iid or slug in d.get('_job_name', ''):
+                    d['repo'] = full
+                    matched = True
+                    break
+            if not matched:
+                continue
+
+        # Fix instance_id
+        old_id = d.get('instance_id', '')
+        if old_id.startswith('local__'):
+            num = old_id.rsplit('-', 1)[-1] if '-' in old_id else old_id
+            repo_slug = d['repo'].replace('/', '-')
+            d['instance_id'] = f'{repo_slug}-{num}'
+
         iid = d.get('instance_id', '')
         if iid and iid not in seen:
             seen.add(iid)
-            print(line)
+            print(json.dumps(d))
 " > "$TMPDIR/deduped.jsonl" 2>/dev/null || true
 
 total=$(wc -l < "$TMPDIR/deduped.jsonl" | tr -d ' ')
@@ -93,14 +122,12 @@ skipped=0
 while IFS= read -r line; do
   [ -z "$line" ] && continue
 
-  # Extract fields with python (handles control chars safely)
   read -r instance_id repo_full < <(echo "$line" | python3 -c "
 import json, sys
 d = json.loads(sys.stdin.read())
 print(d['instance_id'], d['repo'])
 ")
 
-  # Sanitize for k8s naming
   instance_slug=$(echo "$instance_id" | tr '[:upper:]' '[:lower:]' | tr '_' '-' | sed 's/[^a-z0-9-]/-/g' | cut -c1-63 | sed 's/-$//')
 
   if [ -z "$instance_slug" ]; then
@@ -108,33 +135,27 @@ print(d['instance_id'], d['repo'])
     continue
   fi
 
-  # Skip if job already exists
   if echo "$existing" | grep -q "^enrich-${instance_slug}$"; then
     skipped=$((skipped + 1))
     continue
   fi
 
-  # Write instance to temp file (avoids shell escaping issues with control chars)
   echo "$line" > "$TMPDIR/instance-${instance_slug}.jsonl"
 
-  # Create ConfigMap from file
   oc delete configmap "enrich-input-$instance_slug" -n "$NAMESPACE" &>/dev/null || true
   oc create configmap "enrich-input-$instance_slug" \
     --from-file="instances.jsonl=$TMPDIR/instance-${instance_slug}.jsonl" \
     -n "$NAMESPACE"
 
-  # Launch enrichment job
-  export REPO_FULL="$repo_full" INSTANCE_SLUG="$instance_slug" IMAGE="$IMAGE" NAMESPACE="$NAMESPACE"
-  envsubst '${REPO_FULL} ${INSTANCE_SLUG} ${IMAGE} ${NAMESPACE}' < k8s/enrichment-job.yaml | oc apply -n "$NAMESPACE" -f -
+  export REPO_FULL="$repo_full" INSTANCE_SLUG="$instance_slug" IMAGE="$IMAGE" NAMESPACE="$NAMESPACE" SKIP_SCREENING="$SKIP_SCREENING"
+  envsubst '${REPO_FULL} ${INSTANCE_SLUG} ${IMAGE} ${NAMESPACE} ${SKIP_SCREENING}' < k8s/enrichment-job.yaml | oc apply -n "$NAMESPACE" -f -
   launched=$((launched + 1))
   echo "Launched: enrich-$instance_slug ($repo_full)"
 
-  # Progress update every 50
   if [ $((launched % 50)) -eq 0 ]; then
     echo "  ... $launched jobs launched so far"
   fi
 
-  # Respect limit
   if [ "$LIMIT" -gt 0 ] && [ "$launched" -ge "$LIMIT" ]; then
     echo "Reached limit of $LIMIT jobs"
     break
@@ -144,4 +165,3 @@ done < "$TMPDIR/deduped.jsonl"
 echo
 echo "=== Launched $launched enrichment jobs ($skipped already existed, $total total instances) ==="
 echo "Monitor with: oc get jobs -l component=enrichment -n $NAMESPACE"
-echo "Logs: oc logs job/enrich-<instance-slug> -n $NAMESPACE"

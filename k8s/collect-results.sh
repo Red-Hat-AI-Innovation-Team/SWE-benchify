@@ -32,12 +32,21 @@ collect_once() {
     # Skip if already collected
     grep -q "^${job}$" "$COLLECTED_FILE" && continue
 
-    # Extract results from logs
+    # Extract results from logs first, fall back to annotations if logs are gone
     local results
     results=$(oc logs "job/$job" -n "$NAMESPACE" 2>/dev/null \
       | sed -n '/=== RESULTS ===/,$ p' \
       | tail -n +2 \
       | grep '^{' || true)
+
+    if [ -z "$results" ]; then
+      # Logs may be GC'd — try annotations
+      local ann
+      ann=$(oc get job "$job" -n "$NAMESPACE" -o jsonpath='{.metadata.annotations.result}' 2>/dev/null || true)
+      if [ -n "$ann" ]; then
+        results=$(echo "$ann" | grep '^{' || echo "$ann")
+      fi
+    fi
 
     if [ -n "$results" ]; then
       echo "$results" >> "$OUTPUT"

@@ -6,8 +6,8 @@ metadata:
     app: swebenchify
     component: synthesis-exp
 spec:
-  backoffLimit: 0
-  activeDeadlineSeconds: 3600
+  backoffLimit: 1
+  activeDeadlineSeconds: 7200
   template:
     metadata:
       labels:
@@ -32,6 +32,7 @@ spec:
                 --output-dir /output \
                 --model opus \
                 --yield-only \
+                --haiku-screen \
                 --max-mutations ${MAX_MUTATIONS} \
                 --max-files 20 \
                 --max-functions 5 \

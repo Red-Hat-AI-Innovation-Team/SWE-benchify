@@ -2260,6 +2260,19 @@ Do NOT make simple operator swaps or single-line deletions — the mutation must
         strategy_override = "\nSTRATEGY: CALLER MUTATION (cross-function bug). Instead of mutating this function directly, find a HELPER FUNCTION that this function calls and mutate THAT. The test failure must appear when testing the original function, but the fix must be in the helper.\n\nFor example: if the target function calls validate_input(), mutate validate_input() so it returns True for invalid inputs. Tests of the target function will fail, but the fix is in validate_input().\n\nRequirements:\n- The mutation MUST be in a function that is CALLED BY the target, not in the target itself\n- The target function code must appear UNCHANGED in the diff\n- The diff must show changes in the called helper function only\n- The failing tests must test the TARGET function (the caller), not the helper directly"
     elif mutation_strategy == "return_corruption":
         strategy_override = "\nFOCUS: Restructure the function's return logic — consolidate multiple return paths into one, extract the return value computation into a variable, or convert early returns into an if-else chain. In the restructuring, introduce a logic error that causes the wrong value to be returned for certain inputs. The restructured code should look like a genuine cleanup."
+    elif mutation_strategy == "symptom_displacement":
+        strategy_override = (
+            "\nSTRATEGY: SYMPTOM DISPLACEMENT — the bug manifests far from its root cause."
+            "\n\nMutate this function so that:"
+            "\n1. The error PROPAGATES through at least one intermediate function before "
+            "reaching a test assertion"
+            "\n2. A PLAUSIBLE BUT WRONG fix exists in a different file — the error message "
+            "or failing test naturally points to a downstream handler, not this function"
+            "\n3. The mutation should look like a structural cleanup (consolidating error paths, "
+            "removing a status check, flattening nested conditionals) that breaks an implicit contract"
+            "\n\nThe goal: an agent reading the test failure will investigate the wrong file first. "
+            "The fix requires tracing the error back through the call chain to find the actual root cause."
+        )
     elif mutation_strategy == "interface_break":
         caller_meta = target.get("_interface_break_caller")
         if caller_meta:
@@ -3412,7 +3425,7 @@ def _issue_patch_aligned(problem_statement: str, patch: str) -> bool:
 
 
 def _is_valid_test_output(test_output: str) -> bool:
-    """Check if test output contains a real test failure, not a setup error."""
+    """Check if test output contains a real test failure, not a setup/build error."""
     stripped = test_output.strip()
     if len(stripped) < 100:
         return False
@@ -3421,14 +3434,22 @@ def _is_valid_test_output(test_output: str) -> bool:
         return False
     if 'ImportError while loading conftest' in stripped:
         return False
-    # Reject RAT/license check failures — these are meta-build failures caused by
-    # synthetic marker files, completely unrelated to the logic bug under test.
-    # Embedding them in the issue creates an irreconcilable mismatch with the patch.
     if any(sig in stripped for sig in _RAT_FAILURE_SIGNALS):
+        return False
+    _BUILD_FAILURE_SIGNALS = (
+        '[build failed]',
+        '[setup failed]',
+        'No such file or directory',
+        'cannot find package',
+        'could not import',
+        'no required module provides',
+        'missing go.sum entry',
+    )
+    if any(sig in stripped for sig in _BUILD_FAILURE_SIGNALS):
         return False
     failure_signals = (
         'FAILED', 'FAIL', 'AssertionError',
-        'panicked', 'BUILD FAILURE',
+        'panicked',
     )
     if not any(sig in stripped for sig in failure_signals):
         return False
@@ -5545,6 +5566,127 @@ def _validate_multi_file_necessity(
         return True  # can't verify, accept by default
 
 
+async def _haiku_screen_instance(
+    repo_path: str,
+    buggy_commit: str,
+    test_output: str,
+    language: str,
+    bug_spec: "BugSpec",
+    max_turns: int = 10,
+    agent_timeout: int = 600,
+) -> bool:
+    """Run a quick Haiku agent attempt; return True if Haiku FAILED to solve.
+
+    Gives Haiku the test failure output and lets it try to fix the bug.
+    If Haiku resolves it in ≤max_turns, the instance is too easy — return False.
+    If Haiku fails, the instance is hard enough — return True (keep it).
+
+    Uses test_output as the problem description (more info than the agent gets
+    at eval time), making this a conservative screen.
+    """
+    if ClaudeCodeOptions is None:
+        logger.warning("Claude Code SDK not available, skipping Haiku screening")
+        return True
+
+    resolved_model = MODEL_MAP.get("haiku", "haiku")
+
+    def _run(cmd, **kw):
+        return subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True, **kw)
+
+    # Determine test command from bug_spec target file
+    if language == "go":
+        pkg_dir = os.path.dirname(bug_spec.file) or "."
+        test_cmd = f"go test -v -count=1 -timeout 120s ./{pkg_dir}"
+    elif language == "python":
+        test_cmd = "python -m pytest -x -q"
+    else:
+        test_cmd = "make test"
+
+    prompt = (
+        f"You are a software engineer fixing a bug in a {language} project.\n\n"
+        f"The repository is at {repo_path}. There are failing tests.\n\n"
+        f"## Failing test output\n```\n{test_output[:3000]}\n```\n\n"
+        f"## Instructions\n"
+        f"1. Read the failing test output and find the relevant source code.\n"
+        f"2. Fix the bug so the failing tests pass.\n"
+        f"3. Verify your fix by running: {test_cmd}\n\n"
+        f"Do NOT modify any test files."
+    )
+
+    # Save pre-agent state
+    _run(["git", "add", "-A"])
+    _run(["git", "commit", "-m", "pre-screen", "--allow-empty"],
+         env={**os.environ, "GIT_AUTHOR_NAME": "screen", "GIT_AUTHOR_EMAIL": "s@s",
+              "GIT_COMMITTER_NAME": "screen", "GIT_COMMITTER_EMAIL": "s@s"})
+    pre_ref = _run(["git", "rev-parse", "HEAD"]).stdout.strip()
+
+    try:
+        options = ClaudeCodeOptions(
+            cwd=repo_path,
+            allowed_tools=["Bash(description:*)", "Read", "Edit", "Write"],
+            permission_mode="bypassPermissions",
+            max_turns=max_turns,
+            model=resolved_model,
+        )
+
+        logger.info("  Haiku screening: running agent (max_turns=%d, model=%s)", max_turns, resolved_model)
+
+        agent_errored = False
+        try:
+            async for message in query(prompt=prompt, options=options):
+                if isinstance(message, ResultMessage):
+                    pass
+        except Exception as exc:
+            logger.warning("  Haiku screening agent error: %s", exc)
+            agent_errored = True
+
+        if agent_errored:
+            logger.info("  Haiku screening: agent errored, treating as FAILED (keeping instance)")
+            return True
+
+        # Revert test file modifications (anti-reward-hacking)
+        if language == "go":
+            test_patterns = [r"_test\.go$"]
+        else:
+            test_patterns = [r"(^|/)tests?/", r"test_.*\.py$"]
+        combined = re.compile("|".join(test_patterns))
+
+        r = _run(["git", "diff", "--name-only"])
+        for f in r.stdout.strip().split("\n"):
+            if f and combined.search(f):
+                _run(["git", "checkout", "--", f])
+        r = _run(["git", "ls-files", "--others", "--exclude-standard"])
+        for f in r.stdout.strip().split("\n"):
+            if f and combined.search(f):
+                try:
+                    os.remove(os.path.join(repo_path, f))
+                except OSError:
+                    pass
+
+        # Run tests to check if Haiku solved it
+        test_result = _run(test_cmd, shell=True, timeout=180)
+        combined_output = (test_result.stdout or "") + "\n" + (test_result.stderr or "")
+
+        if language == "go":
+            has_fail = "FAIL" in combined_output and test_result.returncode != 0
+        else:
+            has_fail = test_result.returncode != 0
+
+        haiku_failed = has_fail
+        if haiku_failed:
+            logger.info("  Haiku screening: FAILED to solve (keeping instance)")
+        else:
+            logger.info("  Haiku screening: SOLVED (rejecting instance)")
+
+        return haiku_failed
+
+    finally:
+        # Restore pre-agent state
+        _run(["git", "checkout", "."])
+        _run(["git", "clean", "-fd"])
+        _run(["git", "reset", "--hard", pre_ref])
+
+
 _FAILED_TEST_PATTERN = re.compile(
     r"FAILED\s+(\S+::(?:\S+::)?\S+)",
 )
@@ -5666,17 +5808,21 @@ def _run_tests_on_buggy_code(
             logger.debug("  Running targeted tests: %s", test_file)
     elif target_file and language == "go":
         pkg_dir = os.path.dirname(target_file) or "."
+        # CGO_ENABLED=0 avoids build failures from C deps (btrfs, gpgme, etc.)
+        go_test_base = ["env", "CGO_ENABLED=0", "go", "test", "-short", "-count=1", "-timeout", "90s"]
         co_located_test = Path(repo_path) / (
             str(Path(target_file).parent / f"{Path(target_file).stem}_test.go")
         )
         if co_located_test.is_file():
-            test_cmd = ["go", "test", "-short", "-count=1", "-timeout", "90s", f"./{pkg_dir}"]
+            test_cmd = go_test_base + [f"./{pkg_dir}"]
             logger.debug("  Running targeted Go tests: ./%s", pkg_dir)
         elif function_name and _find_go_cross_package_test(repo_path, function_name):
-            test_cmd = ["go", "test", "-short", "-count=1", "-timeout", "90s", "./..."]
-            logger.debug("  Running cross-package Go tests for %s: ./...", function_name)
+            cross_pkg = _find_go_cross_package_test(repo_path, function_name)
+            cross_dir = os.path.dirname(cross_pkg) or "."
+            test_cmd = go_test_base + [f"./{pkg_dir}", f"./{cross_dir}"]
+            logger.debug("  Running cross-package Go tests for %s: ./%s ./%s", function_name, pkg_dir, cross_dir)
         else:
-            test_cmd = ["go", "test", "-short", "-count=1", "-timeout", "90s", f"./{pkg_dir}"]
+            test_cmd = go_test_base + [f"./{pkg_dir}"]
             logger.debug("  Running targeted Go tests: ./%s", pkg_dir)
     elif target_file and language == "rust":
         rust_root = Path(repo_path)
@@ -6013,6 +6159,7 @@ async def synthesize_repo(
     max_files: int | None = None,
     max_functions: int | None = None,
     on_candidate: Callable[[CandidateInstance, dict], None] | None = None,
+    haiku_screen: bool = False,
 ) -> RepoSynthesisResult:
     """Synthesize bug instances for a repository.
 
@@ -6109,11 +6256,18 @@ async def synthesize_repo(
                     t["_interface_break_caller"] = ibt["_interface_break_caller"]
                     break
 
-    # Prioritize interface_break targets — try them before regular targets
+    # Mix interface_break and regular targets — don't prioritize multi-file
+    # so single-file mutations also get a chance to yield
     ib_targets = [t for t in targets if t.get('_interface_break_caller')]
     non_ib_targets = [t for t in targets if not t.get('_interface_break_caller')]
-    targets = ib_targets + non_ib_targets
-    logger.info('Target order: %d interface_break first, then %d regular', len(ib_targets), len(non_ib_targets))
+    logger.info('Targets: %d interface_break, %d regular (interleaved)', len(ib_targets), len(non_ib_targets))
+    interleaved = []
+    for i in range(max(len(ib_targets), len(non_ib_targets))):
+        if i < len(non_ib_targets):
+            interleaved.append(non_ib_targets[i])
+        if i < len(ib_targets):
+            interleaved.append(ib_targets[i])
+    targets = interleaved
 
     _ensure_venv(repo_path, language)
 
@@ -6182,10 +6336,10 @@ async def synthesize_repo(
         # H2: Fall back to LLM introduce_bug (retry up to 2 times if patch too simple)
         # Each retry uses a progressively more aggressive structural mutation strategy
         if target.get("_interface_break_caller"):
-            _retry_strategies = ["interface_break", "", "guard_removal", "caller_mutation", "return_corruption"]
+            _retry_strategies = ["interface_break", "symptom_displacement", "", "guard_removal", "caller_mutation", "return_corruption"]
             logger.info("%s  Using interface_break as preferred strategy", pfx)
         else:
-            _retry_strategies = ["", "guard_removal", "caller_mutation", "return_corruption"]
+            _retry_strategies = ["", "symptom_displacement", "guard_removal", "caller_mutation", "return_corruption"]
         # Skip targeted mutation for retries — it produces simple patches
         for attempt in range(len(_retry_strategies)):
             if bug_spec is None:
@@ -6442,6 +6596,16 @@ async def synthesize_repo(
             logger.info('%s  Skipped — duplicate patch (same diff already yielded)', pfx)
             continue
         seen_patches.add(patch_hash)
+
+        if haiku_screen:
+            haiku_failed = await _haiku_screen_instance(
+                repo_path, buggy_commit, test_output or "",
+                language, bug_spec,
+            )
+            if not haiku_failed:
+                logger.warning("%s  Skipped — Haiku solved in screening", pfx)
+                continue
+            logger.info("%s  Passed Haiku screening (Haiku failed to solve)", pfx)
 
         if yield_only:
             synthesis_result = SynthesisResult(

@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: eval-${INSTANCE_SLUG}
+  name: eval-${MODEL}-${INSTANCE_SLUG}
   labels:
     app: swebenchify
     component: eval
@@ -25,7 +25,7 @@ spec:
           args:
             - |
               set -eo pipefail
-              export HOME=/tmp GOPATH=/tmp/go GOMODCACHE=/tmp/go/mod
+              export HOME=/tmp GOPATH=/tmp/go GOMODCACHE=/tmp/go/mod CGO_ENABLED=0
 
               python3 << 'EVALSCRIPT'
               import json, subprocess, re, os, sys, shlex
@@ -154,10 +154,13 @@ spec:
 
               with open('/tmp/agent_prompt.txt', 'w') as f: f.write(prompt)
 
+              eval_model = os.environ.get('EVAL_MODEL_ID', 'claude-haiku-4-5')
+              print(f'Eval model: {eval_model}', flush=True)
+
               print('=== AGENT START ===', flush=True)
               with open('/tmp/agent.log', 'w') as logf:
                   proc = subprocess.Popen(
-                      'cat /tmp/agent_prompt.txt | claude --model claude-haiku-4-5 --print '
+                      f'cat /tmp/agent_prompt.txt | claude --model {eval_model} --print '
                       '--max-turns 30 '
                       '--allowedTools "Bash(description:*),Read,Edit,Write" '
                       '--allow-dangerously-skip-permissions',
@@ -233,9 +236,12 @@ spec:
               resolved = all_pass and len(f2p) > 0
               reward = 1 if resolved else 0
 
+              eval_model_short = os.environ.get('EVAL_MODEL', 'haiku')
+
               result = {
                   'instance_id': instance_id,
-                  'model': 'haiku',
+                  'repo': repo,
+                  'model': eval_model_short,
                   'resolved': resolved,
                   'reward': reward,
                   'agent_patch': agent_patch,
@@ -252,7 +258,7 @@ spec:
 
               # --- Phase 5: Persist as job annotation ---
               token = open('/var/run/secrets/kubernetes.io/serviceaccount/token').read().strip()
-              job_name = 'eval-${INSTANCE_SLUG}'
+              job_name = 'eval-${MODEL}-${INSTANCE_SLUG}'
               ns = '${NAMESPACE}'
               body = json.dumps({"metadata": {"annotations": {"result": json.dumps(result, ensure_ascii=True)}}})
               with open('/tmp/annotation_body.json', 'w') as f: f.write(body)
@@ -270,6 +276,10 @@ spec:
               print('=== EVAL COMPLETE ===', flush=True)
               EVALSCRIPT
           env:
+            - name: EVAL_MODEL_ID
+              value: "${MODEL_ID}"
+            - name: EVAL_MODEL
+              value: "${MODEL}"
             - name: CLAUDE_CODE_USE_VERTEX
               value: "1"
             - name: CLOUD_ML_REGION
@@ -297,7 +307,7 @@ spec:
       volumes:
         - name: input
           configMap:
-            name: eval-input-${INSTANCE_SLUG}
+            name: eval-input-${MODEL}-${INSTANCE_SLUG}
         - name: gcp-creds
           secret:
             secretName: vertex-credentials

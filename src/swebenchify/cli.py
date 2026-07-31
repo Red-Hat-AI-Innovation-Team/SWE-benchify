@@ -414,9 +414,22 @@ def _cmd_synthesize(args: argparse.Namespace) -> None:
             base_commit = result.stdout.strip()
         else:
             base_commit = args.base_commit
-        dirname = os.path.basename(abs_path)
         if not repo_slug or repo_slug == abs_path:
-            repo_slug = f"local/{dirname}"
+            # Try to derive owner/repo from git remote URL
+            try:
+                remote = subprocess.run(
+                    ["git", "remote", "get-url", "origin"],
+                    cwd=abs_path, capture_output=True, text=True,
+                ).stdout.strip()
+                # Handle https://github.com/owner/repo.git and git@github.com:owner/repo.git
+                import re as _re
+                m = _re.search(r"[/:]([^/]+/[^/]+?)(?:\.git)?$", remote)
+                if m:
+                    repo_slug = m.group(1)
+            except Exception:
+                pass
+            if not repo_slug or repo_slug == abs_path:
+                repo_slug = f"local/{os.path.basename(abs_path)}"
     else:
         abs_path = repo_path
         base_commit = args.base_commit or "HEAD"
@@ -450,6 +463,7 @@ def _cmd_synthesize(args: argparse.Namespace) -> None:
                 max_files=args.max_files,
                 max_functions=args.max_functions,
                 on_candidate=_on_candidate,
+                haiku_screen=args.haiku_screen,
             )
 
         candidates = result.candidates
@@ -739,6 +753,10 @@ def build_parser() -> argparse.ArgumentParser:
     synth_parser.add_argument(
         "--max-functions", type=int, default=None,
         help="Max functions per file to extract (default: 5, or 10 when multiplier > 8)",
+    )
+    synth_parser.add_argument(
+        "--haiku-screen", action="store_true", default=False,
+        help="Screen candidates with a Haiku agent; reject if Haiku solves quickly",
     )
 
     # enrich

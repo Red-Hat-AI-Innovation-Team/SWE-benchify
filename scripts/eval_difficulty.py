@@ -33,6 +33,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NAMESPACE = "swebenchify"
 IMAGE = "ghcr.io/red-hat-ai-innovation-team/swe-benchify/swebenchify-synthesis:streaming"
 SYNTHESIZER_PATH = os.path.join(PROJECT_ROOT, "src/swebenchify/synthesizer.py")
+CLI_PATH = os.path.join(PROJECT_ROOT, "src/swebenchify/cli.py")
 VALIDATE_SCRIPT_PATH = os.path.join(PROJECT_ROOT, "scripts/validate_and_prepare.py")
 
 EVAL_REPOS = [
@@ -69,6 +70,7 @@ def push_code_overlay(prefix):
     oc("delete", "configmap", cm_name, "-n", NAMESPACE)
     r = oc("create", "configmap", cm_name,
            f"--from-file=synthesizer.py={SYNTHESIZER_PATH}",
+           f"--from-file=cli.py={CLI_PATH}",
            f"--from-file=validate_and_prepare.py={VALIDATE_SCRIPT_PATH}",
            "-n", NAMESPACE)
     if r.returncode != 0:
@@ -86,6 +88,10 @@ def inject_code_overlay(yaml_text, code_cm):
         "            - name: code-overlay\n"
         "              mountPath: /app/src/swebenchify/synthesizer.py\n"
         "              subPath: synthesizer.py\n"
+        "              readOnly: true\n"
+        "            - name: code-overlay\n"
+        "              mountPath: /app/src/swebenchify/cli.py\n"
+        "              subPath: cli.py\n"
         "              readOnly: true\n"
         "            - name: code-overlay\n"
         "              mountPath: /app/scripts/validate_and_prepare.py\n"
@@ -112,7 +118,7 @@ def inject_code_overlay(yaml_text, code_cm):
     return yaml_text
 
 
-def launch_job(yaml_path, env_vars, code_cm=None, model_id=None):
+def launch_job(yaml_path, env_vars, code_cm=None):
     envsubst_vars = " ".join(f"${{{k}}}" for k in env_vars)
     env = {**os.environ, **env_vars}
     r = subprocess.run(
@@ -120,8 +126,6 @@ def launch_job(yaml_path, env_vars, code_cm=None, model_id=None):
         shell=True, capture_output=True, text=True, env=env,
     )
     rendered = inject_code_overlay(r.stdout, code_cm)
-    if model_id:
-        rendered = rendered.replace("claude-haiku-4-5", model_id)
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
         f.write(rendered)
         tmp = f.name
@@ -316,8 +320,8 @@ def _run_eval_only(eval_only_path, model, model_id, round_id):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             f.write(json.dumps(inst) + "\n")
             tmpf = f.name
-        oc("delete", "configmap", f"eval-input-{job_slug}", "-n", NAMESPACE)
-        oc("create", "configmap", f"eval-input-{job_slug}",
+        oc("delete", "configmap", f"eval-input-{model}-{job_slug}", "-n", NAMESPACE)
+        oc("create", "configmap", f"eval-input-{model}-{job_slug}",
            f"--from-file=instance.jsonl={tmpf}", "-n", NAMESPACE)
         os.unlink(tmpf)
         launch_job(eval_yaml, {
@@ -325,9 +329,9 @@ def _run_eval_only(eval_only_path, model, model_id, round_id):
             "INSTANCE_SLUG": job_slug,
             "IMAGE": IMAGE,
             "NAMESPACE": NAMESPACE,
-            "LANGUAGE": "go",
             "MODEL": model,
-        }, model_id=model_id)
+            "MODEL_ID": model_id,
+        })
 
     wait_for_jobs("eval", prefix, timeout=3600)
     eval_results = collect_annotations("eval", prefix)
@@ -540,8 +544,8 @@ def run_eval(n_instances=10, seed=None, repos=None, model="haiku", eval_only=Non
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             f.write(json.dumps(inst) + "\n")
             tmpf = f.name
-        oc("delete", "configmap", f"eval-input-{job_slug}", "-n", NAMESPACE)
-        oc("create", "configmap", f"eval-input-{job_slug}",
+        oc("delete", "configmap", f"eval-input-{model}-{job_slug}", "-n", NAMESPACE)
+        oc("create", "configmap", f"eval-input-{model}-{job_slug}",
            f"--from-file=instance.jsonl={tmpf}", "-n", NAMESPACE)
         os.unlink(tmpf)
         launch_job(eval_yaml, {
@@ -549,9 +553,9 @@ def run_eval(n_instances=10, seed=None, repos=None, model="haiku", eval_only=Non
             "INSTANCE_SLUG": job_slug,
             "IMAGE": IMAGE,
             "NAMESPACE": NAMESPACE,
-            "LANGUAGE": "go",
             "MODEL": model,
-        }, model_id=model_id)
+            "MODEL_ID": model_id,
+        })
 
     wait_for_jobs("eval", prefix, timeout=3600)
     eval_results = collect_annotations("eval", prefix)
