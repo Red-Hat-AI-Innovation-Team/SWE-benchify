@@ -137,10 +137,13 @@ async def judge_instance(instance: dict, source: str, ground_truth: str) -> Judg
     try:
         async for message in query(prompt=prompt, options=options):
             if isinstance(message, ResultMessage):
-                for block in message.content:
-                    if hasattr(block, "text"):
-                        result_text = block.text
-                        break
+                if hasattr(message, "result") and message.result:
+                    result_text = message.result
+                elif hasattr(message, "content") and message.content:
+                    for block in message.content:
+                        if hasattr(block, "text"):
+                            result_text = block.text
+                            break
     except Exception as exc:
         log.warning("Judge call failed for %s: %s", instance.get("instance_id", "?"), exc)
 
