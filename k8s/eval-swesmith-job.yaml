@@ -31,9 +31,7 @@ spec:
 
               # Install Node.js + Claude Code CLI to user-writable path
               mkdir -p /tmp/node
-              curl -fsSL https://nodejs.org/dist/v20.18.0/node-v20.18.0-linux-x64.tar.xz -o /tmp/node.tar.xz
-              tar -xJf /tmp/node.tar.xz -C /tmp/node --strip-components=1
-              rm /tmp/node.tar.xz
+              curl -fsSL https://nodejs.org/dist/v20.18.0/node-v20.18.0-linux-x64.tar.gz | tar -xz -C /tmp/node --strip-components=1
               export PATH="/tmp/node/bin:$PATH"
               npm install -g @anthropic-ai/claude-code
 
