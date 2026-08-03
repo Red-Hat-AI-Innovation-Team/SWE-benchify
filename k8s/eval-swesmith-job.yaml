@@ -1,0 +1,259 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: eval-swesmith-${MODEL}-${INSTANCE_SLUG}
+  labels:
+    app: swebenchify
+    component: eval-swesmith
+    model: ${MODEL}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  template:
+    metadata:
+      labels:
+        app: swebenchify
+        component: eval-swesmith
+        model: ${MODEL}
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: dockerhub-creds
+      containers:
+        - name: evaluator
+          image: ${SWESMITH_IMAGE}
+          imagePullPolicy: Always
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -eo pipefail
+              export HOME=/tmp
+
+              # Install Node.js + Claude Code CLI to user-writable path
+              mkdir -p /tmp/node
+              curl -fsSL https://nodejs.org/dist/v20.18.0/node-v20.18.0-linux-x64.tar.xz -o /tmp/node.tar.xz
+              tar -xJf /tmp/node.tar.xz -C /tmp/node --strip-components=1
+              rm /tmp/node.tar.xz
+              export PATH="/tmp/node/bin:$PATH"
+              npm install -g @anthropic-ai/claude-code
+
+              python3 << 'EVALSCRIPT'
+              import json, subprocess, re, os, sys
+
+              inst = json.loads(open('/input/instance.jsonl').read())
+              repo = inst.get('repo', '')
+              instance_id = inst['instance_id']
+              problem = inst['problem_statement']
+              gold_patch = inst['patch']
+              f2p = inst['FAIL_TO_PASS']
+              p2p = inst.get('PASS_TO_PASS', '[]')
+              if isinstance(f2p, str): f2p = json.loads(f2p)
+              if isinstance(p2p, str): p2p = json.loads(p2p)
+
+              print(f'Instance: {instance_id}', flush=True)
+              print(f'Repo: {repo}', flush=True)
+              print(f'F2P tests: {len(f2p)}', flush=True)
+
+              def run(cmd, **kw):
+                  return subprocess.run(cmd, shell=True, capture_output=True, text=True, **kw)
+
+              # Repo is pre-cloned at /testbed — fix permissions for git operations
+              run('git config --global --add safe.directory /testbed')
+              run('chmod -R u+w /testbed/.git', timeout=30)
+
+              # Introduce the bug (reverse-apply gold patch)
+              with open('/tmp/gold.patch', 'w') as f: f.write(gold_patch)
+              r = run('git apply --reverse /tmp/gold.patch', cwd='/testbed')
+              if r.returncode == 0:
+                  print('Bug introduced via reverse-apply', flush=True)
+              else:
+                  r = run('git apply --reverse --3way /tmp/gold.patch', cwd='/testbed')
+                  if r.returncode == 0:
+                      print('Bug introduced via reverse-apply --3way', flush=True)
+                  else:
+                      r2 = run('git apply /tmp/gold.patch', cwd='/testbed')
+                      if r2.returncode == 0:
+                          print('Bug already baked in, resetting...', flush=True)
+                          run('git checkout .', cwd='/testbed')
+                          run('git clean -fd', cwd='/testbed')
+                      else:
+                          print(f'WARNING: Could not introduce bug: {r.stderr[:200]}', flush=True)
+
+              # Save pre-agent state
+              subprocess.run(['git', 'add', '-A'], cwd='/testbed', capture_output=True)
+              subprocess.run(['git', 'commit', '-m', 'pre-agent buggy state', '--allow-empty'],
+                           cwd='/testbed', capture_output=True,
+                           env={**os.environ, 'GIT_AUTHOR_NAME': 'eval', 'GIT_AUTHOR_EMAIL': 'eval@test',
+                                'GIT_COMMITTER_NAME': 'eval', 'GIT_COMMITTER_EMAIL': 'eval@test'})
+              r = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd='/testbed', capture_output=True, text=True)
+              pre_agent_ref = r.stdout.strip()
+              print(f'Pre-agent ref: {pre_agent_ref[:12]}', flush=True)
+
+              # Build test command from F2P test names
+              if f2p:
+                  test_names = ' or '.join(f2p)
+                  test_cmd = f'python -m pytest -xvs -k "{test_names}"'
+              else:
+                  test_cmd = 'python -m pytest -x'
+
+              # Run agent
+              prompt = f"""You are a software engineer fixing a bug in a Python project.
+
+              The repository is checked out at /testbed. There are failing tests that demonstrate the bug.
+
+              ## Problem
+              {problem}
+
+              ## Instructions
+              1. Read and understand the problem described above.
+              2. Find the relevant source code (do NOT modify test files).
+              3. Fix the bug so the failing tests pass.
+              4. Verify your fix by running: {test_cmd}
+
+              Do NOT modify any test files.
+              Focus on making the minimal change needed to fix the described issue."""
+
+              with open('/tmp/agent_prompt.txt', 'w') as f: f.write(prompt)
+
+              eval_model = os.environ.get('EVAL_MODEL_ID', 'claude-haiku-4-5')
+              print(f'Eval model: {eval_model}', flush=True)
+
+              print('=== AGENT START ===', flush=True)
+              with open('/tmp/agent.log', 'w') as logf:
+                  proc = subprocess.Popen(
+                      f'cat /tmp/agent_prompt.txt | claude --model {eval_model} --print '
+                      '--max-turns 30 '
+                      '--allowedTools "Bash(description:*),Read,Edit,Write" '
+                      '--allow-dangerously-skip-permissions',
+                      shell=True, cwd='/testbed',
+                      stdout=logf, stderr=subprocess.STDOUT
+                  )
+                  try:
+                      proc.wait(timeout=1800)
+                  except subprocess.TimeoutExpired:
+                      proc.kill()
+                      print('Agent timed out after 1800s', flush=True)
+              agent_output = open('/tmp/agent.log').read()
+              print(agent_output[-2000:], flush=True)
+              print('=== AGENT END ===', flush=True)
+
+              # Capture agent patch
+              run('git add -A', cwd='/testbed')
+              r = run(f'git diff --cached {pre_agent_ref}', cwd='/testbed')
+              agent_patch = r.stdout or ''
+              if not agent_patch.strip():
+                  r = run(f'git diff {pre_agent_ref}..HEAD', cwd='/testbed')
+                  agent_patch = r.stdout or ''
+              print(f'Agent patch: {len(agent_patch.splitlines())} lines', flush=True)
+
+              # Anti-reward-hacking: revert test file modifications
+              test_patterns = [r'(^|/)tests?/', r'test_.*\.py$', r'_test\.py$', r'conftest\.py$']
+              combined = re.compile('|'.join(test_patterns))
+              r = run('git diff --name-only', cwd='/testbed')
+              for f in r.stdout.strip().split('\n'):
+                  if f and combined.search(f):
+                      run(f'git checkout -- {f}', cwd='/testbed')
+              r = run('git ls-files --others --exclude-standard', cwd='/testbed')
+              for f in r.stdout.strip().split('\n'):
+                  if f and combined.search(f):
+                      try: os.remove(os.path.join('/testbed', f))
+                      except: pass
+
+              # Run tests
+              r = run(test_cmd, cwd='/testbed', timeout=300)
+              test_output = r.stdout + '\n' + r.stderr
+              with open('/tmp/test_output.log', 'w') as f: f.write(test_output)
+
+              # Parse results
+              results = {}
+              for line in test_output.split('\n'):
+                  m = re.match(r'(PASSED|FAILED)\s+(.+)', line)
+                  if m:
+                      results[m.group(2).strip()] = m.group(1).lower()
+                  m = re.match(r'(.+)\s+(PASSED|FAILED)', line)
+                  if m:
+                      results[m.group(1).strip()] = m.group(2).lower()
+
+              all_pass = True
+              for t in f2p:
+                  found = False
+                  for rname, rstatus in results.items():
+                      if t in rname and rstatus == 'passed':
+                          found = True
+                          break
+                  if not found:
+                      all_pass = False
+                      break
+
+              resolved = all_pass and len(f2p) > 0 and r.returncode == 0
+              reward = 1 if resolved else 0
+              eval_model_short = os.environ.get('EVAL_MODEL', 'haiku')
+
+              result = {
+                  'instance_id': instance_id,
+                  'repo': repo,
+                  'model': eval_model_short,
+                  'resolved': resolved,
+                  'reward': reward,
+                  'agent_patch': agent_patch,
+                  'tests_passed': sum(1 for v in results.values() if v == 'passed'),
+                  'tests_failed': sum(1 for v in results.values() if v == 'failed'),
+              }
+              with open('/tmp/eval_result.json', 'w') as f:
+                  json.dump(result, f, ensure_ascii=True)
+
+              print(f'EVAL_RESULT: {json.dumps(result)}', flush=True)
+
+              # Persist as job annotation
+              token = open('/var/run/secrets/kubernetes.io/serviceaccount/token').read().strip()
+              job_name = 'eval-swesmith-${MODEL}-${INSTANCE_SLUG}'
+              ns = '${NAMESPACE}'
+              body = json.dumps({"metadata": {"annotations": {"result": json.dumps(result, ensure_ascii=True)}}})
+              with open('/tmp/annotation_body.json', 'w') as f: f.write(body)
+              url = f'https://kubernetes.default.svc/apis/batch/v1/namespaces/{ns}/jobs/{job_name}'
+              r = run(
+                  f'curl -sk -X PATCH '
+                  f'-H "Authorization: Bearer {token}" '
+                  f'-H "Content-Type: application/merge-patch+json" '
+                  f'-d @/tmp/annotation_body.json '
+                  f'"{url}"',
+                  timeout=30
+              )
+              if r.returncode != 0:
+                  print(f'Annotation write failed: {r.stderr[:200]}', flush=True)
+              print('=== EVAL COMPLETE ===', flush=True)
+              EVALSCRIPT
+          env:
+            - name: EVAL_MODEL_ID
+              value: "${MODEL_ID}"
+            - name: EVAL_MODEL
+              value: "${MODEL}"
+            - name: CLAUDE_CODE_USE_VERTEX
+              value: "1"
+            - name: CLOUD_ML_REGION
+              value: "global"
+            - name: ANTHROPIC_VERTEX_PROJECT_ID
+              value: "itpc-gcp-ai-eng-claude"
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: "/var/secrets/gcp/key.json"
+          resources:
+            requests:
+              cpu: "1"
+              memory: 4Gi
+            limits:
+              cpu: "2"
+              memory: 8Gi
+          volumeMounts:
+            - name: input
+              mountPath: /input
+              readOnly: true
+            - name: gcp-creds
+              mountPath: /var/secrets/gcp
+              readOnly: true
+      volumes:
+        - name: input
+          configMap:
+            name: eval-swesmith-input-${MODEL}-${INSTANCE_SLUG}
+        - name: gcp-creds
+          secret:
+            secretName: vertex-credentials
