@@ -55,35 +55,35 @@ spec:
               def run(cmd, **kw):
                   return subprocess.run(cmd, shell=True, capture_output=True, text=True, **kw)
 
-              # Repo is pre-cloned at /testbed — fix permissions for git operations
-              run('git config --global --add safe.directory /testbed')
-              run('chmod -R u+w /testbed/.git', timeout=30)
+              # Repo is pre-cloned at /tmp/testbed — copy to writable location
+              run('cp -a /testbed /tmp/testbed', timeout=60)
+              run('git config --global --add safe.directory /tmp/testbed')
 
               # Introduce the bug (reverse-apply gold patch)
               with open('/tmp/gold.patch', 'w') as f: f.write(gold_patch)
-              r = run('git apply --reverse /tmp/gold.patch', cwd='/testbed')
+              r = run('git apply --reverse /tmp/gold.patch', cwd='/tmp/testbed')
               if r.returncode == 0:
                   print('Bug introduced via reverse-apply', flush=True)
               else:
-                  r = run('git apply --reverse --3way /tmp/gold.patch', cwd='/testbed')
+                  r = run('git apply --reverse --3way /tmp/gold.patch', cwd='/tmp/testbed')
                   if r.returncode == 0:
                       print('Bug introduced via reverse-apply --3way', flush=True)
                   else:
-                      r2 = run('git apply /tmp/gold.patch', cwd='/testbed')
+                      r2 = run('git apply /tmp/gold.patch', cwd='/tmp/testbed')
                       if r2.returncode == 0:
                           print('Bug already baked in, resetting...', flush=True)
-                          run('git checkout .', cwd='/testbed')
-                          run('git clean -fd', cwd='/testbed')
+                          run('git checkout .', cwd='/tmp/testbed')
+                          run('git clean -fd', cwd='/tmp/testbed')
                       else:
                           print(f'WARNING: Could not introduce bug: {r.stderr[:200]}', flush=True)
 
               # Save pre-agent state
-              subprocess.run(['git', 'add', '-A'], cwd='/testbed', capture_output=True)
+              subprocess.run(['git', 'add', '-A'], cwd='/tmp/testbed', capture_output=True)
               subprocess.run(['git', 'commit', '-m', 'pre-agent buggy state', '--allow-empty'],
-                           cwd='/testbed', capture_output=True,
+                           cwd='/tmp/testbed', capture_output=True,
                            env={**os.environ, 'GIT_AUTHOR_NAME': 'eval', 'GIT_AUTHOR_EMAIL': 'eval@test',
                                 'GIT_COMMITTER_NAME': 'eval', 'GIT_COMMITTER_EMAIL': 'eval@test'})
-              r = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd='/testbed', capture_output=True, text=True)
+              r = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd='/tmp/testbed', capture_output=True, text=True)
               pre_agent_ref = r.stdout.strip()
               print(f'Pre-agent ref: {pre_agent_ref[:12]}', flush=True)
 
@@ -97,7 +97,7 @@ spec:
               # Run agent
               prompt = f"""You are a software engineer fixing a bug in a Python project.
 
-              The repository is checked out at /testbed. There are failing tests that demonstrate the bug.
+              The repository is checked out at /tmp/testbed. There are failing tests that demonstrate the bug.
 
               ## Problem
               {problem}
@@ -123,7 +123,7 @@ spec:
                       '--max-turns 30 '
                       '--allowedTools "Bash(description:*),Read,Edit,Write" '
                       '--allow-dangerously-skip-permissions',
-                      shell=True, cwd='/testbed',
+                      shell=True, cwd='/tmp/testbed',
                       stdout=logf, stderr=subprocess.STDOUT
                   )
                   try:
@@ -136,29 +136,29 @@ spec:
               print('=== AGENT END ===', flush=True)
 
               # Capture agent patch
-              run('git add -A', cwd='/testbed')
-              r = run(f'git diff --cached {pre_agent_ref}', cwd='/testbed')
+              run('git add -A', cwd='/tmp/testbed')
+              r = run(f'git diff --cached {pre_agent_ref}', cwd='/tmp/testbed')
               agent_patch = r.stdout or ''
               if not agent_patch.strip():
-                  r = run(f'git diff {pre_agent_ref}..HEAD', cwd='/testbed')
+                  r = run(f'git diff {pre_agent_ref}..HEAD', cwd='/tmp/testbed')
                   agent_patch = r.stdout or ''
               print(f'Agent patch: {len(agent_patch.splitlines())} lines', flush=True)
 
               # Anti-reward-hacking: revert test file modifications
               test_patterns = [r'(^|/)tests?/', r'test_.*\.py$', r'_test\.py$', r'conftest\.py$']
               combined = re.compile('|'.join(test_patterns))
-              r = run('git diff --name-only', cwd='/testbed')
+              r = run('git diff --name-only', cwd='/tmp/testbed')
               for f in r.stdout.strip().split('\n'):
                   if f and combined.search(f):
-                      run(f'git checkout -- {f}', cwd='/testbed')
-              r = run('git ls-files --others --exclude-standard', cwd='/testbed')
+                      run(f'git checkout -- {f}', cwd='/tmp/testbed')
+              r = run('git ls-files --others --exclude-standard', cwd='/tmp/testbed')
               for f in r.stdout.strip().split('\n'):
                   if f and combined.search(f):
-                      try: os.remove(os.path.join('/testbed', f))
+                      try: os.remove(os.path.join('/tmp/testbed', f))
                       except: pass
 
               # Run tests
-              r = run(test_cmd, cwd='/testbed', timeout=300)
+              r = run(test_cmd, cwd='/tmp/testbed', timeout=300)
               test_output = r.stdout + '\n' + r.stderr
               with open('/tmp/test_output.log', 'w') as f: f.write(test_output)
 
