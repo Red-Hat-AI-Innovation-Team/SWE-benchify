@@ -55,9 +55,11 @@ spec:
               def run(cmd, **kw):
                   return subprocess.run(cmd, shell=True, capture_output=True, text=True, **kw)
 
-              # Repo is pre-cloned at /tmp/testbed — copy to writable location
-              run('cp -a /testbed /tmp/testbed', timeout=60)
+              # Copy repo to writable location, re-install package
+              run('cp -a /testbed /tmp/testbed', timeout=120)
               run('git config --global --add safe.directory /tmp/testbed')
+              # Re-install package from new location so import paths work
+              run('pip install -e /tmp/testbed 2>/dev/null || pip install -e "/tmp/testbed[dev]" 2>/dev/null || true', timeout=120)
 
               # Introduce the bug (reverse-apply gold patch)
               with open('/tmp/gold.patch', 'w') as f: f.write(gold_patch)
@@ -154,7 +156,7 @@ spec:
               r = run('git ls-files --others --exclude-standard', cwd='/tmp/testbed')
               for f in r.stdout.strip().split('\n'):
                   if f and combined.search(f):
-                      try: os.remove(os.path.join('/tmp/testbed', f))
+                      try: os.remove(os.path.join('/testbed', f))
                       except: pass
 
               # Run tests
