@@ -101,10 +101,27 @@ def launch_eval(instances, models, limit=0):
             os.unlink(tmp)
 
         launched += 1
-        if launched % 10 == 0:
-            log.info("Launched %d instances (%d jobs)", launched, launched * len(models))
+        log.info("Launched %d/%d: %s (%d jobs)", launched, min(limit, len(instances)) if limit else len(instances),
+                 iid[:40], launched * len(models))
 
-    log.info("Total: %d instances × %d models = %d jobs launched", launched, len(models), launched * len(models))
+        # Wait for this instance's jobs to complete before launching next
+        # (avoids Docker Hub rate limiting from parallel image pulls)
+        deadline = time.time() + 3600
+        while time.time() < deadline:
+            all_done = True
+            for model in models:
+                job_name = f"eval-swesmith-{model}-{job_slug}"
+                r = oc("get", "job", job_name, "-n", NAMESPACE, "--no-headers")
+                if r.returncode != 0:
+                    continue
+                if "Running" in r.stdout or ("Complete" not in r.stdout and "Failed" not in r.stdout):
+                    all_done = False
+                    break
+            if all_done:
+                break
+            time.sleep(30)
+
+    log.info("Total: %d instances × %d models = %d jobs launched (serial)", launched, len(models), launched * len(models))
     return launched
 
 
