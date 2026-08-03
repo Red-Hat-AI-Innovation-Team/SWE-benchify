@@ -1,0 +1,50 @@
+{
+  "judge_evasion": {
+    "swesmith": {
+      "mean": 0.04,
+      "std": 0.0163,
+      "n_per_run": 50,
+      "n_runs": 3,
+      "confidence_dist": {
+        "HIGH": 146,
+        "MEDIUM": 4
+      }
+    },
+    "swebenchify": {
+      "mean": 0.1267,
+      "std": 0.0471,
+      "n_per_run": 50,
+      "n_runs": 3,
+      "confidence_dist": {
+        "HIGH": 138,
+        "MEDIUM": 12
+      }
+    },
+    "real_python": {
+      "mean": 1.0,
+      "std": 0.0,
+      "n_per_run": 50,
+      "n_runs": 3,
+      "confidence_dist": {
+        "HIGH": 149,
+        "MEDIUM": 1
+      }
+    },
+    "real_go": {
+      "mean": 0.8333,
+      "std": 0.0249,
+      "n_per_run": 50,
+      "n_runs": 3,
+      "confidence_dist": {
+        "HIGH": 146,
+        "MEDIUM": 4
+      }
+    },
+    "comparison": {
+      "swebenchify_evasion": 0.1267,
+      "swesmith_evasion": 0.04,
+      "fishers_p": 0.010866,
+      "significant_at_005": "True"
+    }
+  }
+}
