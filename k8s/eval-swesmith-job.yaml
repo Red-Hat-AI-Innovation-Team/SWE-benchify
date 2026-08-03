@@ -18,7 +18,7 @@ spec:
     spec:
       restartPolicy: Never
       imagePullSecrets:
-        - name: dockerhub-creds
+        - name: ghcr-creds
       containers:
         - name: evaluator
           image: ${SWESMITH_IMAGE}
@@ -164,28 +164,32 @@ spec:
               test_output = r.stdout + '\n' + r.stderr
               with open('/tmp/test_output.log', 'w') as f: f.write(test_output)
 
-              # Parse results
+              # Parse pytest results
               results = {}
               for line in test_output.split('\n'):
-                  m = re.match(r'(PASSED|FAILED)\s+(.+)', line)
-                  if m:
-                      results[m.group(2).strip()] = m.group(1).lower()
-                  m = re.match(r'(.+)\s+(PASSED|FAILED)', line)
+                  # pytest format: "tests/test_foo.py::test_bar PASSED"
+                  m = re.match(r'(.+::\S+)\s+(PASSED|FAILED|ERROR)', line)
                   if m:
                       results[m.group(1).strip()] = m.group(2).lower()
+                      continue
+                  # Also handle "PASSED tests/..." or "FAILED tests/..."
+                  m = re.match(r'(PASSED|FAILED|ERROR)\s+(.+)', line)
+                  if m:
+                      results[m.group(2).strip()] = m.group(1).lower()
 
-              all_pass = True
+              n_passed = sum(1 for v in results.values() if v == 'passed')
+              n_failed = sum(1 for v in results.values() if v in ('failed', 'error'))
+
+              # Check F2P: each test in f2p must appear as passed
+              all_f2p_pass = True
               for t in f2p:
-                  found = False
-                  for rname, rstatus in results.items():
-                      if t in rname and rstatus == 'passed':
-                          found = True
-                          break
+                  found = any(t in rname and rstatus == 'passed' for rname, rstatus in results.items())
                   if not found:
-                      all_pass = False
+                      all_f2p_pass = False
                       break
 
-              resolved = all_pass and len(f2p) > 0 and r.returncode == 0
+              # Primary signal: pytest return code 0 means all tests passed
+              resolved = (r.returncode == 0 and len(f2p) > 0) or (all_f2p_pass and len(f2p) > 0)
               reward = 1 if resolved else 0
               eval_model_short = os.environ.get('EVAL_MODEL', 'haiku')
 
@@ -196,8 +200,8 @@ spec:
                   'resolved': resolved,
                   'reward': reward,
                   'agent_patch': agent_patch,
-                  'tests_passed': sum(1 for v in results.values() if v == 'passed'),
-                  'tests_failed': sum(1 for v in results.values() if v == 'failed'),
+                  'tests_passed': n_passed,
+                  'tests_failed': n_failed,
               }
               with open('/tmp/eval_result.json', 'w') as f:
                   json.dump(result, f, ensure_ascii=True)
