@@ -157,9 +157,14 @@ spec:
               # Apply agent changes from /tmp/testbed to /testbed
               run('cp -a /tmp/testbed/* /testbed/ 2>/dev/null || true', timeout=30)
               run('cp -a /tmp/testbed/.* /testbed/ 2>/dev/null || true', timeout=30)
+              # Add --no-header and disable color for clean parsing
+              test_cmd += ' --no-header -p no:cacheprovider'
               print(f'Test command: {test_cmd}', flush=True)
-              r = run(test_cmd, cwd='/testbed', timeout=300)
+              env_clean = {**os.environ, 'NO_COLOR': '1', 'TERM': 'dumb'}
+              r = subprocess.run(test_cmd, shell=True, capture_output=True, text=True, cwd='/testbed', timeout=300, env=env_clean)
               test_output = (r.stdout or '') + '\n' + (r.stderr or '')
+              # Strip any remaining ANSI escape codes
+              test_output = re.sub(r'\x1b\[[0-9;]*m', '', test_output)
               print(f'Test exit code: {r.returncode}', flush=True)
               print(f'Test output (last 500): {test_output[-500:]}', flush=True)
               with open('/tmp/test_output.log', 'w') as f: f.write(test_output)
