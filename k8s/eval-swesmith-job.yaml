@@ -74,12 +74,12 @@ spec:
               pre_agent_ref = r.stdout.strip()
               print(f'Pre-agent ref: {pre_agent_ref[:12]}', flush=True)
 
-              # Build test command from F2P test names
-              if f2p:
+              # Build test command — use -k filter only for small F2P sets
+              if f2p and len(f2p) <= 10:
                   test_names = ' or '.join(f2p)
                   test_cmd = f'python3 -m pytest -xvs -k "{test_names}"'
               else:
-                  test_cmd = 'python3 -m pytest -x'
+                  test_cmd = 'python3 -m pytest -x --tb=short'
 
               # Run agent
               prompt = f"""You are a software engineer fixing a bug in a Python project.
@@ -173,8 +173,8 @@ spec:
                       all_f2p_pass = False
                       break
 
-              # Primary signal: pytest return code 0 means all tests passed
-              resolved = (r.returncode == 0 and len(f2p) > 0) or (all_f2p_pass and len(f2p) > 0)
+              # pytest return code 0 = all tests passed
+              resolved = r.returncode == 0 and len(f2p) > 0
               reward = 1 if resolved else 0
               eval_model_short = os.environ.get('EVAL_MODEL', 'haiku')
 
