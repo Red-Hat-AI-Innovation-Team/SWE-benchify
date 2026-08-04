@@ -61,8 +61,17 @@ spec:
               # Re-install package from new location so import paths work
               run('pip install -e /tmp/testbed 2>/dev/null || pip install -e "/tmp/testbed[dev]" 2>/dev/null || true', timeout=120)
 
-              # SWE-Smith images already have the bug baked in — no need to introduce it
+              # SWE-Smith images already have the bug baked in
               print('Bug already present in SWE-Smith image', flush=True)
+
+              # Activate conda env if present (SWE-Smith uses conda)
+              conda_env = '/opt/miniconda3/envs/testbed'
+              if os.path.isdir(conda_env):
+                  os.environ['PATH'] = f'{conda_env}/bin:' + os.environ.get('PATH', '')
+                  os.environ['CONDA_PREFIX'] = conda_env
+                  print(f'Activated conda env: {conda_env}', flush=True)
+              # Install pytest if missing
+              run('pip install pytest 2>/dev/null || true', timeout=60)
 
               # Save pre-agent state
               subprocess.run(['git', 'add', '-A'], cwd='/tmp/testbed', capture_output=True)
