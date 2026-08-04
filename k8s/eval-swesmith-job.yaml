@@ -144,9 +144,15 @@ spec:
                       try: os.remove(os.path.join('/testbed', f))
                       except: pass
 
-              # Run tests
-              r = run(test_cmd, cwd='/tmp/testbed', timeout=300)
-              test_output = r.stdout + '\n' + r.stderr
+              # Run tests — use /testbed for Python imports, /tmp/testbed for git state
+              # Apply agent changes from /tmp/testbed to /testbed
+              run('cp -a /tmp/testbed/* /testbed/ 2>/dev/null || true', timeout=30)
+              run('cp -a /tmp/testbed/.* /testbed/ 2>/dev/null || true', timeout=30)
+              print(f'Test command: {test_cmd}', flush=True)
+              r = run(test_cmd, cwd='/testbed', timeout=300)
+              test_output = (r.stdout or '') + '\n' + (r.stderr or '')
+              print(f'Test exit code: {r.returncode}', flush=True)
+              print(f'Test output (last 500): {test_output[-500:]}', flush=True)
               with open('/tmp/test_output.log', 'w') as f: f.write(test_output)
 
               # Parse pytest results
