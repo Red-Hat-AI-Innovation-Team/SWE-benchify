@@ -61,23 +61,8 @@ spec:
               # Re-install package from new location so import paths work
               run('pip install -e /tmp/testbed 2>/dev/null || pip install -e "/tmp/testbed[dev]" 2>/dev/null || true', timeout=120)
 
-              # Introduce the bug (reverse-apply gold patch)
-              with open('/tmp/gold.patch', 'w') as f: f.write(gold_patch)
-              r = run('git apply --reverse /tmp/gold.patch', cwd='/tmp/testbed')
-              if r.returncode == 0:
-                  print('Bug introduced via reverse-apply', flush=True)
-              else:
-                  r = run('git apply --reverse --3way /tmp/gold.patch', cwd='/tmp/testbed')
-                  if r.returncode == 0:
-                      print('Bug introduced via reverse-apply --3way', flush=True)
-                  else:
-                      r2 = run('git apply /tmp/gold.patch', cwd='/tmp/testbed')
-                      if r2.returncode == 0:
-                          print('Bug already baked in, resetting...', flush=True)
-                          run('git checkout .', cwd='/tmp/testbed')
-                          run('git clean -fd', cwd='/tmp/testbed')
-                      else:
-                          print(f'WARNING: Could not introduce bug: {r.stderr[:200]}', flush=True)
+              # SWE-Smith images already have the bug baked in — no need to introduce it
+              print('Bug already present in SWE-Smith image', flush=True)
 
               # Save pre-agent state
               subprocess.run(['git', 'add', '-A'], cwd='/tmp/testbed', capture_output=True)
@@ -92,9 +77,9 @@ spec:
               # Build test command from F2P test names
               if f2p:
                   test_names = ' or '.join(f2p)
-                  test_cmd = f'python -m pytest -xvs -k "{test_names}"'
+                  test_cmd = f'python3 -m pytest -xvs -k "{test_names}"'
               else:
-                  test_cmd = 'python -m pytest -x'
+                  test_cmd = 'python3 -m pytest -x'
 
               # Run agent
               prompt = f"""You are a software engineer fixing a bug in a Python project.
