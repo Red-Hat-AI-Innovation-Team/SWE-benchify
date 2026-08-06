@@ -8,7 +8,7 @@ metadata:
     model: ${MODEL}
 spec:
   backoffLimit: 0
-  activeDeadlineSeconds: 3600
+  activeDeadlineSeconds: 5400
   template:
     metadata:
       labels:
@@ -61,15 +61,15 @@ spec:
                   seen.setdefault(top, [])
                   if pkg not in seen[top]: seen[top].append(pkg)
               if not seen:
-                  test_cmd = 'go test -v -count=1 -timeout 300s ./...'
+                  test_cmd = 'go test -v -count=1 -timeout 900s ./...'
               else:
                   cmds = []
                   for root, pkgs in seen.items():
                       ps = ' '.join(pkgs)
                       if root == '.':
-                          cmds.append(f'go test -v -count=1 -timeout 300s {ps}')
+                          cmds.append(f'go test -v -count=1 -timeout 900s {ps}')
                       else:
-                          cmds.append(f'(cd {shlex.quote(root)} && go test -v -count=1 -timeout 300s {ps})')
+                          cmds.append(f'(cd {shlex.quote(root)} && go test -v -count=1 -timeout 900s {ps})')
                   test_cmd = ' && '.join(cmds)
 
               print(f'Instance: {instance_id}', flush=True)
@@ -161,14 +161,14 @@ spec:
               with open('/tmp/agent.log', 'w') as logf:
                   proc = subprocess.Popen(
                       f'cat /tmp/agent_prompt.txt | claude --model {eval_model} --print '
-                      '--max-turns 30 '
+                      '--max-turns 60 '
                       '--allowedTools "Bash(description:*),Read,Edit,Write" '
                       '--allow-dangerously-skip-permissions',
                       shell=True, cwd='/tmp/testbed',
                       stdout=logf, stderr=subprocess.STDOUT
                   )
                   try:
-                      proc.wait(timeout=1800)
+                      proc.wait(timeout=3600)
                   except subprocess.TimeoutExpired:
                       proc.kill()
                       print('Agent timed out after 1800s', flush=True)
@@ -210,7 +210,7 @@ spec:
                   run('git apply /tmp/test.patch', cwd='/tmp/testbed')
 
               # Run tests
-              r = run(test_cmd, cwd='/tmp/testbed', timeout=300)
+              r = run(test_cmd, cwd='/tmp/testbed', timeout=900)
               test_output = r.stdout + '\n' + r.stderr
               with open('/tmp/test_output.log', 'w') as f: f.write(test_output)
 

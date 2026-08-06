@@ -108,8 +108,20 @@ base_commit = "{inst.get('merge_commit') or inst.get('base_commit', '')}"
     # environment/Dockerfile
     env_dir = os.path.join(task_dir, "environment")
     os.makedirs(env_dir, exist_ok=True)
+    base_commit = inst.get("merge_commit") or inst.get("base_commit", "")
     with open(os.path.join(env_dir, "Dockerfile"), "w") as f:
         f.write(f"""FROM {image_name}
+
+RUN apt-get update -qq && apt-get install -y --no-install-recommends git curl ca-certificates && rm -rf /var/lib/apt/lists/* || true
+
+# Clone repo at base commit
+RUN (git clone https://github.com/{repo}.git /testbed && \\
+    cd /testbed && (git checkout {base_commit} || \\
+    (git fetch origin {base_commit} && \\
+     git checkout {base_commit}))) || \\
+    (rm -rf /testbed && mkdir -p /testbed && cd /testbed && git init && \\
+     curl -sL https://github.com/{repo}/archive/{base_commit}.tar.gz | \\
+     tar xz --strip-components=1 && git add -A && git commit -q -m base)
 
 # Introduce the bug (reverse-apply gold patch)
 COPY oracle.patch /tmp/oracle.patch
@@ -119,62 +131,48 @@ RUN cd /testbed && git apply --reverse /tmp/oracle.patch || \\
 RUN cd /testbed && git add -A && \\
     git -c user.name=eval -c user.email=eval@test commit -m "buggy state" --allow-empty
 
+# Ensure /logs structure exists for Harbor verifier
+RUN mkdir -p /logs/verifier /logs/agent /logs/artifacts
+
 WORKDIR /testbed
 """)
     # Copy oracle.patch into environment dir for the Dockerfile COPY
     with open(os.path.join(env_dir, "oracle.patch"), "w") as f:
         f.write(patch)
 
-    # tests/test.sh
+    # tests/config.json
     tests_dir = os.path.join(task_dir, "tests")
     os.makedirs(tests_dir, exist_ok=True)
 
+    config = {
+        "instance_id": iid,
+        "repo": repo,
+        "FAIL_TO_PASS": f2p,
+        "PASS_TO_PASS": p2p,
+        "repo_language": "go",
+    }
+    with open(os.path.join(tests_dir, "config.json"), "w") as f:
+        json.dump(config, f, indent=2)
+        f.write("\n")
+
+    # tests/test.patch
+    test_patch = inst.get("test_patch", "")
+    with open(os.path.join(tests_dir, "test.patch"), "w") as f:
+        f.write(test_patch)
+
+    # tests/test.sh -- use Harbor Go template
     pkg_dir = os.path.dirname(bug_file) or "."
     test_cmd = f"CGO_ENABLED=0 go test -v -count=1 -timeout 300s ./{pkg_dir}"
 
-    with open(os.path.join(tests_dir, "test.sh"), "w") as f:
-        f.write(f"""#!/bin/bash
-set -euo pipefail
+    templates_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                 "src", "swebenchify", "harbor_templates")
+    template_path = os.path.join(templates_dir, "test_go.sh.template")
+    from string import Template
+    content = Template(open(template_path).read()).safe_substitute(test_command=test_cmd)
 
-cd /testbed
-
-# Revert any test file modifications (anti-reward-hacking)
-git diff --name-only | grep '_test\\.go$' | xargs -r git checkout --
-
-# Run tests
-echo "Running: {test_cmd}"
-{test_cmd} 2>&1 | tee /tmp/test_output.log
-TEST_EXIT=$?
-
-# Parse results
-python3 << 'PYEOF'
-import re, json, sys
-
-f2p = {json.dumps(f2p)}
-output = open("/tmp/test_output.log").read()
-
-results = {{}}
-for line in output.split("\\n"):
-    m = re.match(r"\\s*--- (PASS|FAIL): (.+?)\\s+\\(", line)
-    if m:
-        results[m.group(2)] = m.group(1).lower()
-
-all_pass = True
-for t in f2p:
-    if results.get(t) != "pass":
-        all_pass = False
-        break
-
-if all_pass and len(f2p) > 0:
-    print("RESOLVED: true")
-    sys.exit(0)
-else:
-    print("RESOLVED: false")
-    print(f"F2P: {{f2p}}")
-    print(f"Results: {{results}}")
-    sys.exit(1)
-PYEOF
-""")
+    test_sh_path = os.path.join(tests_dir, "test.sh")
+    with open(test_sh_path, "w") as f:
+        f.write(content)
     os.chmod(os.path.join(tests_dir, "test.sh"), 0o755)
 
     # solution/oracle.patch
