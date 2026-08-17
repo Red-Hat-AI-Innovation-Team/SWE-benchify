@@ -1,5 +1,7 @@
 $base_image_line
 
+ENTRYPOINT []
+
 LABEL org.opencontainers.image.source=https://github.com/Red-Hat-AI-Innovation-Team/SWE-benchify
 
 RUN apt-get update -qq && apt-get install -y --no-install-recommends git curl ca-certificates && rm -rf /var/lib/apt/lists/*

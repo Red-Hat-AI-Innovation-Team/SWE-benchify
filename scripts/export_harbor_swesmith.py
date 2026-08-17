@@ -147,6 +147,8 @@ Focus on making the minimal change needed to fix the described issue.
     with open(os.path.join(task_dir, "environment", "Dockerfile"), "w") as f:
         f.write(f"""FROM {image}
 
+ENTRYPOINT []
+
 # Ensure /logs structure exists for Harbor verifier
 RUN mkdir -p /logs/verifier /logs/agent /logs/artifacts
 
@@ -182,15 +184,7 @@ WORKDIR /testbed
         content = Template(template_path.read_text()).safe_substitute(
             test_command=test_command,
         )
-        # SWE-Smith has no test patch — skip the apply step (empty file fails git apply)
-        content = content.replace(
-            'git apply --3way /tests/test.patch 2>&1 || git apply /tests/test.patch 2>&1 || {\n'
-            '    echo "TEST_PATCH_APPLY_FAILED"\n'
-            '    echo 0 > /logs/verifier/reward.txt\n'
-            '    exit 0\n'
-            '}',
-            '# No test patch for SWE-Smith (tests already in image)',
-        )
+        # Empty test.patch is handled natively by the template (if [ -s ... ] guard)
         # For SWE-Smith Python tasks, inject conda activation before the test command
         if lang == "python":
             conda_block = """
