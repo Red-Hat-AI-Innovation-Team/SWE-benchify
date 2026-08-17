@@ -1,0 +1,109 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: oracle-${INSTANCE_SLUG}
+  labels:
+    app: swebenchify
+    component: oracle-validation
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app: swebenchify
+        component: oracle-validation
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: oracle
+          image: ${IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -eo pipefail
+              export HOME=/tmp GOPATH=/tmp/go GOMODCACHE=/tmp/go/mod CGO_ENABLED=0
+              export GOCACHE=/tmp/oracle-gocache
+              mkdir -p "$GOCACHE"
+
+              echo "=== Oracle validation: ${INSTANCE_SLUG} ==="
+
+              # Copy /testbed to writable location (OpenShift runs as random non-root UID)
+              cp -a /testbed /tmp/testbed
+              cd /tmp/testbed
+              git config --global --add safe.directory /tmp/testbed
+
+              # Ensure git repo is initialized
+              git rev-parse --git-dir > /dev/null 2>&1 || (git init && git add -A && git commit -q -m base)
+
+              # --- Phase 1: Introduce the bug ---
+              git apply --reverse /oracle/oracle.patch 2>/dev/null || \
+                git apply --reverse --3way /oracle/oracle.patch 2>/dev/null || \
+                echo "WARNING: could not introduce bug"
+              git add -A
+              git -c user.name=eval -c user.email=eval@test commit -m "buggy state" --allow-empty 2>/dev/null || true
+
+              # --- Phase 2: Apply oracle fix ---
+              git apply --3way /oracle/oracle.patch 2>/dev/null || \
+                git apply /oracle/oracle.patch 2>/dev/null || \
+                { echo "ORACLE_APPLY_FAILED"; echo '{"reward":0,"error":"oracle_apply_failed"}' > /tmp/result.json; exit 0; }
+              git add -A
+              git -c user.name=eval -c user.email=eval@test commit -m "oracle fix" --allow-empty 2>/dev/null || true
+
+              # --- Phase 3: Run test.sh ---
+              mkdir -p /tmp/logs/verifier /tmp/logs/agent /tmp/logs/artifacts
+              # Copy and adapt test.sh for OpenShift (non-root UID)
+              sed 's|cd /testbed|cd /tmp/testbed|g; s|safe.directory /testbed|safe.directory /tmp/testbed|g; s|/logs/|/tmp/logs/|g' \
+                /tests/test.sh > /tmp/run_test.sh
+              chmod +x /tmp/run_test.sh
+              /tmp/run_test.sh 2>&1 | tee /tmp/test_output.log || true
+
+              # --- Phase 4: Read reward and report ---
+              REWARD=0
+              if [ -f /tmp/logs/verifier/reward.txt ]; then
+                REWARD=$(cat /tmp/logs/verifier/reward.txt | tr -d '[:space:]')
+              fi
+              echo "REWARD: $REWARD"
+
+              REPORT="{}"
+              if [ -f /tmp/logs/verifier/report.json ]; then
+                REPORT=$(cat /tmp/logs/verifier/report.json)
+              fi
+
+              RESULT="{\"instance_id\":\"${INSTANCE_SLUG}\",\"reward\":$REWARD,\"report\":$REPORT}"
+              echo "ORACLE_RESULT: $RESULT"
+
+              # Persist as job annotation
+              TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+              ESCAPED=$(echo "$RESULT" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read().strip()))")
+              curl -sk -X PATCH \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Content-Type: application/merge-patch+json" \
+                -d "{\"metadata\":{\"annotations\":{\"result\":$ESCAPED}}}" \
+                "https://kubernetes.default.svc/apis/batch/v1/namespaces/${NAMESPACE}/jobs/oracle-${INSTANCE_SLUG}" \
+                > /dev/null 2>&1 || echo "Annotation write failed"
+
+              echo "=== ORACLE VALIDATION COMPLETE ==="
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: oracle-patch
+              mountPath: /oracle
+              readOnly: true
+            - name: tests
+              mountPath: /tests
+              readOnly: true
+      volumes:
+        - name: oracle-patch
+          configMap:
+            name: oracle-patch-${INSTANCE_SLUG}
+        - name: tests
+          configMap:
+            name: oracle-tests-${INSTANCE_SLUG}
+            defaultMode: 0755
