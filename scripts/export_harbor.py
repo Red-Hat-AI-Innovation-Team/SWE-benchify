@@ -80,7 +80,7 @@ tags = ["swebenchify", "go", "{bug_category.lower().replace(' ', '-') if bug_cat
 visibility = "public"
 
 [metadata.narrative]
-description = \"\"\"{problem[:500].replace(chr(34), '')}\"\"\"
+description = \"\"\"{problem[:500].replace(chr(92), '').replace(chr(34), '')}\"\"\"
 
 [metadata.oracle_scope]
 sloc = {len(patch.splitlines())}
