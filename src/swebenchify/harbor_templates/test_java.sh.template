@@ -34,11 +34,13 @@ for f in result.stdout.strip().split('\\n'):
 " 2>/dev/null || true
 
 # Apply test patch (adds/modifies test files that catch the bug)
-git apply --3way /tests/test.patch 2>&1 || git apply /tests/test.patch 2>&1 || {
-    echo "TEST_PATCH_APPLY_FAILED"
-    echo 0 > /logs/verifier/reward.txt
-    exit 0
-}
+if [ -s /tests/test.patch ]; then
+    git apply --3way /tests/test.patch 2>&1 || git apply /tests/test.patch 2>&1 || {
+        echo "TEST_PATCH_APPLY_FAILED"
+        echo 0 > /logs/verifier/reward.txt
+        exit 0
+    }
+fi
 
 # --- Phase 2: Run tests ---
 # Capture test output for grading

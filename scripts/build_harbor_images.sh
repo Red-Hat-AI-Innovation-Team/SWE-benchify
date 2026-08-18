@@ -56,6 +56,8 @@ while IFS='|' read -r repo commit; do
   docker build --platform linux/amd64 -t "$image_tag" -f - . << DOCKERFILE
 FROM ${BASE_IMAGE}
 
+ENTRYPOINT []
+
 # Clone repo at the specific commit
 RUN git clone --depth=50 https://github.com/${repo}.git /testbed && \\
     cd /testbed && \\

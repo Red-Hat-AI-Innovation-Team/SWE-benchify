@@ -80,7 +80,7 @@ tags = ["swebenchify", "go", "{bug_category.lower().replace(' ', '-') if bug_cat
 visibility = "public"
 
 [metadata.narrative]
-description = \"\"\"{problem[:500].replace(chr(34), '')}\"\"\"
+description = \"\"\"{problem[:500].replace(chr(92), '').replace(chr(34), '')}\"\"\"
 
 [metadata.oracle_scope]
 sloc = {len(patch.splitlines())}
@@ -108,20 +108,16 @@ base_commit = "{inst.get('merge_commit') or inst.get('base_commit', '')}"
     # environment/Dockerfile
     env_dir = os.path.join(task_dir, "environment")
     os.makedirs(env_dir, exist_ok=True)
-    base_commit = inst.get("merge_commit") or inst.get("base_commit", "")
     with open(os.path.join(env_dir, "Dockerfile"), "w") as f:
         f.write(f"""FROM {image_name}
 
+ENTRYPOINT []
+
 RUN apt-get update -qq && apt-get install -y --no-install-recommends git curl ca-certificates && rm -rf /var/lib/apt/lists/* || true
 
-# Clone repo at base commit
-RUN (git clone https://github.com/{repo}.git /testbed && \\
-    cd /testbed && (git checkout {base_commit} || \\
-    (git fetch origin {base_commit} && \\
-     git checkout {base_commit}))) || \\
-    (rm -rf /testbed && mkdir -p /testbed && cd /testbed && git init && \\
-     curl -sL https://github.com/{repo}/archive/{base_commit}.tar.gz | \\
-     tar xz --strip-components=1 && git add -A && git commit -q -m base)
+# Base image already has /testbed with the repo; ensure git config
+RUN git config --global --add safe.directory /testbed && \\
+    cd /testbed && (git rev-parse --git-dir > /dev/null 2>&1 || (git init && git add -A && git commit -q -m base))
 
 # Introduce the bug (reverse-apply gold patch)
 COPY oracle.patch /tmp/oracle.patch
@@ -175,11 +171,23 @@ WORKDIR /testbed
         f.write(content)
     os.chmod(os.path.join(tests_dir, "test.sh"), 0o755)
 
-    # solution/oracle.patch
+    # solution/oracle.patch + solve.sh
     sol_dir = os.path.join(task_dir, "solution")
     os.makedirs(sol_dir, exist_ok=True)
     with open(os.path.join(sol_dir, "oracle.patch"), "w") as f:
         f.write(patch)
+
+    solve_sh_path = os.path.join(sol_dir, "solve.sh")
+    with open(solve_sh_path, "w") as f:
+        f.write("""#!/bin/bash
+set -euo pipefail
+cd /testbed
+git config --global --add safe.directory /testbed
+git apply --3way /solution/oracle.patch || git apply /solution/oracle.patch
+git add -A
+git commit -m "Apply solution patch" --allow-empty 2>/dev/null || true
+""")
+    os.chmod(solve_sh_path, 0o755)
 
     return task_name
 
